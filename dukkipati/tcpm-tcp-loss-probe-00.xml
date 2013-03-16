@@ -1,0 +1,901 @@
+<?xml version="1.0" encoding="US-ASCII"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+<!--
+Caution: this document is visible to any non-Googlers who have the URL.
+
+
+To format this document:
+Makefile in g4 TLPid/
+
+
+TODO:
+Write the rest of this
+
+
+Look here for a style guide and other supporting notes.
+
+
+-->
+<?rfc toc="yes"?>
+<?rfc compact="yes"?>
+<?rfc subcompact="yes"?>
+<?rfc tocdepth="6"?>
+<?rfc symrefs="yes"?>
+<rfc ipr="trust200902" category="exp" docName="draft-dukkipati-tcpm-tcp-loss-probe-00.txt">
+<front>
+<title abbrev="TCP Loss Probe">
+
+TCP Loss Probe (TLP): An Algorithm for Fast Recovery of Tail Losses
+</title>
+
+
+<author fullname="Nandita Dukkipati" initials="N." surname="Dukkipati">
+ <organization>Google, Inc</organization>
+ <address>
+ <postal>
+   <street>1600 Amphitheater Parkway</street>
+   <city>Mountain View</city> <code>93117</code>  <region>California</region> <country>USA</country>
+ </postal>
+ <email> nanditad@google.com </email>
+ </address>
+</author>
+
+
+<author fullname="Neal Cardwell" initials="N." surname="Cardwell">
+ <organization>Google, Inc</organization>
+ <address>
+ <postal>
+   <street>76 Ninth Avenue</street>
+   <city>New York</city> <code>10011</code>  <region>NY</region> <country>USA</country>
+ </postal>
+ <email> ncardwell@google.com </email>
+ </address>
+</author>
+
+
+<author fullname="Yuchung Cheng" initials="Y." surname="Cheng">
+ <organization>Google, Inc</organization>
+ <address>
+ <postal>
+   <street>1600 Amphitheater Parkway</street>
+   <city>Mountain View</city> <code>93117</code>  <region>California</region> <country>USA</country>
+ </postal>
+ <email> ycheng@google.com </email>
+ </address>
+</author>
+
+
+<author fullname="Matt Mathis" initials="M." surname="Mathis">
+ <organization>Google, Inc</organization>
+ <address>
+ <postal>
+   <street>1600 Amphitheater Parkway</street>
+   <city>Mountain View</city> <code>93117</code>  <region>California</region> <country>USA</country>
+ </postal>
+ <email> mattmathis@google.com </email>
+ </address>
+</author>
+
+
+<date month="July" day="09" year="2012"/>
+<area> Transport Area </area>
+<workgroup> TCP Maintenance Working Group </workgroup>
+
+
+<abstract>
+<t>
+Retransmission timeouts are detrimental to application latency, especially for short transfers such as Web transactions where timeouts can often take longer than all of the rest of a transaction.   The primary cause of retransmission timeouts are lost segments at the tail of transactions. This document describes an experimental algorithm for TCP to quickly recover lost segments at the end of transactions or when an entire window of data or acknowledgments are lost.  TCP Loss Probe (TLP) is a sender-only algorithm that allows the transport to recover tail losses through fast recovery as opposed to lengthy retransmission timeouts. If a connection is not receiving any acknowledgments for a certain period of time, TLP transmits the last unacknowledged segment (loss probe). In the event of a tail loss in the original transmissions, the acknowledgment from the loss probe triggers SACK/FACK based fast recovery. TLP effectively avoids long timeouts and thereby improves TCP performance.
+</t>
+
+
+</abstract>
+</front>
+<middle>
+
+<section title="Introduction">
+<!-- Introduction outline -->
+<!-- 1) Problem: timeouts can be long and detrimental for latency. 
+       This document addresses the issue of timeouts. ->
+<!-- 2) TCP has two methods to deal with losses. ->
+<!-- 3) Reasons why timeouts occur: tail loss, spurious timeouts ->
+<!-- 4) F-RTO addresses spurious timeouts. This doc. addresses tail losses. ->
+<!-- 5) Retransmission and timeout statistics. ->
+<!-- 6) TLP: what problem with timeouts does it solve and how. -->
+<!-- 7) Document layout. -->
+
+
+
+
+<t>
+Retransmission timeouts are detrimental to application latency, especially for short transfers such as Web transactions where timeouts can often take longer than all of the rest of a transaction. This document describes an experimental algorithm, TCP Loss Probe (TLP), to invoke fast recovery for losses that would otherwise be only recoverable through timeouts.
+</t>
+
+
+<t>
+The Transmission Control Protocol (TCP) has two methods for recovering lost segments. First, the fast retransmit algorithm relies on incoming duplicate acknowledgments (ACKs), which indicate that the receiver is missing some data. After a required number of duplicate ACKs have arrived at the sender, it retransmits the first unacknowledged segment and continues with a loss recovery algorithm such as the SACK-based loss recovery <xref target="RFC3517" />. If the fast retransmit algorithm fails for any reason, TCP uses a retransmission timeout as the last resort mechanism to recover lost segments.  If an ACK for a given segment is not received in a certain amount of time called retransmission timeout (RTO), the segment is resent <xref target="RFC6298" />.  </t>
+
+
+<t>
+Timeouts can occur in a number of situations, such as the following:
+</t>
+<t>
+(1) Drop tail at the end of transactions. Example: consider a transfer of five segments sent on a connection that has a congestion window of ten. Any degree of loss in the tail, such as segments four and five, will only be recovered via a timeout.
+</t>
+<t>
+(2) Mid-transaction loss of an entire window of data or ACKs.  Unlike (1) there is more data waiting to be sent. Example: consider a transfer of four segments to be sent on a connection that has a congestion window of two. If the sender transmits two segments and both are lost then the loss will only be recovered via a timeout.
+</t>
+<t>
+(3) Insufficient number of duplicate ACKs to trigger fast recovery at sender. The early retransmit mechanism <xref target="RFC5827" /> addresses this problem in certain special circumstances, by reducing the number of duplicate ACKs required to trigger a fast retransmission.
+</t>
+<t>
+(4) An unexpectedly long round-trip time (RTT), such that the ACKs arrive after the RTO timer expires. The F-RTO algorithm <xref target='RFC5682' /> is designed to detect such spurious retransmission timeouts and at least partially undo the consequences of such events.
+</t>
+
+
+<t>
+Measurements on Google Web servers show that approximately 70% of retransmissions for Web transfers are sent after the RTO timer expires, while only 30% are handled by fast recovery. Even on servers exclusively serving YouTube videos, RTO based retransmissions account for about 46% of the retransmissions.  If the losses are detectable from the ACK stream (through duplicate ACKs or SACK blocks) then early retransmit, fast recovery and proportional rate reduction are effective in avoiding timeouts <xref target='IMC11PRR' />. Timeout retransmissions that occur in recovery and disorder state (a state indicating that a connection has received some duplicate ACKs), account for just 4% of the timeout episodes. On the other hand 96% of the timeout episodes occur without any preceding duplicate ACKs or other indication of losses at the sender <xref target='IMC11PRR' />.  Early retransmit and fast recovery have no hope of repairing losses without these indications. Efficiently addressing situations that would cause timeouts without any prior indication of losses is a significant opportunity for additional improvements to loss recovery.
+ 
+</t>
+
+
+<t>
+To get a sense of just how long the RTOs are in relation to connection RTTs, following is the distribution of RTO/RTT values on Google Web servers. [percentile, RTO/RTT]: [50th percentile, 4.3]; [75th percentile, 11.3]; [90th percentile, 28.9]; [95th percentile, 53.9]; [99th percentile, 214]. Such large RTOs make a huge contribution to the long tail on the latency statistics of short flows. Note that simply reducing the length of RTO does not address the latency problem for two reasons: first, it increases the chances of spurious retransmissions. Second and more importantly, an RTO reduces TCP's congestion window to one and forces a slow start. Recovery of losses without relying primarily on the RTO mechanism is beneficial for short TCP transfers. 
+</t>
+
+
+<t>
+The question we address in this document is: Can a TCP sender recover tail losses of transactions through fast recovery and thereby avoid lengthy retransmission timeouts? We specify an algorithm, TCP Loss Probe (TLP), which sends probe segments to trigger duplicate ACKs with the intent of invoking fast recovery more quickly than an RTO at the end of a transaction.  TLP is applicable only for connections in Open state, wherein a sender is receiving in-sequence ACKs and has not detected any lost segments. TLP can be implemented by modifying only the TCP sender, and does not require any TCP options or changes to the receiver for its operation.  For convenience, this document mostly refers to TCP, but the algorithms and other discussion are valid for Stream Control Transmission Protocol (SCTP) as well.
+</t>
+
+
+<t>
+This document is organized as follows. Section 2 describes the basic Loss Probe algorithm. Section 3 outlines an algorithm to detect the cases when TLP plugs a hole in the sender. The algorithm makes the sender aware that a loss had occurred so it performs the appropriate congestion window reduction. Section 4 discusses the interaction of TLP with early retransmit. Section 5 discusses the experimental results with TLP on Google Web servers. Section 6 discusses related work, and Section 7 discusses the security considerations.
+</t>
+<section title="Terminology">
+
+
+<t>
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in <xref target='RFC2119' />.
+</t>
+</section>
+</section>
+<section title="Loss probe algorithm">
+
+
+<t>
+The Loss probe algorithm is designed for a sender to quickly detect tail losses without waiting for an RTO. We will henceforth use tail loss to generally refer to either drops at the tail end of transactions or a loss of an entire window of data/ACKs. TLP works for senders with SACK enabled and in Open state, i.e. the sender has so far received in-sequence ACKs with no SACK blocks.  The risk of a sender incurring a timeout is high when the sender has not received any ACKs for a certain portion of time but is unable to transmit any further data either because it is application limited (out of new data to send), receiver window (rwnd) limited, or congestion window (cwnd) limited. For these circumstances, the basic idea of TLP is to transmit probe segments for the specific purpose of eliciting additional ACKs from the receiver.  The initial idea was to send some form of zero window probe (ZWP) with one byte of new or old data. The ACK from the ZWP would provide an additional opportunity for a SACK block to detect loss without an RTO. Additional losses can be detected subsequently and repaired as SACK based fast recovery proceeds. However, in practice sending a single byte of data turned out to be problematic to implement and more fragile than necessary.   Instead we use a full segment to probe but have to add complexity to compensate for the probe itself masking losses.
+</t>
+
+
+<t>
+Define probe timeout (PTO) to be a timer event indicating that an ACK is overdue on a connection. The PTO value is set to max(2 * SRTT, 10ms), where SRTT is the smoothed round-trip time <xref target="RFC6298" />, and is adjusted to account for delayed ACK timer when there is only one outstanding segment. 
+</t>
+<t>
+The basic version of the TLP algorithm transmits one probe segment after a probe timeout if the connection has outstanding unacknowledged data but is otherwise idle, i.e. not receiving any ACKs or is cwnd/rwnd/application limited. The transmitted segment, aka loss probe, can be either a new segment if available and the receive window permits, or a retransmission of the most recently sent segment, i.e., the segment with the highest sequence number.  When there is tail loss, the ACK from the probe triggers fast recovery. In the absence of loss, there is no change in the congestion control or loss recovery state of the connection, apart from any state related to TLP itself.
+</t>
+<t>
+TLP MUST NOT be used for non-SACK connections. SACK feedback allows senders to use the algorithm described in section 3 to infer whether any segments were lost.
+</t>
+<section title="Pseudocode">
+<t>
+We define the terminology used in specifying the TLP algorithm:
+</t>
+<t>
+FlightSize: amount of outstanding data in the network as defined in <xref target="RFC5681" />.
+</t>
+<t>
+PTO: Probe timeout is a timer event indicating that an ACK is overdue. Its value is constrained to be smaller than an RTO.
+</t>
+<t>
+SRTT: smoothed round-trip time computed like in <xref target="RFC6298" />.
+</t>
+<t>
+Open state: the sender has so far received in-sequence ACKs with no SACK blocks, and no other indications  (such as retransmission timeout) that a loss may have occurred. 
+</t>
+<t>
+Consecutive PTOs: back-to-back PTOs all scheduled for the same tail packets in a flight.  The (N+1)st PTO is scheduled after transmitting the probe segment for Nth PTO.
+</t>
+        
+<t>                  
+The TLP algorithm works as follows:
+</t>
+
+
+<t>
+(1) Schedule PTO after transmission of new data in Open state:
+</t>
+<figure><artwork><![CDATA[
+ Check for conditions to schedule PTO outlined in step 2 below.
+ FlightSize > 1: schedule PTO in max(2*SRTT, 10ms).
+ FlightSize == 1: schedule PTO in max(2*SRTT, 1.5*SRTT+WCDelAckT).
+]]></artwork></figure>
+<t>
+WCDelAckT stands for worst case delayed ACK timer. When FlightSize is 1, PTO is inflated additionally by WCDelAckT time to compensate for a potential long delayed ACK timer at the receiver. The RECOMMENDED value for WCDelAckT is 200ms.
+</t>
+<t>
+(2) Conditions for scheduling PTO:
+<figure><artwork><![CDATA[
+(a) Connection is in Open state.
+(b) RTO is farther than PTO.
+(c) Connection is either cwnd limited or application limited.
+(d) Number of consecutive PTOs <= 2.
+(e) Connection is SACK enabled.
+]]></artwork></figure>
+Implementations MAY use one or two consecutive PTOs.
+</t>
+
+
+<t>
+(3) When PTO fires:
+</t>
+<figure><artwork><![CDATA[
+(a) If a new previously unsent segment exists:
+    -> Transmit new segment.
+    -> FlightSize += SMSS. cwnd remains unchanged.
+(b) If no new segment exists:
+    -> Retransmit the last segment.
+(c) Reschedule next PTO if conditions in (2) allow.
+]]></artwork></figure>
+<t>
+The reason for retransmitting the last segment in Step (b) is so that the ACK will carry SACK blocks and trigger either SACK-based loss recovery <xref target="RFC3517" /> or FACK-based fast recovery <xref target="FACK" />.
+</t>
+
+
+<t>
+(4) During ACK processing:
+</t>
+<figure><artwork><![CDATA[
+Cancel any existing PTO.
+If conditions in (2) allow:
+  -> Reschedule the PTO relative to the
+     time at which the ACK is received.
+]]></artwork></figure>
+
+
+<t>
+Following is an example of TLP. All events listed are at a TCP sender.
+</t>
+<t>
+(1) Sender transmits segments 1-10: 1, 2, 3, ..., 8, 9, 10. There is no more new data to transmit. A PTO is scheduled to fire in 2 RTTs, after the transmission of the 10th segment. 
+</t>
+<t>
+(2) Receives acknowledgements (ACKs) for segments 1-5; segments 6-10 are lost and no ACKs are received. Note that the sender (re)schedules its PTO timer relative to the last received ACK, which is the ACK for segment 5 in this case. The sender sets the PTO interval using the calculation described in step (1) of the algorithm.
+</t>
+<t>
+(3) When PTO fires, sender retransmits segment 10.
+</t>
+<t>
+(4) After an RTT, SACK for packet 10 arrives. The ACK also carries SACK holes for segments 6, 7, 8 and 9. This triggers FACK-based recovery.
+</t>
+<t>
+(5) Connection enters fast recovery and retransmits remaining lost segments.
+</t>
+</section>
+</section>
+<section title="Detecting recovered losses">
+<!--
+<t>
+
+
+TLP's goal is to detect tail losses and trigger fast recovery to perform appropriate congestion window reduction. Its goal is not to mask losses. In the situation when the tail loss is only the last segment, and TLP retransmits this segment as a probe, the sender does not enter recovery. In this section, we address this problem by detecting cases where a single loss is recovered by TLP loss probe. If all of the following conditions are met, then a TLP loss probe segment itself will fully recover a lost segment:
+
+
+<figure><artwork><![CDATA[
+(a) exactly one segment is lost
+(b) the lost segment is the outstanding segment highest in 
+    sequence space
+(c) the TLP loss probe is a retransmit of this segment
+(d) the TLP loss probe is received by the receiver
+(e) an ACK for the loss probe is received by the sender
+]]></artwork></figure>
+</t>
+When a TLP loss probe segment itself fully recovers a lost segment, the sender must react appropriately. 
+<t>
+-->
+<t>
+If the only loss was the last segment, there is the risk that the loss probe itself might repair the loss, effectively masking it from congestion control.   To avoid interfering with mandatory congestion control <xref target="RFC5681" /> it is imperative that TLP include a mechanism to detect when the probe might have masked a loss and to properly reduce the congestion window (cwnd).   An algorithm to examine subsequent ACKs to determine whether the original segment was lost is described here.
+</t>
+
+
+<t>
+Since it is observed that a significant fraction of the hosts that support SACK do not support duplicate selective acknowledgments (D-SACKs) <xref target="RFC2883" /> the TLP algorithm for detecting such lost segments relies only on basic RFC 2018 SACK <xref target="RFC2018" />.
+</t>
+
+
+<section title="TLP Loss Detection: The Basic Idea">
+
+
+<t>
+Consider a TLP retransmission "episode" where a sender retransmits  N consecutive TLP packets, all for the same tail packet in a flight. Let us say that an episode ends when the sender receives an ACK above the SND.NXT at the time of the episode. We want to make sure that before the episode ends the sender receives N "TLP dupacks", indicating that all N TLP probe segments were unnecessary, so there was no loss/hole that needed plugging. If the sender gets less than N "TLP dupacks" before the end of the episode, then probably the first TLP packet to arrive at the receiver plugged a hole, and only the remaining TLP packets that arrived at the receiver generated dupacks.
+</t>
+
+
+<t>
+Note that delayed ACKs complicate the picture, since a delayed ACK will imply that the sender receives one fewer ACK than would normally be expected. To mitigate this complication, before sending a TLP loss probe retransmission, the sender should attempt to wait long enough that the receiver has sent any delayed ACKs that it is withholding. The sender algorithm, described in section 2.1 features such a delay.
+</t>
+
+
+<t>
+If there is ACK loss or a delayed ACK, then this algorithm is conservative, because the sender will reduce cwnd when in fact there was no packet loss. In practice this is acceptable, and potentially even desirable: if there is reverse path congestion then reducing cwnd is prudent.
+</t>
+
+
+</section>
+
+
+<section title="TLP Loss Detection: Algorithm Details">
+
+
+<t>
+(1) State
+</t>
+
+
+<t>
+TLPRtxOut: the number of unacknowledged TLP retransmissions in current TLP episode. The connection maintains this integer counter that  tracks the number of TLP retransmissions in the current episode for which we have not yet received a "TLP dupack". The sender initializes the TLPRtxOut field to 0.
+</t>
+<t>
+TLPHighRxt: the value of SND.NXT at the time of TLP retransmission. The TLP sender uses TLPHighRxt to record SND.NXT at the time it starts doing TLP transmissions during a given TLP episode.
+</t>
+
+
+<t>
+(2) Initialization
+</t>
+
+
+<t>
+When a connection enters the ESTABLISHED state, or suffers a retransmission timeout, or enters fast recovery, it executes the following:
+</t>
+
+
+<figure><artwork><![CDATA[
+TLPRtxOut = 0;
+TLPHighRxt = 0;
+]]></artwork></figure>
+
+
+<t>
+(3) Upon sending a TLP retransmission:
+</t>
+<figure><artwork><![CDATA[
+if (TLPRtxOut == 0)
+      TLPHighRxt = SND.NXT;
+TLPRtxOut++;
+]]></artwork></figure>
+
+
+<t>
+(4) Upon receiving an ACK:
+</t>
+
+
+<t>
+(a) Tracking ACKs
+</t>
+
+
+<t>
+We define a "TLP dupack" as a dupack that has all the regular properties of a dupack that can trigger fast retransmit, plus the ACK acknowledges TLPHighRxt, and the ACK carries no new SACK information (as noted earlier, TLP requires that  the receiver supports SACK). This is the kind of ACK we expect to see for a TLP transmission if there were no losses. More precisely, the TLP sender considers a TLP probe segment as acknowledged if all of the following conditions are met:
+</t>
+<figure><artwork><![CDATA[
+(a) TLPRtxOut > 0
+(b) SEG.ACK == TLPHighRxt
+(c) the segment contains no SACK blocks for sequence ranges
+    above TLPHighRxt
+(d) the ACK does not advance SND.UNA
+(e) the segment contains no data
+(f) the segment is not a window update
+]]></artwork></figure>
+<t>
+If all of those conditions are met, then the sender executes the following:
+</t>
+<t>
+<figure><artwork><![CDATA[
+TLPRtxOut--;
+]]></artwork></figure>
+</t>
+
+
+<t>
+(b) Marking the end of a TLP episode and detecting losses
+</t>
+
+
+<t>
+If an incoming ACK is after TLPHighRxt, then the sender deems the TLP episode over. At that time, the TLP sender executes the following:
+</t>
+
+
+<figure><artwork><![CDATA[
+isLoss = (TLPRtxOut > 0);
+TLPRtxOut = 0
+if (isLoss)
+ EnterRecovery();
+]]></artwork></figure>
+
+
+<t>
+In other words, if the sender detects an ACK for data beyond the TLP loss probe retransmission then (in the absence of reordering on the return path of ACKs) it should have received any ACKs that will indicate whether the original or any loss probe retransmissions were lost. If the  TLPRtxOut count is still non-zero and thus indicates that some TLP probe segments remain unacknowledged, then the sender should presume that at least one segment was lost, so it should enter fast recovery using the proportional rate reduction algorithm <xref target="IMC11PRR" />.
+</t>
+
+
+<t>
+(5) Senders must only send a TLP loss probe retransmission if all the conditions from section 2.1 are met and the following condition also holds:
+</t>
+<figure><artwork><![CDATA[
+(TLPRtxOut == 0) || (SND.NXT == TLPHighRxt)
+]]></artwork></figure>
+<t>
+This ensures that there is at most one sequence range with outstanding TLP retransmissions. The sender maintains this invariant so that there is at most one TLP retransmission "episode" happening at a time, so that the sender can use the algorithm described above in this section to determine when the episode is over, and thus when it can infer whether any data segments were lost.
+</t>
+
+
+<t>
+Note that this condition only limits the number of outstanding TLP loss probes that are retransmissions. There may be an arbitrary number of outstanding unacknowledged TLP loss probes that consist of new, previously-unsent data, since the standard retransmission timeout and fast recovery algorithms are sufficient to detect losses of such probe segments.
+</t>
+
+
+</section>
+
+
+</section>
+<section title="Discussion">
+
+
+<t>In this section we discuss two properties related to TLP.</t>
+<section title="Unifying loss recoveries">
+
+
+<t>
+The existing loss recovery algorithms in TCP have a discontinuity: A single segment loss in the middle of a packet train can be recovered via fast recovery while a loss at the end of the train causes an RTO. Example: consider a train of segments 1-10, loss of segment five can be recovered quickly through fast recovery, while loss of segment ten can only be recovered through a timeout. In practice, the difference between losses that trigger RTO versus those invoking fast recovery has more to do with the position of the losses as opposed to the intensity or magnitude of congestion at the link.
+</t>
+<t>
+TLP unifies the loss recovery mechanisms regardless of the position of a loss, so now with TLP a segment loss in the middle of a train as well as at the tail end can now trigger the same fast recovery mechanisms.
+</t>
+
+
+</section>
+<section title="Recovery of any N-degree tail loss">
+
+
+<t>
+The TLP algorithm, when combined with a variant of the early retransmit mechanism described below, is capable of recovering any tail loss for any sized flow using fast recovery.
+</t>
+
+
+<t>
+We propose the following enhancement to the early retransmit algorithm described in <xref target="RFC5827" />: in addition to allowing an early retransmit in the scenarios described in <xref target="RFC5827" />, we propose to allow a delayed early retransmit <xref target="IMC11PRR" /> in the case where there are three outstanding segments that have not been cumulatively acknowledged and one segment that has been fully SACKed.
+</t>
+
+
+<t>
+Consider the following scenario, which illustrates an example of how this enhancement allows quick loss recovery in a new scenario:
+</t>
+
+
+<t>
+<figure><artwork><![CDATA[
+(1) scoreboard reads: A _ _ _
+(2) TLP retransmission probe of the last (fourth) segment
+(3) the arrival of a SACK for the last segment changes 
+    scoreboard to: A _ _ S
+(4) early retransmit and fast recovery of the second and 
+    third segments
+]]></artwork></figure>
+
+
+</t>
+
+
+<t>
+With this enhancement to the early retransmit mechanism, then for any degree of N-segment tail loss we get a quick recovery mechanism instead of an RTO.
+</t>
+
+
+<t>                          
+Consider the following taxonomy of tail loss scenarios, and the ultimate outcome in each case:
+</t>
+
+
+<figure><artwork><![CDATA[
+    number of  scoreboard after
+    losses     TLP retrans ACKed mechanism           final outcome
+    --------   ----------------- -----------------   -------------
+(1) AAAL       AAAA              TLP loss detection  all repaired
+(2) AALL       AALS              early retransmit    all repaired
+(3) ALLL       ALLS              early retransmit    all repaired
+(4) LLLL       LLLS              FACK fast recovery  all repaired
+(5) >=5 L      ..LS              FACK fast recovery  all repaired
+
+
+key:
+A = ACKed segment
+L = lost segment
+S = SACKed segment
+]]></artwork></figure>
+
+
+<t>
+Let us consider each tail loss scenario in more detail:
+</t>
+
+
+<t>
+(1) With one segment lost, the TLP loss probe itself will repair the loss. In this case, the sender's TLP loss detection algorithm will notice that a segment was lost and repaired, and reduce its congestion window in response to the loss.
+</t>
+
+
+<t>
+(2) With two segments lost, the TLP loss probe itself is not enough to repair the loss. However, when the SACK for the loss probe arrives at the sender, then the early retransmit mechanism described in <xref target="RFC5827" /> will note that with two segments outstanding and the second one SACKed, the sender should retransmit the first segment. This retransmit will repair the single remaining lost segment.
+</t>
+
+
+<t>
+(3) With three segments lost, the TLP loss probe itself is not enough to repair the loss. However, when the SACK for the loss probe arrives at the sender, then the enhanced early retransmit mechanism described in this section will note that with three segments outstanding and the third one SACKed, the sender should retransmit the first segment and enter fast recovery. The early retransmit and fast recovery phase will, together, repair the the remaining two lost segments.
+</t>
+
+
+<t>
+(4) With four segments lost, the TLP loss probe itself is not enough to repair the loss. However, when the SACK for the loss probe arrives at the sender, then the FACK fast retransmit mechanism <xref target="FACK" /> will note that with four segments outstanding and the fourth one SACKed, the sender should retransmit the first segment and enter fast recovery. The fast retransmit and fast recovery phase will, together, repair the the remaining two lost segments.
+</t>
+
+
+<t>
+(5) With five or more segments lost, events precede much as in case (4). The TLP loss probe itself is not enough to repair the loss. However, when the SACK for the loss probe arrives at the sender, then the FACK fast retransmit mechanism <xref target="FACK" /> will note that with five or more segments outstanding and the segment highest in sequence space SACKed, the sender should retransmit the first segment and enter fast recovery. The fast retransmit and fast recovery phase will, together, repair the remaining lost segments.
+</t>
+
+
+<t>
+In summary, the TLP mechanism, in conjunction with the proposed enhancement to the early retransmit mechanism, is able to recover from a tail loss of any number of segments without resort to a costly RTO.
+</t>
+
+
+</section>
+</section>
+<section title="Experiments with TLP">
+<t>
+In this section we describe experiments and measurements with TLP performed on Google Web servers using Linux 2.6. The experiments were performed over several weeks and measurements were taken across a wide range of Google applications. The main goal of the experiments is to instrument and measure TLP's performance relative to the baseline. The experiment and baseline were using the same kernels with an on/off switch to enable TLP.
+</t>
+<t>
+All experiments were conducted with the basic version of the TLP described in Section 2. All other algorithms such as early retransmit and FACK based recovery are present in the both the experiment and baseline. We have also experimented with a few variations of TLP such as the consecutive probe segments to transmit and the value that a PTO should be delayed by to take into account delayed ACK timer when FlightSize equals one. The numbers reported below are with experiments where we did not restrict the number of consecutive probe segments to two. There are three primary metrics we are interested in: impact on TCP latency (average and tail or 99th percentile latency), retransmission statistics, and the percentage of probe segments relative to the total number of transmitted segments. TCP latency is the time elapsed between the server transmitting the first byte of the response to it receiving an ACK for the last byte. The probe segments are not accounted in retransmission statistics but instead tracked separately in the Linux MIB.
+</t>
+<t>
+Over a period of a week long experiment, TLP reduced the average TCP latency of Google Web search and Instant search by [average:3%, 99th percentile:5%], Google Maps by [average:5%, 99th percentile:10%], and Google Images by [average:7%, 99th percentile:10%]. The varying percentage of improvements is because of the differences in the response size distribution amongst these services, e.g. Google Images has the smallest response sizes and hence is more prone to tail segment losses. TLP also improved performance in mobile networks, e.g. by 7.2% for Web search and Instant and 7.6% for Images transferred over Verizon network. To see why and where the latency improvements are coming from, we measured the retransmission statistics. We broke down the retransmission stats based on nature of retransmission - timeout retransmission or fast recovery. TLP reduced the number of timeout retransmissions by 10% compared to the baseline, i.e. (timeout_retrans_tlp - timeout_retrans_baseline) / timeout_retrans_baseline = 10%. This includes the retransmissions that occur in the slow start phase of the timeout. There is a corresponding increase in the number of fast retransmits and in fast recovery. Note that it is not always possible for TLP to convert 100% of the timeouts into fast recovery episodes for two reasons: either a PTO was not scheduled because an RTO was closer, or a probe segment was sent but an RTO occurred anyway.
+ 
+</t>
+<t>
+The overhead of probe segments as a percentage of the total number of outgoing segments is 0.6%, i.e. (number of probe segments / number of outgoing segments)*100 = 0.6%.  When FlightSize equals 1 it is important to account for the delayed ACK timer in the PTO value, in order to bring down the number of unnecessary probe segments. (the WCDelAckT term, aka Worst Case delayed ACK time was set to 200ms).  With delays of 0ms and 50ms, the percentage probe segments are 3.1% and 2.2% respectively.
+ 
+</t>
+
+
+<t>
+<!-- Secondary measurements -->
+<!-- return on investment of the probes. -->
+<!-- slack between the PTO and RTO, normalized by RTT. Shows that the variance in RTT is high, which drives up the RTO. -->
+<!-- first time PTOs versus recurrent PTOs - distribution. -->
+<!-- new packet versus retransmission. -->
+<!-- FlightSize and cwnd when PTO is scheduled -->
+Besides the macro level latency and retransmission statistics, we also measured TCP's internal state variables at the point when PTO timer fires and a probe segment is transmitted. We report a few of these statistics here.
+We measured the number of probe segments sent consecutively within a single timeout period. About 80% of the segments were probes sent the first time within the timeout period while the remaining were consecutive probes.
+ 
+10% of the probe segments are new previously untransmitted data while the remainder are a retransmission of the last sent segment.
+ 
+</t>
+<t>
+The distribution below shows the time period, normalized by the connection RTT, between the PTO timer firing and the epoch when the next RTO is scheduled. Note that the slack time period between a PTO and RTO can be several tens of RTTs, possibly because of large RTOs caused by variance in round-trip times. 
+</t>
+<figure><artwork><![CDATA[
+percentile            25%  50%  75%  90%  99%
+ 
+[normalized interval] 1.4  3.3  10.5 21   95
+]]></artwork></figure>
+
+
+<t>
+The following distribution shows the FlightSize and congestion window values when a PTO is scheduled. We note that cwnd is not the limiting factor and that nearly all of the probe segments are sent within the congestion window.
+</t>
+<figure><artwork><![CDATA[
+percentile   10%  25%  50%  75%  90%  99%
+ 
+FlightSize    1    1    2    3    10   20 
+cwnd          5    10   10   10   17   44
+]]></artwork></figure>
+</section>
+<section title="Related work">
+<t>
+TCP's long and conservative RTO recovery has long been identified as the major performance bottleneck for latency-demanding applications. A well-studied example is online gaming that requires reliability and low latency but small bandwidth. <xref target="GRIWODZ06" /> shows that repeated long RTO is the dominating performance bottleneck for game responsiveness. The authors in <xref target="PETLUND08" /> propose to use linear RTO to improve the performance, which has been incorporated in the Linux kernel as a non-default socket option for such thin streams. <xref target="MONDAL08" /> further argues exponential RTO backoff should be removed because it is not necessary for the stability of Internet. In contrast, TLP does not change the RTO timer calculation or the exponential back off. TLP's approach is to keep the behavior after RTO conservative for stability but allows a few timely probes before concluding the network is badly congested and cwnd should fall to 1.  As noted earlier in the Introduction the F-RTO <xref target="RFC5682" /> algorithm reduces the number of spurious timeout retransmissions and the Early Retransmit <xref target="RFC5827" /> mechanism reduces timeouts when a connection has received a certain number of duplicate ACKs. Both are complementary to TLP and can work alongside.
+</t>
+<t>
+TCP Loss Probe is one of several algorithms designed to maximize the robustness of TCPs self clock in the presence of losses.  It follows the same principles as Proportional Rate Reduction <xref target="IMC11PRR" /> and TCP Laminar <xref target="Laminar" />.
+</t>
+</section>
+<section title="Security Considerations">
+<t>
+The security considerations outlined in <xref target="RFC5681" /> apply to this document. At this time we did not find any additional security problems with TCP loss probe.
+</t>
+
+
+</section>
+<section title="IANA Considerations">
+<t>
+This document makes no request of IANA.
+</t>
+<t>
+Note to RFC Editor: this section may be removed on publication as an RFC.
+</t>
+</section>
+</middle>
+<back>
+<references>
+<!-- ./bibxml/reference.RFC.3517.xml -->
+<?xml version='1.0' encoding='UTF-8'?>
+<reference anchor='RFC3517'>
+<front>
+<title>A Conservative Selective Acknowledgment (SACK)-based Loss Recovery Algorithm for TCP</title>
+<author initials='E.' surname='Blanton' fullname='E. Blanton'>
+<organization /></author>
+<author initials='M.' surname='Allman' fullname='M. Allman'>
+<organization /></author>
+<author initials='K.' surname='Fall' fullname='K. Fall'>
+<organization /></author>
+<author initials='L.' surname='Wang' fullname='L. Wang'>
+<organization /></author>
+<date year='2003' month='April' />
+<abstract>
+<t>This document presents a conservative loss recovery algorithm for TCP that is based on the use of the selective acknowledgment (SACK) TCP option.  The algorithm presented in this document conforms to the spirit of the current congestion control specification (RFC 2581), but allows TCP senders to recover more effectively when multiple segments are lost from a single flight of data. [STANDARDS-TRACK]</t></abstract></front>
+<seriesInfo name='RFC' value='3517' />
+<format type='TXT' octets='27855' target='http://www.rfc-editor.org/rfc/rfc3517.txt' />
+</reference>
+
+
+<!-- ./bibxml/reference.RFC.6298.xml -->
+<?xml version='1.0' encoding='UTF-8'?>
+<reference anchor='RFC6298'>
+<front>
+<title>Computing TCP's Retransmission Timer</title>
+<author initials='V.' surname='Paxson' fullname='V. Paxson'>
+<organization /></author>
+<author initials='M.' surname='Allman' fullname='M. Allman'>
+<organization /></author>
+<author initials='J.' surname='Chu' fullname='J. Chu'>
+<organization /></author>
+<author initials='M.' surname='Sargent' fullname='M. Sargent'>
+<organization /></author>
+<date year='2011' month='June' />
+<abstract>
+<t>This document defines the standard algorithm that Transmission Control Protocol (TCP) senders are required to use to compute and manage their retransmission timer.  It expands on the discussion in Section 4.2.3.1 of RFC 1122 and upgrades the requirement of supporting the algorithm from a SHOULD to a MUST.  This document obsoletes RFC 2988.
+</t></abstract></front>
+<seriesInfo name='RFC' value='6298' />
+<format type='TXT'  target='http://www.rfc-editor.org/rfc/rfc6298.txt' />
+</reference>
+
+
+<!-- ./bibxml/reference.RFC.5827.xml -->
+<?xml version='1.0' encoding='UTF-8'?>
+<reference anchor='RFC5827'>
+<front>
+<title>Early Retransmit for TCP and Stream Control Transmission Protocol (SCTP)</title>
+<author initials='M.' surname='Allman' fullname='M. Allman'>
+<organization /></author>
+<author initials='U.' surname='Ayesta' fullname='U. Ayesta'>
+<organization /></author>
+<author initials='L.' surname='Wang' fullname='L. Wang'>
+<organization /></author>
+<author initials='J.' surname='Blanton' fullname='J. Blanton'>
+<organization /></author>
+<author initials='P.' surname='Hurtig' fullname='P. Hurtig'>
+<organization /></author>
+<date year='2010' month='April' />
+<abstract>
+<t>This document proposes a new mechanism for TCP and Stream Control Transmission Protocol (SCTP) that can be used to recover lost segments when a connection's congestion window is small.  The "Early Retransmit" mechanism allows the transport to reduce, in certain special circumstances, the number of duplicate acknowledgments required to trigger a fast retransmission.  This allows the transport to use fast retransmit to recover segment losses that would otherwise require a lengthy retransmission timeout.
+</t></abstract></front>
+<seriesInfo name='RFC' value='5827' />
+<format type='TXT'  target='http://www.rfc-editor.org/rfc/rfc5827.txt' />
+</reference>
+
+
+<!-- ./bibxml/reference.RFC.5682.xml -->
+<?xml version='1.0' encoding='UTF-8'?>
+<reference anchor='RFC5682'>
+<front>
+<title>Forward RTO-Recovery (F-RTO): An Algorithm for Detecting Spurious Retransmission Timeouts with TCP</title>
+<author initials='P.' surname='Sarolahti' fullname='P. Sarolahti'>
+<organization /></author>
+<author initials='M.' surname='Kojo' fullname='M. Kojo'>
+<organization /></author>
+<author initials='K.' surname='Yamamoto' fullname='K. Yamamoto'>
+<organization /></author>
+<author initials='M.' surname='Hata' fullname='M. Hata'>
+<organization /></author>
+<date year='2009' month='September' />
+<abstract>
+<t>The purpose of this document is to move the F-RTO (Forward RTO-Recovery) functionality for TCP in RFC 4138 from Experimental to Standards Track status. The F-RTO support for Stream Control Transmission Protocol (SCTP) in RFC 4138 remains with Experimental status. See Appendix B for the differences between this document and RFC 4138.&lt;/t>&lt;t> Spurious retransmission timeouts cause suboptimal TCP performance because they often result in unnecessary retransmission of the last window of data. This document describes the F-RTO detection algorithm for detecting spurious TCP retransmission timeouts. F-RTO is a TCP sender-only algorithm that does not require any TCP options to operate. After retransmitting the first unacknowledged segment triggered by a timeout, the F-RTO algorithm of the TCP sender monitors the incoming acknowledgments to determine whether the timeout was spurious. It then decides whether to send new segments or retransmit unacknowledged segments. The algorithm effectively helps to avoid additional unnecessary retransmissions and thereby improves TCP performance in the case of a spurious timeout. [STANDARDS-TRACK]</t></abstract></front>
+<seriesInfo name='RFC' value='5682' />
+<format type='TXT' octets='47337' target='http://www.rfc-editor.org/rfc/rfc5682.txt' />
+</reference>
+
+
+<reference anchor='IMC11PRR'>
+<front>
+<title>Proportional Rate Reduction for TCP</title>
+<author initials='M' surname='Mathis' fullname='Matt Mathis'>
+   <organization /></author>
+<author initials='N' surname='Dukkipati' fullname='Nandita Dukkipati'>
+   <organization /></author>
+<author initials='Y' surname='Cheng' fullname='Yuchung Cheng'>
+   <organization /></author>
+<author initials='M' surname='Ghobadi' fullname='Monia Ghobadi'>
+   <organization /></author>
+<date year='2011' />
+<abstract><t>Packet losses increase latency for Web users. Fast recovery is a key mechanism for TCP to recover from packet losses. In this paper, we explore some of the weaknesses of the standard algorithm described in RFC 3517 and the non-standard algorithms implemented in Linux. We find that these algorithms deviate from their intended behavior in the real world due to the combined effect of short flows, application stalls, burst losses, acknowledgment (ACK) loss and reordering, and stretch ACKs. Linux suffers from excessive congestion window reductions while RFC 3517 transmits large bursts under high losses, both of which harm the rest of the flow and increase Web latency.</t>
+<t>Our primary contribution is a new design to control transmission in fast recovery called proportional rate reduction (PRR). PRR recovers from losses quickly, smoothly and accurately by pacing out retransmissions across received ACKs. In addition to PRR, we evaluate the TCP early retransmit (ER) algorithm which lowers the duplicate acknowledgment threshold for short transfers, and show that delaying early retransmissions for a short interval is effective in avoiding spurious retransmissions in the presence of a small degree of reordering. PRR and ER reduce the TCP latency of connections experiencing losses by 3-10% depending on the response size. Based on our instrumentation on Google Web and YouTube servers in U.S. and India, we also present key statistics on the nature of TCP retransmissions.
+ 
+</t></abstract>
+</front>
+<seriesInfo name='Proceedings of the 2011 ACM SIGCOMM conference on Internet measurement conference' value=''/>
+</reference>
+
+
+<!-- ./bibxml/reference.RFC.2119.xml -->
+<?xml version='1.0' encoding='UTF-8'?>
+<reference anchor='RFC2119'>
+<front>
+<title>Key words for use in RFCs to Indicate Requirement Levels</title>
+<author initials='S.' surname='Bradner' fullname='S. Bradner'>
+<organization /></author>
+<date year='1997' month='March' />
+</front>
+<seriesInfo name='RFC' value='2119' />
+<format type='TXT' target='http://www.rfc-editor.org/rfc/rfc2119.txt' />
+</reference>
+
+
+<!-- ./bibxml/reference.RFC.5681.xml -->
+<?xml version='1.0' encoding='UTF-8'?>
+<reference anchor='RFC5681'>
+<front>
+<title>TCP Congestion Control</title>
+<author initials='M.' surname='Allman' fullname='M. Allman'>
+<organization /></author>
+<author initials='V.' surname='Paxson' fullname='V. Paxson'>
+<organization /></author>
+<author initials='E.' surname='Blanton' fullname='E. Blanton'>
+<organization /></author>
+<date year='2009' month='September' />
+<abstract>
+<t>This document defines TCP's four intertwined congestion control algorithms: slow start, congestion avoidance, fast retransmit, and fast recovery.  In addition, the document specifies how TCP should begin transmission after a relatively long idle period, as well as discussing various acknowledgment generation methods.  This document obsoletes RFC 2581. [STANDARDS-TRACK]</t></abstract></front>
+
+
+<seriesInfo name='RFC' value='5681' />
+<format type='TXT' octets='44339' target='http://www.rfc-editor.org/rfc/rfc5681.txt' />
+</reference>
+
+
+<reference anchor='FACK'>
+<front>
+<title>Forward acknowledgement: refining TCP congestion control</title>
+<author initials='M' surname='Mathis' fullname='Matt Mathis'>
+   <organization /></author>
+<author initials='M' surname='Jamshid' fullname='Jamshid Mahdavi'>
+   <organization /></author>
+<date year='1996' />
+</front>
+<seriesInfo name='ACM SIGCOMM Computer Communication Review, Volume 26, Issue 4, Oct. 1996.' value=''/>
+</reference>
+
+
+<!-- ./bibxml/reference.RFC.2883.xml -->
+<?xml version='1.0' encoding='UTF-8'?>
+<reference anchor='RFC2883'>
+<front>
+<title>An Extension to the Selective Acknowledgement (SACK) Option for TCP</title>
+<author initials='S.' surname='Floyd' fullname='S. Floyd'>
+<organization /></author>
+<author initials='J.' surname='Mahdavi' fullname='J. Mahdavi'>
+<organization /></author>
+<author initials='M.' surname='Mathis' fullname='M. Mathis'>
+<organization /></author>
+<author initials='M.' surname='Podolsky' fullname='M. Podolsky'>
+<organization /></author>
+<date year='2000' month='July' />
+<abstract>
+<t>This note defines an extension of the Selective Acknowledgement (SACK) Option [RFC2018] for TCP.  RFC 2018 specified the use of the SACK option for acknowledging out-of-sequence data not covered by TCP's cumulative acknowledgement field.  This note extends RFC 2018 by specifying the use of the SACK option for acknowledging duplicate packets. This note suggests that when duplicate packets are received, the first block of the SACK option field can be used to report the sequence numbers of the packet that triggered the acknowledgement.  This extension to the SACK option allows the TCP sender to infer the order of packets received at the receiver, allowing the sender to infer when it has unnecessarily retransmitted a packet.  A TCP sender could then use this information for more robust operation in an environment of reordered packets [BPS99], ACK loss, packet replication, and/or early retransmit timeouts.
+</t></abstract></front>
+<seriesInfo name='RFC' value='2883' />
+<format type='TXT' target='http://www.rfc-editor.org/rfc/rfc2883.txt' />
+</reference>
+
+
+<!-- ./bibxml/reference.RFC.2018.xml -->
+<?xml version='1.0' encoding='UTF-8'?>
+<reference anchor='RFC2018'>
+<front>
+<title>TCP Selective Acknowledgment Options</title>
+<author initials='M.' surname='Mathis' fullname='M. Mathis'>
+<organization /></author>
+<author initials='J.' surname='Mahdavi' fullname='J. Mahdavi'>
+<organization /></author>
+<date year='1996' month='October' />
+</front>
+<seriesInfo name='RFC' value='2018' />
+<format type='TXT' target='http://www.rfc-editor.org/rfc/rfc2018.txt' />
+</reference>
+
+
+<reference anchor='GRIWODZ06'>
+<front>
+<title>The fun of using TCP for an MMORPG</title>
+<author initials='C' surname='Griwodz' fullname='C. Griwodz'>
+   <organization /></author>
+<author initials='P' surname='Halvorsen' fullname='P. Halvorsen'>
+   <organization /></author>
+<date year='2006' />
+</front>
+<seriesInfo name='NOSSDAV' value=''/>
+</reference>
+
+
+<reference anchor='PETLUND08'>
+<front>
+<title>TCP enhancements for interactive thin-stream applications</title>
+<author initials='A' surname='Petlund' fullname='A. Petlund'>
+   <organization /></author>
+<author initials='K' surname='Evensen' fullname='K. Evensen'>
+   <organization /></author>
+<author initials='C' surname='Griwodz' fullname='C. Griwodz'>
+   <organization /></author>
+<author initials='P' surname='Halvorsen' fullname='P. Halvorsen'>
+   <organization /></author>
+<date year='2008' />
+</front>
+<seriesInfo name='NOSSDAV' value=''/>
+</reference>
+
+
+<reference anchor='MONDAL08'>
+<front>
+<title>Removing Exponential Backoff from TCP</title>
+<author initials='A' surname='Mondal' fullname='A. Mondal'>
+   <organization /></author>
+<author initials='A' surname='Kuzmanovic' fullname='A. Kuzmanovic'>
+   <organization /></author>
+<date year='2008' />
+</front>
+<seriesInfo name='ACM SIGCOMM Computer Communication Review' value=''/>
+</reference>
+
+
+<!-- File bibxml3/reference.I-D.mathis-tcpm-tcp-laminar.xml -->
+<reference anchor='Laminar'>
+<front>
+<title>Laminar TCP and the case for refactoring TCP congestion control</title>
+
+
+<author initials='M' surname='Mathis' fullname='Matt Mathis'>
+    <organization />
+</author>
+
+
+<date month='February' day='21' year='2012' />
+
+
+<abstract><t>The primary state variables used by all TCP congestion control algorithms, cwnd and ssthresh are heavily overloaded, carrying different semantics in different states.  This leads to excess implementation complexity and poorly defined behaviors under some combinations of events, such as loss recovery during cwnd validation. We propose a new framework for TCP congestion control, and to recast current standard algorithms to use new state variables.  This new framework will not generally change the behavior of any of the primary congestion control algorithms when invoked in isolation but will to permit new algorithms with better behaviors in many corner cases, such as when two distinct primary algorithms are invoked concurrently.  It will also foster the creation of new algorithms to address some events that are poorly treated by today's standards. For the vast majority of traditional algorithms the transformation to the new state variables is completely straightforward.  However, the resulting implementation will technically be in violation of all existing TCP standards, even if it is fully compliant with their principles and intent.</t></abstract>
+
+
+</front>
+
+
+<seriesInfo name='Internet-Draft' value='draft-mathis-tcpm-tcp-laminar-00' />
+<format type='TXT'
+        target='http://www.ietf.org/internet-drafts/draft-mathis-tcpm-tcp-laminar-00.txt' />
+</reference>
+
+
+
+
+</references>
+                          
+</back>
+</rfc>

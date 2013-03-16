@@ -1,0 +1,648 @@
+
+
+
+DNS Extensions Working Group                                  G. Barwood
+Internet-Draft                                                          
+Intended status: Experimental                           3 September 2009
+Expires: March 2010
+
+
+                            DNS Transport     
+               draft-barwood-dnsext-dns-transport-04
+
+Status of this Memo
+  
+   This Internet-Draft is submitted to IETF in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF), its areas, and its working groups.  Note that
+   other groups may also distribute working documents as Internet-
+   Drafts.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   The list of current Internet-Drafts can be accessed at
+   http://www.ietf.org/ietf/1id-abstracts.txt.
+
+   The list of Internet-Draft Shadow Directories can be accessed at
+   http://www.ietf.org/shadow.html.
+
+   This Internet-Draft will expire on March 4, 2010.
+
+Copyright Notice
+
+   Copyright (c) 2009 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents in effect on the date of
+   publication of this document (http://trustee.ietf.org/license-info).
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.
+
+Abstract
+
+   Describes an experimental transport protocol for DNS. 
+   IP fragmentation is avoided, blind spoofing, amplification attacks
+   and other denial of service attacks are prevented. Latency for a 
+   typical DNS query is a single round trip, after a setup exchange 
+   that establishes a long term shared secret. No per-client server
+   state is required between transactions. The protocol may have other
+   applications.
+
+
+Barwood                    Expires March 2010                   [Page 1]
+
+Internet-Draft                DNS Transport               September 2009
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+
+   2.  Requirements . . . . . . . . . . . . . . . . . . . . . . . . .  4
+
+     2.1 Fragmentation. . . . . . . . . . . . . . . . . . . . . . . .  4
+
+     2.2 Spoofing . . . . . . . . . . . . . . . . . . . . . . . . . .  4
+    
+     2.3 Server state . . . . . . . . . . . . . . . . . . . . . . . .  4
+
+     2.4 Amplification attacks  . . . . . . . . . . . . . . . . . . .  4
+
+     2.5 Packet retransmission  . . . . . . . . . . . . . . . . . . .  4
+
+     2.6 Performance . . . . . . . . . . . . . . . . . . . . . . . . . 4
+
+   3.  Protocol . . . . . . . . . . . . . . . . . . . . . . . . . . .  5
+
+     3.1 Overview   . . . . . . . . . . . . . . . . . . . . . . . . .  5
+
+     3.2 Setup request  . . . . . . . . . . . . . . . . . . . . . . .  5
+
+     3.3 Setup response . . . . . . . . . . . . . . . . . . . . . . .  5
+
+     3.4 Initial request  . . . . . . . . . . . . . . . . . . . . . .  6
+
+     3.5 Server response : single page  . . . . . . . . . . . . . . .  6
+
+     3.6 Server response : multi page . . . . . . . . . . . . . . . .  7
+
+     3.7 Follow-up request  . . . . . . . . . . . . . . . . . . . . .  8
+
+     3.8 Error response . . . . . . . . . . . . . . . . . . . . . . .  8
+
+     3.9 Congestion control . . . . . . . . . . . . . . . . . . . . .  9
+
+     3.10 Reserved areas  . . . . . . . . . . . . . . . . . . . . . .  9
+
+   4.  Security Considerations  . . . . . . . . . . . . . . . . . . . 10
+
+   5.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 10
+
+   6.  Acknowledgments  . . . . . . . . . . . . . . . . . . . . . . . 10
+
+   7.  Normative References . . . . . . . . . . . . . . . . . . . . . 10
+
+   A.  Implementation of Cookies  . . . . . . . . . . . . . . . . . . 11
+
+   Authors Address  . . . . . . . . . . . . . . . . . . . . . . . . . 11
+
+
+
+Barwood                    Expires March 2010                   [Page 2]
+
+Internet-Draft                DNS Transport               September 2009
+
+1.  Introduction
+
+DNSSEC implies that DNS responses may be large, possibly larger than the
+de facto ~1500 byte internet MTU. 
+
+Large responses are a challenge for DNS transport. EDNS [RFC2671] was
+introduced in 1999 to allow larger reponses to be sent over UDP, 
+previously DNS/UDP was limited to a 512 bytes.
+
+EDNS is problematic for several reasons:
+
+(1) It allows amplification attacks against 3rd parties. DNS/UDP has
+always been susceptible to these attacks, but EDNS has increased the
+amplification factor by an order of magnitude.
+
+(2) The IP protocol specifies a means by which large IP packets are
+split into fragments and then re-assembled. However fragmented UDP
+responses are undesirable for several reasons:
+
+  o Fragments can easily be spoofed. The DNS ID and port number are only
+  present in the first fragment, and the IP ID is usually easy for an
+  attacker to predict.
+
+  o In practise fragmentation is not reliable, and large UDP packets may
+  fail to be delivered.
+
+  o If a single fragment is lost, the entire response must be re-sent.
+
+  o Re-assembling fragments requires buffer resources, which opens
+  up denial of service attacks.
+
+Instead, it is possible to use TCP, but this is undesirable, as TCP 
+imposes increased latency and significant server state that may be
+vulnerable to denial of service attack. In addition, support for TCP
+is not universal.
+
+Nearly all current DNS traffic is carried by UDP with a maximum size of
+512 bytes, and relying on TCP is a risk for the deployment of DNSSEC.
+
+Therefore a new protocol to solve these problems is proposed.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Barwood                    Expires March 2010                   [Page 3]
+
+Internet-Draft                DNS Transport               September 2009
+
+2. Requirements
+
+2.1 Fragmentation
+
+As described in the introduction, fragmentation is undesirable.
+However, fragmentation is unavoidable if the path MTU is too small.
+Therefore, we require only that fragmentation does not occur provided
+the actual path MTU is at least the MTU sent by the client.
+
+2.2 Spoofing
+
+Blind spoofing attacks must be prevented.
+
+2.3 Server state
+
+No per-client server state should be needed between transactions.
+
+2.4 Amplification attacks
+
+Amplification attacks against third parties must be prevented.
+
+2.5 Packet re-transmission
+
+Only lost IP packets must be re-transmitted.
+This reduces problems due to network congestion.
+
+2.6 Performance
+
+Each transaction ( for moderate response sizes ) must be performed
+in 1 RTT, after setup, provided that no IP packets are lost.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Barwood                    Expires March 2010                   [Page 4]
+
+Internet-Draft                DNS Transport               September 2009
+
+3. Protocol
+
+3.1 Overview
+
+Communication is in two stages. First a long-lived SERVERTOKEN is
+acquired by the client, using a standard DNS lookup. Subsequent
+queries are sent using a different port, and are protected by
+the SERVERTOKEN.
+
+Throughout, DNS Payload refers to a DNS Message [RFC1035], not 
+including the 16-bit ID field.
+
+3.2 Setup request
+
+The client acquires a SERVERTOKEN for a given Server IP address by
+sending a special question to the server, with
+
+   QTYPE  = TXT
+   QCLASS = IN
+   QNAME  = <Client Secret>.DNS.TRANSPORT.LOCAL
+
+where <Client Secret> is a secret label chosen to prevent spoofing
+of the response.
+
+3.3 Setup response
+
+The server returns a TXT record as answer to the question, which
+contains a string (there may be other strings) with format 
+
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |       1       |           SPORT               |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                          SERVERTOKEN                          |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+SPORT         is a 16 bit UDP port number, to which requests are sent.
+
+SERVERTOKEN   is a 32 bit value computed as a hash of the client IP
+              Address and a long-term server secret. 
+      
+The TTL should be at least 1 day. The client associates SERVERTOKEN,
+SPORT and the client IP address ( for multi-homed clients ) with the
+Server IP address.
+
+If the TXT record is not returned, the server does not have support,
+and this fact should be cached, with a TTL of at least 1 day.
+If a copy of the Question is not returned, extra queries need to
+be sent to prevent spoofing. This should not occur - all known DNS
+servers return a copy of the question, except for format error
+responses, which should not occur.
+
+
+
+
+
+Barwood                    Expires March 2010                   [Page 5]
+
+Internet-Draft                DNS Transport               September 2009
+
+3.4 Initial request
+
+To make a DNS request, a UDP packet is sent to SPORT, with format:
+
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |       1       |     COUNT     |              MTU              |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                          SERVERTOKEN                          |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                            QUERYID                            |
+    |                                                               |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    \                             DATA                              \
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+where :
+
+COUNT          limits the number of pages the server will send.
+
+MTU            limits the size of the IP packets used to send the
+               response. Must be at least 576 bytes.
+
+SERVERTOKEN    is a copy of SERVERTOKEN from the setup response.
+
+QUERYID        is a 64-bit value that identifies the request.
+
+DATA           is the DNS payload.
+
+3.5 Server response : single page
+
+The server checks SERVERTOKEN, and divides the DNS payload into equal
+size pages, so that the size of each IP packet is not greater than MTU.
+Servers should use a smaller MTU if the path MTU is less than the MTU
+supplied by the client.
+
+If there is only one page, the UDP response packet has format :
+
+    +-+-+-+-+-+-+-+-+
+    |       2       |           
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                            QUERYID                            |
+    |                                                               |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    \                             DATA                              \
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+where :
+
+QUERYID        is a copy of QUERYID from the request.
+
+DATA           is the DNS payload.
+
+The client checks SERVERTOKEN, and then uses DATA as the normal DNS
+response.
+
+Barwood                    Expires March 2010                   [Page 6]
+
+Internet-Draft                DNS Transport               September 2009
+
+3.6 Server response : multi page
+
+If there is more than one page, each UDP response packet has format :
+
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |       3       |    COUNT      |           PAGESIZE            |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                             PAGE                              |    
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                             TOTAL                             |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                            COOKIE                             |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                            QUERYID                            |
+    |                                                               |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    \                             DATA                              \
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+where :
+
+COUNT        is the number of pages sent.
+
+PAGESIZE     is the size into which the response has been divided.
+
+PAGE         is the number of this page.
+
+TOTAL        is the size of the complete DNS payload.
+
+COOKIE       is used to request further pages ( see section 3.7 ).
+
+QUERYID      is a copy of QUERYID from the request.
+
+DATA         is part of the DNS payload.
+
+The client allocates an assembly buffer of TOTAL bytes (if not already
+allocated), and copies DATA into it at offset PAGE x PAGESIZE.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Barwood                    Expires March 2010                   [Page 7]
+
+Internet-Draft                DNS Transport               September 2009
+
+3.7 Follow-up request
+
+If the client does not receive a page, due to packet loss or not
+all pages being sent, it sends a request with format :
+
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |       4       |    COUNT      |           PAGESIZE            |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                             PAGE                              |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                            COOKIE                             |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                          SERVERTOKEN                          |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                            QUERYID                            |
+    |                                                               |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    \                             DATA                              \
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+where :
+
+COUNT        is the number of pages to be sent.
+
+PAGESIZE     is a copy of PAGESIZE from the server response.
+
+PAGE         is the 0-based number of the first page to be sent.
+
+COOKIE       is a copy of COOKIE from the server response.
+
+SERVERTOKEN  is a copy of the SERVERTOKEN from the setup response.
+
+QUERYID      identifies the request.
+
+DATA         is a copy of DATA from the initial request.
+
+The server response is the same as in section 3.6. 
+
+Once a client has received all pages, it processes the complete
+assembled response as normal.
+
+3.8 Error response.
+
+If the server encounters an error condition, it sends an error
+response, with format :
+
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |       5       |     ERRNUM    |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                            QUERYID                            |
+    |                                                               |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+where :
+
+Barwood                    Expires March 2010                   [Page 8]
+
+Internet-Draft                DNS Transport               September 2009
+
+ERRNUM       encodes the error condition, with values
+
+             0            Invalid SERVERTOKEN. The client should acquire
+                          a new SERVERTOKEN and try again.
+
+             1            Invalid COOKIE/PAGESIZE/PAGE. The client
+                          should send a new Initial Request.
+
+SERVERTOKEN  is a copy of the SERVERTOKEN from the setup response.
+
+QUERYID      is a copy of QUERYID from the request.
+
+3.9 Congestion control
+
+Clients should take into account estimated network performance when
+calculating the COUNT field in requests. Factors are :
+
+  o The estimated round trip time (RTT). 
+  o The time to transmit (PT) 1 packet (due to limited bandwidth).
+
+COUNT should not be more than max( RTT / PT, 4 ).
+
+For example, if RTT = 150 milli-seconds, the bandwidth is 300 kilobytes
+per second and the packet size is 1500 bytes, then we have PT = 5 
+milli-seconds and COUNT = 30.
+
+In practice for current DNS purposes, COUNT can simply be set to 4,
+and this should be sufficient to send the complete response in a
+single round trip, assuming the MTU is 1500 bytes.
+
+Servers may send a smaller number of pages than requested, for 
+policy reasons, or if there is local congestion, etc.
+
+3.10 Reserved areas
+
+Unused variable length areas after the defined fields are reserved
+and must be omitted by the sender and ignored by the receiver.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Barwood                       Expires March 2010                [Page 9]
+
+Internet-Draft                DNS Transport               September 2009
+
+4.  Security Considerations
+
+Fragmented responses are vulnerable to blind spoofing, therefore
+fragmented responses should be avoided if possible.
+
+A check must be made that the MTU is at least 584, to prevent an
+attacker generating a large number of IP packets from a single request.
+
+Secret values ( the long term server secret, the client secret, QUERYID
+) must be generated so that an attacker cannot easily guess them, by 
+using cryptographic hash functions and cryptographic random number
+generators seeded from data that cannot be guessed by an attacker,
+such as thermal noise or other random physical fluctuations.
+
+The hash function used to compute SERVERTOKEN must be cryptographically
+secure, although a relatively weak function may be sufficient, since
+acquiring large numbers of input/output pairs in order to deduce the
+long term server secret is not easy for an attacker.
+
+
+5.  IANA Considerations
+
+None at present. If the protocol were to be become a standard, 
+there could be new registries for :
+
+   o Strings in setup response ( transport option codes ).
+
+   o Operation codes ( 1 - 5 have been used )
+
+   o Error codes
+
+6.  Acknowledgments
+
+Mark Andrews, Alex Bligh, Robert Elz, Douglas Otis,
+Wouter Wijngaards and Nicholas Weaver were each instrumental in
+creating and refining this specification.
+
+7.  Normative References
+
+[RFC1035]  Mockapetris, P., "Domain names - implementation and
+           specification", STD 13, RFC 1035, November 1987.    
+
+[RFC2671]  Vixie, P., "Extension Mechanisms for DNS (EDNS0)", RFC
+           2671, August 1999.
+
+
+
+
+
+
+
+
+
+
+
+Barwood                       Expires March 2010               [Page 10]
+
+Internet-Draft                DNS Transport               September 2009
+
+Appendix A : Implementation of Cookies
+
+To show how server state is avoided or limited, two possible approaches
+to the implementation of cookies are shown. These are illustrative, and
+actual implementations are of course free to take a different approach.
+
+(1) The server maintains a DNS database version number, which is
+incremented when the database is updated. The DNS database is stuctured
+so that old queries may be replayed, with the database version number
+being supplied as a parameter. COOKIE is simply the DNS database
+version number.
+
+(2) The server maintains a list of recent multi-page responses:
+
+COOKIE  DATA   ACCESSTIME
+1       ....   10:25:11
+2       ....   10:25:16
+.....
+
+If a response is multi-page, the list is checked to see if there is an
+existing entry that can be used ( hashing techniques are used to make
+the search efficient ).
+
+Entries that have not been accessed for more than 5 seconds may be
+deleted.
+
+Some care should be taken to ensure that on server restart, old cookie
+values are not re-used. Periodically, a new range of cookies should be
+issued, and the new allocation value recorded in permanent storage.
+Alternatively, the server should wait 10 seconds after restarting before
+issuing any cookies, or use a new long-term secret to generate
+SERVERTOKENs.
+
+Author's Address
+
+   George Barwood
+   33 Sandpiper Close
+   Gloucester
+   GL2 4LZ
+   United Kingdom
+
+   Phone: +44 452 722670
+   EMail: george.barwood@blueyonder.co.uk
+
+
+
+
+
+
+
+
+
+
+
+
+Barwood                       Expires March 2010               [Page 11]

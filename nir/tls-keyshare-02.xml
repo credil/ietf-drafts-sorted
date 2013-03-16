@@ -1,0 +1,347 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type='text/xsl' href='./rfc2629.xslt' ?>
+
+<?rfc toc="yes"?>
+<?rfc symrefs="no"?>
+<?rfc compact="no" ?>
+<?rfc sortrefs="yes" ?>
+<?rfc strict="yes" ?>
+<?rfc linkmailto="yes" ?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" >
+    
+
+<?xml-stylesheet type='text/xsl' href='./rfc2629.xslt' ?>
+
+<?rfc toc="yes"?>
+<?rfc symrefs="yes"?>
+<?rfc compact="no" ?>
+<?rfc subcompact="yes" ?>
+<?rfc sortrefs="yes" ?>
+<rfc ipr="trust200902" docName="draft-nir-tls-keyshare-02" category="std">
+  <front>
+    <title abbrev="TLS Key Sharing">A Method for Sharing Record Protocol Keys with a Middlebox in 
+      TLS</title>
+    <author initials="Y." surname="Nir" fullname="Yoav Nir">
+      <organization abbrev="Check Point">Check Point Software Technologies Ltd.</organization>
+      <address>
+        <postal>
+          <street>5 Hasolelim st.</street>
+          <city>Tel Aviv</city>
+          <code>67897</code>
+          <country>Israel</country>
+        </postal>
+        <email>ynir@checkpoint.com</email>
+      </address>
+    </author>
+    <date year="2012"/>
+    <area>Security Area</area>
+    <workgroup>TLS Working Group</workgroup>
+    <keyword>Internet-Draft</keyword>
+    <abstract>
+      <t> This document contains a straw man proposal for a method for sharing symmetric session
+        keys between a TLS client and a middlebox, so that the middlebox can decrypt the 
+        TLS-protected traffic.</t>
+      <t> This method is an alternative to the middlebox becoming a proxy.</t>
+    </abstract>
+  </front>
+  <middle>
+    <!-- ====================================================================== -->
+    <section anchor="introduction" title="Introduction">
+      <t> TLS (<xref target="TLS"/>) is used in a wide variety of protocols. The most common use is 
+        for protecting HTTP, as described in <xref target="HTTPS"/>. Middleboxes such as firewalls 
+        scan protocols for attacks. For HTTP common attacks to scan for are cross-site scripting and 
+        transfer of files containing malware.</t>
+      <t> TLS provides authentication and privacy against eavesdropping, but it hides the traffic 
+        not only from mallicious intercepters. It also hides the traffic from the middlebox, and 
+        prevents it from doing its job. Our goal is to allow the middlebox to inspect the traffic, 
+        without allowing others to do the same.</t>
+      <t> The requirements can be summed up in the following points: <list style="symbols">
+        <t> The middlebox should be able to decrypt all TLS traffic, and optionally (the client's
+          option) also modify it.</t>  
+        <t> The protocol must not make it easier for other entities to decrypt the traffic.</t>
+        <t> The client should be able to opt out of TLS decryption, but opting out may mean that 
+          the connection is blocked.</t>
+        <t> The server should be able to opt out of TLS decryption, but opting out may mean that 
+          the connection is blocked.</t></list></t>
+      <t> Two proposals have been offered to achieve these goals. One is having the middlebox be
+        a proxy, acting as server to the client, and as a client to the server. This option is 
+        implemented in several commercial products. <xref target="proxy_server_ext"/> describes
+        an extension to TLS for improving that mechanism, and also contains a good description 
+        in the introduction.</t>
+      <t> This document describes an alternative mechanism, where the client sends the keys to the
+        middlebox in the TLS record stream. This requires more changes to clients and servers, but
+        has the advantage that it does not break many of TLS guarantees.</t>
+      <section anchor="mustshouldmay" title="Conventions Used in This Document">
+        <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT",
+          "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described
+          in <xref target="RFC2119"/>.</t>
+      </section>
+    </section>
+    <!-- ====================================================================== -->
+    <section anchor="protocol" title="Protocol Overview">
+      <t> A supporting client will send a new extension in the ClientHello message. This new 
+        extension is called tls_keyshare. A server that supports this extension will send the 
+        extension in the ServerHello if it has received that extension in the ClientHello. Note 
+        that sending this extension only acknowledges understanding the protocol, not agreement to 
+        decryption. The extension contains a sequence of SHA-256 hashes of middlebox certificates. 
+        The client sends the hashes of the certificates of middleboxes that it knows are on-path to 
+        the server. See <xref target="discovery" /> for a discussion of middlebox discovery. The 
+        server sends a subset of the same hashes, only those for which it agrees to decryption.</t>
+      <t> This document defines a new record type called KeyshareInfo. This is a new content type 
+        rather than a new handshake message so that it doesn't figure in hash calculation of the 
+        hash message. A middlebox inserts a KeyShareInfo record into the server-to-client stream 
+        immediately after receiving the ClientHello message, if its hash was not present in the
+        client's tls_keyshare extension. It contains two pieces of information: <list 
+        style="symbols">
+        <t> A certificate of the middlebox. The public key in the certificate MUST be of the RSA 
+          type. The certificate should contain enough information for the client to recognize
+          the middlebox.</t>
+        <t> A signature using the private key associated with the certificate over the concatenation
+          of the ClientHello and ServerHello messages.</t></list></t>
+      <t> The middlebox inserts a KeyShareInfo record with a certificate into the client-to-server 
+        stream without an alert, immediately following a ServerHello message that does not contain 
+        the middlebox hash. The server will reply with either a fatal UNAUTHORIZED_MIDDLEBOX alert,
+        or a fatal RETRY_MIDDLEBOX alert, depending on policy.</t>
+      <t> In cases where the client and server negotiate either a ciphersuite that the middlebox
+        does not support, or an extension that it doesn't support, the middlebox inserts a 
+        different kind of KeyShareInfo record into the stream, that identifies the unsupported 
+        ciphersuite or extension. Both kinds of KeyShareInfo records are followed by a fatal alert.
+        The client is expected to add the hashes and remove the unsupported ciphersuites and 
+        extensions, before attempting a new TLS connection.</t>
+      <t> The client inserts a third type of KeyShareInfo record into the client-to-server stream 
+        immediately following the ChangeCipherSpec record (before the Finished handshake record). 
+        This KeyShareInfo record is constructed differently, and contains an RSA encrypted record 
+        of the write keys for both client and server. The client may send several records if there 
+        is more than one middlebox.</t>
+      <t> The diagram below outlines discovery.<figure>
+          <artwork><![CDATA[
+  Client                     Middlebox                         Server
+  ------                     ---------                         ------
+  ClientHello(tls_keyshare=0)
+                                 -------->
+                            KeyShareInfo(cert,sig)
+                            KeyShareInfo(reject cipher:0x0044)
+                            alert(MIDDLEBOX_PRESENT)
+                                  <-------- 
+  ClientHello(tls_keyshare=cert_hash)
+                                 -------->
+                                               ServerHello(cert_hash)
+                                                        (Certificate)
+                                                  (ServerKeyExchange)
+                                                      ServerHelloDone
+                                 <--------    
+  (Certificate)
+  ClientKeyExchange
+  (CertificateVerify)
+  ChangeCipherSpec
+  KeyShareInfo(keys)
+  Finished                       -------->
+                                                     ChangeCipherSpec
+                                                             Finished
+                                 <--------    
+         
+]]></artwork>
+           </figure></t>
+      <t> The diagram below outlines the protocol in a case where the server refuses 
+        decryption.<figure>
+          <artwork><![CDATA[
+  Client                     Middlebox                         Server
+  ------                     ---------                         ------
+
+  ClientHello(tls_keyshare=cert_hash)
+                                 -------->
+                                              ServerHello(keyshare=0)
+                                                        (Certificate)
+                                                  (ServerKeyExchange)
+                                                      ServerHelloDone
+                                 <--------    
+                            KeyShareInfo(cert,sig)
+                                 -------->                                 
+                                        alert(UNAUTHORIZED_MIDDLEBOX)
+                                 <--------    
+]]></artwork>
+           </figure></t>
+      <section anchor="keyshare_ind" title="The tls_keyshare Extension">
+        <t> The tls_keyshare extension is a ClientHello and ServerHello extension as defined in 
+        section 2.3 of <xref target="TLS-EXT"/>. 
+        The extension_type field is TBA by IANA. The format is to be added.</t> 
+      </section>
+      <section anchor="keyshareinfo" title="The KeyShareInfo Record">
+        <t> The format of the KeyShareInfo record is to be added. The content type is TBA by IANA.</t>
+        <section anchor="keyshareinfo_discovery" title="The KeyShareInfo Discovery Subtype">
+          <t> The KeyShareInfo Discovery record gives client or server information about the 
+            middlebox. Format is TBA.</t>
+        </section>
+        <section anchor="keyshareinfo_rejection" title="The KeyShareInfo Rejection Subtype">
+          <t> The KeyShareInfo Rejection record gives client a list of unsupported ciphersuites and
+            extensions. Format is TBA.</t>
+        </section>
+        <section anchor="keyshareinfo_keys" title="The KeyShareInfo Keys Subtype">
+          <t> The KeyShareInfo Keys record is send by the client to the middlebox and includes the
+            session keys. Format is TBA.</t>
+        </section>
+      </section>
+    </section>
+    <section anchor="processing" title="Processing">
+      <section anchor="proc_client" title="Client Processing">
+        <t> If the client policy prohibits decryption, the client SHOULD send the tls_keyshare
+          extension without hashes. Note that the middlebox might still try to proxy the connection, 
+          but that is in conflict with this specification, and is outside the scope of this 
+          document.</t>
+        <t> If there are some middleboxes that are by policy acceptable to the client, their
+          certificates are known in advance, and the client believes that they are on-path to the
+          server, then the client MUST send the SHA-256 hashes of their certificates in the 
+          tls_keyshare extension.</t>
+        <t> If a KeyShareInfo Discovery record is received with an unknown certificate, it MAY be 
+          ignored, or the user MAY be prompted to authorize the decryption, and optionally change 
+          the configuration to allow future decryption by this certificate. There will certainly be
+          controversy about this, but the configuration must happen an some point.</t>
+        <t> If policy dictates that the particular middlebox referenced in the KeyShareInfo record
+          is not allowed to decrypt, then such a record MUST be ignored. In that case the 
+          connection fails. If the middlebox is acceptable, then the client retries the connection,
+          this time adding the SHA-256 hash of the certificate to the tls_keyshare extension. This
+          is the discovery mechanism.</t>
+        <t> For all the middleboxes that are not ignored, the client MUST send a KeyShareInfo 
+          record with the symmetric keys immediately following the ChangeCipherSpec record before
+          any protected record is sent. </t>
+        <t> If a KeyShareInfo Rejection record is received, the client SHOULD retry the handshake,
+          this time without the flagged ciphersuites and extensions. If it is not acceptable to 
+          run the connection without these ciphersuites or extensions, the client should log the 
+          event or inform the user.</t>
+        <t> If the server sends a RETRY_MIDDLEBOX alert, the client should retry the handshake. If 
+          it sends an UNAUTHORIZED_MIDDLEBOX alert, then the client should log the event or alert
+          the user.</t>
+      </section>
+      <section anchor="proc_server" title="Server Processing">
+        <t> The server SHOULD send the tls_keyshare extension even if policy dictates that the 
+          decryption is prohibited. If policy allows all middleboxex to decrypt, it makes sense to
+          simply copy the client's tls_keyshare extension.</t>
+        <t> If some of the middlebox hashes included in the client's tls_keyshare extension are
+          recognized as those of acceptable middleboxes, then only those are copied to the 
+          server's tls_keyshare extension. When the middlebox sends a KeyShareInfo Discovery 
+          record, the server may decide whether that is acceptable or not, and accordingly send the
+          RETRY_MIDDLEBOX or UNAUTHORIZED_MIDDLEBOX alerts. In any case, every time the server does
+          not copy all hashes from the client's tls_keyshare, the connection is probably going to 
+          end in an alert.</t>
+      </section>
+      <section anchor="proc_mb" title="Middlebox Processing">
+        <t> The middlebox MUST send a KeyShareInfo Discovery record to the client if the client has 
+          indicated support for this extension, and has not included the middlebox hash in the 
+          extension. The discovery record is followed by a MIDDLEBOX_PRESENT alert, breaking the
+          connection. Similarly, if the hash is missing from the server's tls_keyshare extension,
+          then the middlebox injects a KeyShareInfo Discovery record into the client-to-server
+          stream. The server will usually then send an Alert record.</t>
+        <t> If the ServerHello specifies a ciphersuite that the middlebox does not support, or if
+          it includes a TLS extension that might prevent the middlebox from processing, then the
+          middlebox MAY send a KeyShareInfo Reject record with all unacceptable ciphersuites and
+          extension numbers, followed by a MIDDLEBOX_PRESENT alert.</t>
+      </section>
+    </section>
+    <section anchor="discovery" title="Middlebox Discovery">
+      <t> Discovering that the middlebox is present has already been described in 
+        <xref target="proc_client"/>. The client that is not aware of the presence of the
+        middlebox receives a KeyShareInfo Discovery record followed by a MIDDLEBOX_PRESENT alert
+        message.</t>
+      <t> Discovering that a middlebox in no longer on the path is trickier, because the 
+        superfluous KeyShareInfo Keys records do not lead to any observable effects for the client.
+        We suggest that the client keep a list of discovered middleboxes, and periodically clear 
+        entries from the list, requiring a repeated discovery. System events such as a change to 
+        host IP address, a reboot or the computer entering sleep mode MAY be used as triggers for
+        clearing the list.</t>
+    </section>
+    <section anchor="security" title="Security Considerations">
+      <t> To be added</t>
+    </section>
+    <section anchor="iana" title="IANA Considerations">
+      <t>To be added.</t>
+    </section>
+    <!-- ====================================================================== -->
+  </middle>
+  <!-- ====================================================================== -->
+  <back>
+    <references title="Normative References"> 
+      <reference anchor='TLS'>
+        <front>
+          <title>The Transport Layer Security (TLS) Protocol Version 1.2</title>
+          <author initials='T.' surname='Dierks' fullname='T. Dierks'>
+            <organization /></author>
+          <author initials='E.' surname='Rescorla' fullname='E. Rescorla'>
+            <organization /></author>
+          <date year='2008' month='August' />
+        </front>
+        <seriesInfo name='RFC' value='5246' />
+        <format type='TXT' target='http://tools.ietf.org/rfc/rfc5246.txt' />
+        <format type='HTML' target='http://tools.ietf.org/html/rfc5246' />
+      </reference>
+      <reference anchor='TLS-EXT'>
+        <front>
+          <title>Transport Layer Security (TLS) Extensions</title>
+          <author initials='S.' surname='Blake-Wilson' fullname='S. Blake-Wilson'>
+            <organization /></author>
+          <author initials='M.' surname='Nystrom' fullname='M. Nystrom'>
+            <organization /></author>
+          <author initials='D.' surname='Hopwood' fullname='D. Hopwood'>
+            <organization /></author>
+          <author initials='J.' surname='Mikkelsen' fullname='J. Mikkelsen'>
+            <organization /></author>
+          <author initials='T.' surname='Wright' fullname='T. Wright'>
+            <organization /></author>
+          <date year='2006' month='April' />
+          <abstract><t>This document describes extensions that may be used to add functionality to Transport Layer Security (TLS). It provides both generic extension mechanisms for the TLS handshake client and server hellos, and specific extensions using these generic mechanisms.&lt;/t>&lt;t> The extensions may be used by TLS clients and servers. The extensions are backwards compatible: communication is possible between TLS clients that support the extensions and TLS servers that do not support the extensions, and vice versa. [STANDARDS TRACK]</t></abstract>
+        </front>
+        <seriesInfo name='RFC' value='4366' />
+        <format type='TXT' octets='66344' target='http://www.ietf.org/rfc/rfc4366.txt' />
+      </reference>
+      <reference anchor='RFC2119'>
+        <front>
+          <title abbrev='RFC Key Words'>Key words for use in RFCs to Indicate Requirement Levels</title>
+          <author initials='S.' surname='Bradner' fullname='Scott Bradner'>
+            <organization>Harvard University</organization>
+            <address>
+              <postal>
+                <street>1350 Mass. Ave.</street>
+                <street>Cambridge</street>
+                <street>MA 02138</street>
+              </postal>
+              <phone>- +1 617 495 3864</phone>
+              <email>sob@harvard.edu</email>
+            </address>
+          </author>
+          <date year='1997' month='March' />
+          <area>General</area>
+          <keyword>keyword</keyword>
+        </front>
+        <seriesInfo name='BCP' value='14' />
+        <seriesInfo name='RFC' value='2119' />
+        <format type='TXT' octets='4723' target='ftp://ftp.isi.edu/in-notes/rfc2119.txt' />
+        <format type='HTML' octets='16553' target='http://xml.resource.org/public/rfc/html/rfc2119.html' />
+        <format type='XML' octets='5703' target='http://xml.resource.org/public/rfc/xml/rfc2119.xml' />
+      </reference>
+    </references>
+    <references title="Informative References">
+      <reference anchor='HTTPS'>
+        <front>
+          <title>HTTP Over TLS</title>
+          <author initials='E' surname='Rescorla' fullname='Eric Rescorla'>
+            <organization>RTFM, Inc.</organization>
+          </author>
+          <date month='May' year='2000' />
+        </front>
+        <seriesInfo name='RFC' value='2818' />
+        <format type='TXT' target='http://www.ietf.org/rfc/rfc2818.txt' />
+        <format type='HTML' target='http://tools.ietf.org/html/rfc2818' />
+      </reference>
+      <reference anchor='proxy_server_ext'>
+        <front>
+          <title>TLS Proxy Server Extension</title>
+          <author initials='D' surname='McGrew' fullname='David A. McGrew'><organization>Cisco Systems</organization></author>
+          <author initials='P' surname='Gladstone' fullname='Philip Gladstonew'><organization>Cisco Systems</organization></author>
+          <date month='July' day='4' year='2011' />
+        </front>
+        <seriesInfo name='Internet-Draft' value='draft-mcgrew-tls-proxy-server-00' />
+        <format type='TXT' target='http://www.ietf.org/internet-drafts/draft-mcgrew-tls-proxy-server-00.txt' />
+      </reference>
+    </references>
+    <!-- ====================================================================== -->
+  </back>
+</rfc>

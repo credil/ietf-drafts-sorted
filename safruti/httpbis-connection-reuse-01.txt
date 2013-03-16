@@ -1,0 +1,672 @@
+
+
+
+Network Working Group                                         I. Safruti
+Internet-Draft                                                    Akamai
+Intended status: Standards Track                           June 16, 2012
+Expires: December 18, 2012
+
+
+     Connection Reuse for Multiple Hostnames and for Fast Redirect
+               draft-safruti-httpbis-connection-reuse-01
+
+Abstract
+
+   This document describes a suggested enhancement to HTTP, in which a
+   user-agent and a server can use a single connection to exchange
+   requests/responses for multiple requested hostnames for which the
+   server is authorized to serve.  This enhancement suggests that user-
+   agents will prefer to re-use an existing connection if it can be used
+   to other hosts, and presents methods for a server to announce hosts
+   that are served by it, as well as a mechanism for the user-agent to
+   validate that the server is indeed trusted to serve this hosts.
+
+   This is highly relevant when the server is actually a surrogate (like
+   in a case of a CDN server), or in multi-hosts hosting environments,
+   where the same server serves multiple hostnames/domains and can
+   improve performance by the reuse of established and already optimized
+   connections.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on December 18, 2012.
+
+Copyright Notice
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+
+
+
+Safruti                 Expires December 18, 2012               [Page 1]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Overview . . . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Client Side Implementation . . . . . . . . . . . . . . . . . .  4
+     2.1.  Address validation . . . . . . . . . . . . . . . . . . . .  4
+     2.2.  Validate server certificate  . . . . . . . . . . . . . . .  4
+   3.  Announcing permission to serve on behalf of a hostname . . . .  5
+     3.1.  Trigger the UA to validate the hostname  . . . . . . . . .  5
+     3.2.  Signing the domain . . . . . . . . . . . . . . . . . . . .  5
+     3.3.  Announcement message format  . . . . . . . . . . . . . . .  6
+     3.4.  Notes and comments . . . . . . . . . . . . . . . . . . . .  6
+   4.  Reusing a single connection for multiple hosts over TLS  . . .  7
+     4.1.  Using a surrogate certificate  . . . . . . . . . . . . . .  7
+   5.  Redirect using a single connection . . . . . . . . . . . . . .  8
+     5.1.  Background . . . . . . . . . . . . . . . . . . . . . . . .  8
+     5.2.  Validate server hostname binding . . . . . . . . . . . . .  8
+     5.3.  Reuse-Connection header  . . . . . . . . . . . . . . . . .  8
+   6.  Security Considerations  . . . . . . . . . . . . . . . . . . .  9
+   7.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 10
+   8.  References . . . . . . . . . . . . . . . . . . . . . . . . . . 11
+     8.1.  Normative References . . . . . . . . . . . . . . . . . . . 11
+     8.2.  Informative References . . . . . . . . . . . . . . . . . . 11
+   Author's Address . . . . . . . . . . . . . . . . . . . . . . . . . 12
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012               [Page 2]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+1.  Overview
+
+   This document assumes that HTTP/2.0 will utilize some method of
+   requests multiplexing on a single connection.  By enabling requests
+   multiplexing we can utilize a single connection for the delivery of
+   multiple requests at the same level of performance (or better),
+   reducing the overall number of connections required.  Another benefit
+   of a single connection is utilizing an established and optimized
+   connection, and eliminating the overhead of connection setup.
+
+   Most HTTP/1.1 user-agents will establish a separate connection
+   according to the hostname and not only by the IP address the hostname
+   resolves to.  In fact a user-agent will typically open up to 6
+   different connections per hostname, to improve requests parallelism
+   due to the way HTTP/1.1 is implemented.
+
+   It is common that a single server, or IP address will serve multiple
+   hosts, for instance in the case of CDNs, server farms, and when
+   multiple servers are fronted by a load balancer.  It is also common
+   for a standard page to include multiple resources that are loaded
+   from different hosts forcing the user-agent to establish many
+   connections to retrieve a page.  Splitting resources between multiple
+   hostnames (also referred to as domain sharding) are a common practice
+   with HTTP/1.1 due to the limitation of HTTP/1.1 (number of
+   connections per domain, and serialization/blocking of HTTP requests).
+
+   Utilizing a single optimized connection for multiple sites can reduce
+   overhead of TCP connection setup, reduce load on server and client,
+   and will speed the delivery of 3rd party and embedded objects if they
+   are served from the same IP.
+
+   Given that today web-sites are designed in a way that synthetically
+   spread the resources on multiple hostnames, supporting multiple
+   hostnames per single connection will be very helpful for the
+   migrating from HTTP/1.1 to HTTP/2.0, with no application level
+   change.
+
+   It is important to note that HTTP/1.1 doesn't force a user-agent to
+   establish a new connection for a different host, and it is perfectly
+   valid to reuse a connection for multiple hosts if all hosts are
+   resolved to the same IP address.  However, due to other limitations
+   of HTTP/1.1 it is typically not implemented that way.
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012               [Page 3]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+2.  Client Side Implementation
+
+   Validate server address, and trust to serve hostname's content.
+
+2.1.  Address validation
+
+   When trying to establish a connection to a host, the user-agent will
+   resolve the hostname to get an address (typically an IP address) to
+   connect to.  At that point - if a connection to that address is
+   already established, the user-agent should try and reuse that
+   connection to send requests to the host.
+
+2.2.  Validate server certificate
+
+   In section 3 we describe a method for a server to sign/validate that
+   it is trusted to serve on behalf of a hostname.  For the purpose of
+   this section we assume that such a method exists, where the server
+   declares it is trusted to serve a domain, and the user-agent can
+   validate that.
+
+   At the point where such a validation is done, the user-agent can now
+   reuse the existing connection to that server to send over it requests
+   intended to the hostname.
+
+   The user agent should cache the hostname-server binding for the
+   provided TTL.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012               [Page 4]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+3.  Announcing permission to serve on behalf of a hostname
+
+   Trusting DNS, or name resolution methods will not necessarily lead to
+   the best outcome in means of performance.  For once, it requires the
+   user-agent to perform a task of resolving the hostname address that
+   typically will take an additional roundtrip.  The other issue is that
+   as DNS is typically stateless, in case there are multiple servers
+   serving this hostname, the user-agent may be assigned to a different
+   server.
+
+   This creates the need for a server to announce over an existing
+   connection that it is also trusted to serve on behalf of other
+   hostnames.  It is up to the server implementation to determine when
+   it should announce that, and in case it serves multiple hostnames,
+   which hostnames it should announce.
+
+   The server should announce the supported hostname by sending a
+   control message.  This assumes that HTTP will supports control
+   messages, however, if it will not, HTTP headers can be used instead.
+
+   We suggest 2 methods to sign or validate permission to handle the
+   hostname.
+
+3.1.  Trigger the UA to validate the hostname
+
+   In this scenario the server announces support of the hostname or
+   domain. by doing so, it calls the UA to validate that, using a
+   standard TLS handshake with the server.  The UA sends a challenge to
+   the server, and using the standard methods provided by TLS the
+   validity of the certificate can be verified.  This calls for a simple
+   implementation as it relies on standard TLS methods, however this
+   method also adds roundtrips for the validation process.
+
+3.2.  Signing the domain
+
+   To eliminate the need for additional roundtrips, we are suggesting an
+   additional method in which the server will send the validation for
+   the domain as part of announcing the hostname.  As there is no
+   challenge from the UA, the server should generating a message that
+   will indicate that the specific server is trusted, for instance a
+   message that includes the address of the server and the announced
+   hostname, and signing it with the private key of the certificate,
+   which could be easily validated with the public key of the
+   certificate.
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012               [Page 5]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+3.3.  Announcement message format
+
+   The announcement of a hostname or domain should include the following
+   3 elements:
+
+   o  The announced hostname
+
+   o  TTL for the assignment of the hostname to the specific server
+
+   o  The verification, which can be provided as part of the message, or
+      achieved by the client initiating the verification
+
+3.4.  Notes and comments
+
+   This document suggests using TLS methods to help validate and
+   authenticate server permissions to serve specific hostnames.  This
+   risks crossing between layers, and crossing the scope of HTTP,
+   however this is required to enable more efficient connection reuse.
+   One alternative could be to manage the act of the validation and
+   certificate push as a TLS extension, and to provide the right hooks
+   for HTTP to trigger such a task, either by the client (when receiving
+   the announcement from the server), or by the server.
+
+   It should also be noted that this section describes concept rather
+   than specific implementation details, as these can be finalized if
+   the concepts are agreed upon.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012               [Page 6]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+4.  Reusing a single connection for multiple hosts over TLS
+
+   In section 2 we describe a mechanism for the client to reuse a
+   connection for multiple hosts served by the server.  This is good
+   when not using TLS, on a non-encrypted connection.
+
+   Once TLS is used, it is important to ensure the privacy and security
+   of the different hosts, as typically each host is using a different
+   certificate, we want to ensure that having control of one certificate
+   will not enable you to decipher request and responses of another host
+   on the same connection.
+
+4.1.  Using a surrogate certificate
+
+   In a case where the server would like to serve multiple hosts over
+   TLS, the server should use a "neutral" certificate, namely a
+   certificate issued for the surrogate.  When establishing the TLS
+   connection the server will use the surrogate certificate and will
+   immediately provide evidence that it is trusted to serve the
+   requested hostname, signing a message in a manner similar to the
+   signing above.
+
+   In this specific case, the validating could be achieved by signing
+   its own public key with the certificate of the requested host that
+   should be validated.
+
+   This method provides the privacy and security required by TLS, while
+   enabling serving multiple hosts.  No single certificate owner can
+   decipher the connection as the connection is encrypted using the
+   surrogate certificate that is known only to the surrogate.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012               [Page 7]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+5.  Redirect using a single connection
+
+5.1.  Background
+
+   Redirects are extremely common on today's sites.  In many cases the
+   redirects are used for naming and brand reasons and SEO reasons, or
+   to ease handling of requests (like the case for mobile sites), and
+   not necessarily to hand over to a different server.  Where the
+   redirected URL is served from the same server, the process of
+   resolving the DNS record, and forcing a new connection is highly
+   inefficient.
+
+   We suggest a mechanism that will enable a server to indicate with a
+   redirect response that the new URL can be requested over the existing
+   connection.  By doing that, eliminating the need for additional
+   round-trips and warming up new connections.
+
+5.2.  Validate server hostname binding
+
+   By utilizing the method above to validate the server is trusted to
+   serve the redirected hostname, the user-agent can reuse the
+   connection as detailed above.
+
+5.3.  Reuse-Connection header
+
+   The server can add a specific header "Reuse-Connection" on a redirect
+   response to indicate that the redirect should reuse the same
+   connection it is delivered on.  In that case the user-agent must
+   validate that the server is trusted for that hostname and if valid
+   should reuse the connection to send the redirected request.
+
+   A sample response would look like this: server (www.example.com) -->
+   UA
+
+           HTTP/2.0 301 Moved Permanently
+           Location: mobile.example.com
+           Reuse-Connection: 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012               [Page 8]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+6.  Security Considerations
+
+   Announcing additional domains has a potential to break things, and
+   add the risk of enabling hijack domains and sites, as well as getting
+   access to domain specific data, such as user-agent's cookies.
+
+   To prevent that, a strong validation is required, and we believe that
+   TLS methods as described provides that requirement.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012               [Page 9]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+7.  IANA Considerations
+
+   ...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012              [Page 10]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+8.  References
+
+8.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC2234]  Crocker, D., Ed. and P. Overell, "Augmented BNF for Syntax
+              Specifications: ABNF", RFC 2234, November 1997.
+
+8.2.  Informative References
+
+   [Fab1999]  Faber, T., Touch, J., and W. Yue, "The TIME-WAIT state in
+              TCP and Its Effect on Busy Servers", 1999.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012              [Page 11]
+
+Internet-Draft              Connection Reuse                   June 2012
+
+
+Author's Address
+
+   Ido Safruti
+   Akamai Technologies
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Safruti                 Expires December 18, 2012              [Page 12]
+

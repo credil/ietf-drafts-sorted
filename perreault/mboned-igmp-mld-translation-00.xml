@@ -1,0 +1,654 @@
+<?xml version="1.0"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+
+<?rfc compact="yes"?>
+<?rfc toc="yes"?>
+<?rfc sortrefs="yes"?>
+<?rfc strict="yes"?>
+<?rfc subcompact="no"?>
+<?rfc symrefs="yes"?>
+
+<!-- TODO: Add support for Lightweight MLDv2? [RFC5790] Is there anything that
+     needs to be done? -->
+
+<rfc ipr="trust200902" docName="draft-perreault-mboned-igmp-mld-translation-00"
+  category="std">
+
+  <front>
+
+    <title abbrev="IGMP/MLD Translation">Internet Group Management Protocol
+      (IGMP) / Multicast Listener Discovery (MLD)-Based Multicast Translation
+      ("IGMP/MLD Translation")</title>
+
+    <author initials="S." surname="Perreault" fullname="Simon Perreault">
+      <organization>Viagénie</organization>
+      <address>
+        <postal>
+          <street>246 Aberdeen</street>
+          <city>Québec</city>
+          <region>QC</region>
+          <code>G1R 2E1</code>
+          <country>Canada</country>
+        </postal>
+        <phone>+1 418 656 9254</phone>
+        <email>simon.perreault@viagenie.ca</email>
+        <uri>http://viagenie.ca</uri>
+      </address>
+    </author>
+
+    <author initials="T." surname="Tsou" fullname="Tina Tsou">
+      <organization>Huawei Technologies (USA)</organization>
+      <address>
+        <postal>
+          <street>2330 Central Expressway</street>
+          <city>Santa Clara</city>
+          <region>CA</region>
+          <code>95050</code>
+          <country>USA</country>
+        </postal>
+        <phone>+1 408 330 4424</phone>
+        <email>tina.tsou.zouting@huawei.com</email>
+      </address>
+    </author>
+
+    <date/>
+
+    <abstract>
+      <t>This document describes translation between IPv4 and IPv6 of multicast
+        flows by an IGMP/MLD proxy. This allows single-stack nodes to
+        participate in multicast groups from a different address family. Both
+        sending and receiving is supported by this translation mechanism. Both
+        any-source and source-specific multicast (ASM and SSM) are supported as
+        well.</t>
+    </abstract>
+
+  </front>
+
+  <middle>
+
+    <section title="Introduction">
+
+      <t>This document specifies IGMP/MLD translation, a mechanism for IPv4-IPv6
+        transition and coexistence. It enables single-stack (i.e., IPv4-only or
+        IPv6-only) hosts to participate, either as listeners, sources, or both,
+        in multicast groups belonging to a different address family.</t>
+
+      <t>This translation mechanism is designed to be part of an IGMP/MLD proxy
+        <xref target="RFC4605"/>. It could be located at the customer network
+        edge (e.g., in customer-premises equipment (CPE)) or at the provider
+        network edge (e.g., in a DSLAM for DSL networks, in a CMTS for cable
+        networks, etc.), or any other node reachable by IGMP/MLD packets.  Note
+        that the proxy function could be virtual, feeding its output directly
+        into a multicast router process (e.g., a PIM daemon) running on the same
+        host as the translating proxy.</t>
+
+    </section>
+
+    <section title="Terminology">
+
+      <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+        "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+        document are to be interpreted as described in <xref
+          target="RFC2119"/>.</t>
+
+      <t>The unqualified term "proxy" refers to an IGMP/MLD proxy as defined in
+        <xref target="RFC4605"/>.</t>
+
+    </section>
+
+    <section title="Overview">
+
+      <t>As described in <xref target="RFC4605"/>, an IGMP/MLD proxy is located
+        between an upstream network and one or more downstream networks.
+        Listeners are in the downstream networks while the rest of the multicast
+        infrastructure is upstream. It is possible to arrange multiple proxies
+        in a tree topology, where one proxy's upstream network is another's
+        downstream network.</t>
+
+      <t>The translation function is logically situated between the proxy and
+        the upstream network, as shown in <xref target="figure-topology"/>.</t>
+
+      <figure anchor="figure-topology" align="center"
+        title="IGMP/MLD translator function topology">
+        <artwork>
+  Upstream
+     |
++----+-----+
+|Translator|
++----+-----+
+     |
+ +---+----+
+ | Proxy  |
+ +-+-+-+-++
+   | | | |
+Downstream(s)
+        </artwork>
+      </figure>
+
+      <t>If the translator and proxy functions are performed by the same node,
+        as is expected to be the common case, the node acts as a translating
+        multicast router. If two nodes are used instead, the translator would be
+        considered a "bump in the wire", acting as a link-layer bridge that
+        modifies the data transiting through it. These two implementation
+        possibilities are both supported by this document. Focus is on the
+        logical definition of the translator function.</t>
+
+      <t>There are two reasons for locating the translator upstream of the proxy
+        rather than downstream:
+        <list style="numbers">
+          <t>Translating addresses on downstream interfaces could interfere with
+            Querier elections. As described in <xref target="RFC3376"/> section
+            6.6.2 and <xref target="RFC3810"/> section 7.6.2, IGMP and MLD
+            routers elect a Querier amongst themselves. The criteria for winning
+            the election is based on the source address of IGMP/MLD Queries.
+            Having a translator on a downstream interface would impose a new
+            constraint on the address mapping scheme: it would need to ensure
+            the same election result before and after applying the mapping. This
+            constraint is lifted when the translation is applied to the upstream
+            interface instead. Since a proxy acts as a client on its upstream
+            interface, it does not participate in Querier elections.</t>
+          <t>There is only one upstream interface whereas there may be multiple
+            downstream interfaces. Applying the translation on the upstream
+            interface has the advantage of having a single translation point,
+            which can facilitate debugging and troubleshooting.</t>
+        </list>
+      </t>
+
+      <t>State information is not duplicated. Internally, the address family of
+        the membership state maintained by the proxy and the address families of
+        the IGMP/MLD router and client state machines will all be the same as
+        that of its downstream networks. This enables existing proxy code to be
+        reused as-is.  Furthermore, and perhaps more importantly, avoiding
+        duplication of state eliminates the possibility of IPv4 and IPv6
+        state data getting out of sync.</t>
+
+      <t>Conceptually, translation is applied to messages sent upstream by the
+        client state machine and to messages received from upstream. This
+        document specifies how translation is carried out in terms of packet
+        translation. However, a particular implementation is at liberty to adopt
+        any internal structure as long as externally observable behavior is
+        identical.</t>
+
+      <section title="Mixed IPv4/IPv6 Networks">
+
+        <t>In mixed networks, where there may be both IPv4 and IPv6 receivers,
+          two logical proxies are used. Each maintains membership state and runs
+          state machines in the address families of the receivers it is
+          proxying.  Translation is applied to only one of them. This is
+          illustrated in <xref target="figure-mixed"/>.</t>
+
+        <figure anchor="figure-mixed" align="center"
+          title="Mixed IPv4/IPv6 topology">
+          <artwork>
+           Upstream
+      +-----IPvX-----+
+      |              |
+ +----+-----+        |
+ |Translator|        |
+ +----+-----+        |
+      |              |
++---+--------+ +-----+------+
+| Proxy IPvY | | Proxy IPvX |
++-+-+-+-+-+--+ +-+-+-+-+-+--+
+  | | | | |      | | | | |
+Downstream(s)   Downstream(s)
+    IPvX            IPvX
+          </artwork>
+        </figure>
+
+      </section>
+
+      <section title="Role in the Multrans Framework">
+        <t>TODO</t>
+      </section>
+
+    </section>
+
+    <section title="Signalling Translation">
+
+      <t>This section describes how to translate between IGMP and MLD.</t>
+
+      <section title="IP Headers">
+
+        <section title="Addresses">
+
+          <t>Destination addresses are translated as follows:
+            <list style="hanging">
+              <t hangText="MLDv2 and IGMPv3:">The destination address is a
+                well-known address and is translated as listed in <xref
+                  target="table-multicast-well-known"/>.</t>
+              <t hangText="MLDv1, IGMPv1, and IGMPv2:">The destination address
+                corresponds to the address of the multicast group. The multicast
+                group address is mapped between IPv4 and IPv6 as described in
+                <xref
+                  target="I-D.boucadair-64-multicast-address-format"/>.</t>
+            </list>
+          </t>
+
+          <texttable anchor="table-multicast-well-known"
+            title="IPv4/IPv6 Well-Known Multicast Address Equivalences">
+            <ttcol>Description</ttcol>
+            <ttcol>IPv4</ttcol>
+            <ttcol>IPv6</ttcol>
+
+            <c>All nodes on link</c>
+            <c>224.0.0.1</c>
+            <c>ff02::1</c>
+
+            <c>All routers on link</c>
+            <c>224.0.0.2</c>
+            <c>ff02::2</c>
+
+            <c>All IGMP/MLD-capable routers on link</c>
+            <c>224.0.0.22</c>
+            <c>ff02::16</c>
+          </texttable>
+
+          <t>Source addresses are translated as follows:
+            <list style="hanging">
+              <t hangText="IGMP to MLD:">The source address is set to a
+                link-local IPv6 address assigned to the proxy's upstream
+                interface.</t>
+              <t hangText="MLD to IGMP:">The source address is set to the IPv4
+                address assigned to the proxy's upstream interface.</t>
+            </list>
+          </t>
+
+          <t>IGMP and MLD Reports having an unspecified source address (0.0.0.0
+            or ::) are handled differently. In MLD, they are dropped (<xref
+              target="RFC3810"/> section 5.2.13). In IGMP, they are accepted
+            (<xref target="RFC3376"/> section 4.2.13). This means that
+            translating 0.0.0.0 to :: and vice-versa would change the router's
+            behaviour: it would accept a message that should have been dropped,
+            and vice-versa. To eliminate this ambiguity, the translator MUST
+            drop IGMP and MLD reports having an unspecified source address.</t>
+
+        </section>
+
+        <section title="Router-Alert Option">
+          <t>IGMP messages are sent with a Router Alert IPv4 option <xref
+              target="RFC2113"/> while MLD message are sent with a Router Alert
+            option in a Hop-By-Hop IPv6 extension header <xref
+              target="RFC2711"/>. The translator needs to convert between these
+            two. In particular, a Router Alert option MUST be sent on output if
+            and only if it was received on input. The value MUST be set to zero
+            unconditionally because the IPv4 and IPv6 value spaces are not
+            identical.</t>
+        </section>
+
+      </section>
+
+      <section title="IGMP/MLD Translation">
+
+        <section title="Message Type Equivalences">
+
+          <t>The IGMP/MLD messages to be handled by the translator belong to the
+            proxy's upstream interface, on which the proxy acts as a listener.
+            This means that translation will be applied to IGMP/MLD Reports and
+            Leave/Done messages sent from the proxy as well as to to IGMP/MLD
+            Queries received from routers.</t>
+
+          <t>Upon reception of an IGMP message with a type field containing one
+            of the values listed in <xref target="table-message-types"/>, the
+            translator will intercept the message and produce an equivalent
+            MLDv2 message corresponding to an ICMPv6 message with the listed
+            type number in the same row. The translator will perform the reverse
+            operation upon reception of an MLDv2 message.</t>
+
+          <texttable anchor="table-message-types"
+            title="IGMP/MLD Message Type Equivalences">
+            <ttcol>IGMP type number</ttcol>
+            <ttcol>ICMPv6 type number</ttcol>
+
+            <c>17 IGMPv1/v2/v3 Query</c>
+            <c>130 MLDv1/v2 Query</c>
+
+            <c>18 IGMPv1 Report</c>
+            <c>131 MLDv1 Report</c>
+
+            <c>22 IGMPv2 Report</c>
+            <c>131 MLDv1 Report</c>
+
+            <c>23 IGMPv2 Leave</c>
+            <c>132 MLDv1 Done</c>
+
+            <c>34 IGMPv3 Report</c>
+            <c>143 MLDv2 Report</c>
+          </texttable>
+
+        </section>
+
+        <section title="The &quot;Translated&quot; Bit">
+
+          <t>Experience IPv6 transition in general and translation in particular
+            has shown that it is often useful, for various reasons, most often
+            of an operational nature,  that can not necessarily be anticipated
+            at the time a specification gets written, to include a mechanism
+            allowing the identification of translated traffic.</t>
+
+          <t>This specification tries to anticipate that need by assigning a
+            reserved bit in both IGMPv3 and MLDv2 for such a purpose. When set
+            to 1, it indicates a message that has been translated according to
+            this specification at least once. When set to 0, it indicates that
+            no translation has been performed.</t>
+
+          <t>A translator conforming to this specification MUST set the
+            Translated bit to 1 on output. The bit is ignored on input by
+            default, meaning that a message could be translated twice or more.
+            This will often be undesirable, but is allowed by this
+            specification.</t>
+
+          <t>In an IGMPv3 Query, bit number 64 is the Translated bit, as shown
+            in <xref target="figure-translated-bit-igmpv3-query"/>.</t>
+
+          <t>In an IGMPv3 Report, bit number 32 is the Translated bit, as shown
+            in <xref target="figure-translated-bit-igmpv3-report"/>.</t>
+
+          <t>In an MLDv2 Query, bit number 192 is the Translated bit, as shown
+            in <xref target="figure-translated-bit-mldv2-query"/>.</t>
+
+          <t>In an MLDv2 Report, bit number 32 is the Translated bit, as shown
+            in <xref target="figure-translated-bit-mldv2-report"/>.</t>
+
+          <figure anchor="figure-translated-bit-igmpv3-query" align="center"
+            title="&quot;Translated&quot; bit in an IGMPv3 Query (identified by the letter T)">
+            <artwork>
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|  Type = 0x11  | Max Resp Code |           Checksum            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                         Group Address                         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|T|Resv |S| QRV |     QQIC      |     Number of Sources (N)     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       Source Address [1]                      |
++-                                                             -+
+|                       Source Address [2]                      |
++-                              .                              -+
+.                               .                               .
+.                               .                               .
++-                                                             -+
+|                       Source Address [N]                      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            </artwork>
+          </figure>
+
+          <figure anchor="figure-translated-bit-igmpv3-report" align="center"
+            title="&quot;Translated&quot; bit in an IGMPv3 Report (identified by the letter T)">
+            <artwork>
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|  Type = 0x22  |    Reserved   |           Checksum            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|T|         Reserved            |  Number of Group Records (M)  |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+.                                                               .
+.                        Group Record [1]                       .
+.                                                               .
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+.                                                               .
+.                        Group Record [2]                       .
+.                                                               .
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               .                               |
+.                               .                               .
+|                               .                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+.                                                               .
+.                        Group Record [M]                       .
+.                                                               .
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            </artwork>
+          </figure>
+
+          <figure anchor="figure-translated-bit-mldv2-query" align="center"
+            title="&quot;Translated&quot; bit in an MLDv2 Query (identified by the letter T)">
+            <artwork>
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|  Type = 130   |      Code     |           Checksum            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|    Maximum Response Code      |           Reserved            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+*                                                               *
+|                                                               |
+*                       Multicast Address                       *
+|                                                               |
+*                                                               *
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|T|Resv |S| QRV |     QQIC      |     Number of Sources (N)     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+*                                                               *
+|                                                               |
+*                       Source Address [1]                      *
+|                                                               |
+*                                                               *
+|                                                               |
++-                                                             -+
+|                                                               |
+*                                                               *
+|                                                               |
+*                       Source Address [2]                      *
+|                                                               |
+*                                                               *
+|                                                               |
++-                              .                              -+
+.                               .                               .
+.                               .                               .
++-                                                             -+
+|                                                               |
+*                                                               *
+|                                                               |
+*                       Source Address [N]                      *
+|                                                               |
+*                                                               *
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            </artwork>
+          </figure>
+
+          <figure anchor="figure-translated-bit-mldv2-report" align="center"
+            title="&quot;Translated&quot; bit in an MLDv2 Report (identified by the letter T)">
+            <artwork>
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|  Type = 143   |    Reserved   |           Checksum            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|T|         Reserved            |Nr of Mcast Address Records (M)|
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+.                                                               .
+.                  Multicast Address Record [1]                 .
+.                                                               .
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+.                                                               .
+.                  Multicast Address Record [2]                 .
+.                                                               .
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               .                               |
+.                               .                               .
+|                               .                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+.                                                               .
+.                  Multicast Address Record [M]                 .
+.                                                               .
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+            </artwork>
+          </figure>
+
+        </section>
+
+        <section title="Maximum Response {Delay,Time}">
+
+          <t>IGMPv2 and IGMPv3 queries contain a field specifying the Maximum
+            Response Time (MRT), which is the maximum time allowed before
+            sending a Report, expressed in units of 1/10 seconds. Similarly,
+            MLDv1 and MLDv2 queries contain a field specifying the Maximum
+            Response Delay (MRD), expressed in units of milliseconds.</t>
+
+          <t>IGMPv2 (resp. MLDv1) encode the MRT (resp. MRD) value directly as
+            a binary integer. IGMPv3 (resp. MLDv2) allows a floating-point
+            encoding as well.</t>
+
+          <t>IGMPv2 and IGMPv3 uses an 8-bit field while MLDv1 and MLDv2 use a
+            16-bit field.</t>
+
+          <t>The conversion algorithm is as follows:
+            <list style="hanging">
+
+              <t hangText="IGMPv2 to MLDv1:">MRD = 100 * MRT</t>
+              <t>All values that can be represented in IGMPv2 can be
+                equivalently represented in MLDv1 without loss of precision.</t>
+
+              <t hangText="IGMPv3 to MLDv2:">MRD = 100 * MRT</t>
+              <t>All values that can be represented in IGMPv3 can be
+                equivalently represented in MLDv2 without loss of precision.</t>
+              <t>If MRT &lt; 128, both MRT and MRD will be encoded as binary
+                integers.</t>
+              <t>If 128 &lt;= MRT &lt; 336, MRT will be encoded as a
+                floating-point value while MRD will be encoded as a binary
+                integer.</t>
+              <t>If 336 &lt;= MRT, both MRT and MRD will be encoded as
+                floating-point values.</t>
+
+              <t hangText="MLDv1 to IGMPv2:">MRT = min(255, round(MRD / 100))</t>
+              <t>The MRD is divided by 100, rounded to the nearest integer, then
+                capped at 255 (the largest MRT value representable in IGMPv2).
+                There is both precision and range loss.</t>
+
+              <t hangText="MLDv2 to IGMPv3:">MRT = min(31744, round(MRD / 100))</t>
+              <t>The MRD is divided by 100, rounded to the nearest integer, then
+                capped at 31744 (the largest MRT value representable in IGMPv3).
+                There is both precision and range loss.</t>
+              <t>If MRD &lt; 12800, both MRD and MRT will be encoded as binary
+                integers.</t>
+              <t>If 12800 &lt;= MRD &lt; 32768, MRD will be encoded as a binary
+                integer while MRT will be encoded as a floating-point value.</t>
+              <t>If 32768 &lt;= MRD, both MRD and MRT will be encoded as binary
+                integers.</t>
+            </list>
+          </t>
+        </section>
+
+        <section title="Multicast Group Address">
+          <t>The multicast group address is mapped between IPv4 and IPv6 as
+            described in <xref
+              target="I-D.boucadair-64-multicast-address-format"/>.</t>
+        </section>
+
+        <section title="Source Addresses">
+          <t>Source addresses, if any, are mapped as follows:
+            <list style="hanging">
+              <t hangText="IGMP to MLD:">IPv4 source addresses are mapped as
+                described in <xref target="RFC6052"/> section 2.2.</t>
+              <t hangText="MLD to IGMP:">An IPv4 address is extracted from an
+                IPv6 source address as described in <xref target="RFC6052"/>
+                section 2.2. MLD messages containing a source address outside
+                the IPv4-Embedded IPv6 Prefix are dropped unless there exists an
+                applicable statically configured mapping.</t>
+            </list>
+          </t>
+        </section>
+
+        <section title="Additional and Auxiliary Data">
+          <t>All IGMPv3 and MLDv2 messages can contain Additional Data, as
+            defined in <xref target="RFC3376"/> sections 4.1.10 and 4.2.11 and
+            <xref target="RFC3810"/> sections 5.1.12 and 5.2.11.</t>
+
+          <t>In addition, IGMPv3 and MLDv2 Reports can contain Auxiliary Data,
+            as defined in <xref target="RFC3376"/> section 4.2.10 and <xref
+              target="RFC3810"/> section 5.2.10.</t>
+
+          <t>A translator MUST preserve Additional and Auxiliary Data. This is
+            accomplished by treating such data an an opaque blob and setting the
+            appropriate IPv4 or ICMPv6 length fields appropriately.</t>
+        </section>
+
+      </section>
+
+      <section title="MTU Considerations">
+        <t>MTU issues should be handled at the application layer, not at the IP
+          layer. That is, the translator MUST split large Report messages into
+          smaller pieces that fit into an interface's MTU after translation, as
+          described in <xref target="RFC3810"/> section 5.2.15 and <xref
+            target="RFC3376"/> section 4.2.16..</t>
+      </section>
+
+    </section>
+
+    <section title="Data Transfer">
+
+      <t>The IGMP/MLD translator is configured either to translate the headers
+        of multicast packets or to encapsulate/decapsulate them. This applies to
+        regular multicast traffic, not to IGMP/MLD signalling.</t>
+
+      <t>Translation is performed according to <xref target="RFC6145"/>, with
+        the address mapping specified in <xref
+          target="I-D.boucadair-64-multicast-address-format"/>. IPv6
+        packets with a source or destination address outside MPREFIX64 are
+        dropped unless there exists an applicable statically configured
+        mapping.</t>
+
+      <t>Encapsulation/decapsulation might be preferable when joining two IPvX
+        islands across an IPvY network. Interfaces on which
+        encapsulation/decapsulation takes place are configured into the
+        translator. When encapsulating, the original packet is not modified. If
+        it is an IPv6 packet, it gets encapsulated in an IPv4 packet, and
+        vice-versa. The addresses of the encapsulating packet are obtained by
+        mapping those of the original packet according to <xref
+          target="I-D.boucadair-64-multicast-address-format"/>. When
+        decapsulating, the original packet is obtained from the encapsulating
+        packet's payload and is forwarded as-is. Refer to <xref
+          target="RFC2473"/> for details.</t>
+
+    </section>
+
+    <section title="IANA Considerations">
+      <t>TODO</t>
+    </section>
+
+    <section title="Security Considerations">
+      <t>TODO</t>
+    </section>
+
+    <section title="Acknowledgements">
+      <t>TODO</t>
+    </section>
+
+  </middle>
+
+  <back>
+    <references title="Normative References">
+      <?rfc include="reference.RFC.2119.xml"?>
+      <?rfc include="reference.RFC.2113.xml"?>
+      <?rfc include="reference.RFC.2473.xml"?>
+      <?rfc include="reference.RFC.2711.xml"?>
+      <?rfc include="reference.RFC.3376.xml"?>
+      <?rfc include="reference.RFC.3810.xml"?>
+      <?rfc include="reference.RFC.4605.xml"?>
+      <?rfc include="reference.RFC.6052.xml"?>
+      <?rfc include="reference.RFC.6145.xml"?>
+      <?rfc
+      include="reference.I-D.boucadair-64-multicast-address-format.xml"?>
+    </references>
+  </back>
+
+</rfc>

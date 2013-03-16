@@ -1,0 +1,1792 @@
+
+
+
+HyBi Working Group                                            J. Tamplin
+Internet-Draft                                                T. Yoshino
+Intended status: Standards Track                            Google, Inc.
+Expires: October 6, 2012                                   April 4, 2012
+
+
+                A Multiplexing Extension for WebSockets
+               draft-ietf-hybi-websocket-multiplexing-00
+
+Abstract
+
+   The WebSocket Protocol [RFC6455] requires a new transport connection
+   for every WebSocket connection.  This presents a scalability problem
+   when many clients connect to the same server, and is made worse by
+   having multiple clients running in different tabs of the same user
+   agent.  This extension provides a way for separate logical WebSocket
+   connections to share an underlying transport connection.
+
+   Please send feedback to the hybi@ietf.org mailing list.
+
+Status of this Memo
+
+   This Internet-Draft is submitted to IETF in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on October 6, 2012.
+
+Copyright Notice
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012                [Page 1]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Overview . . . . . . . . . . . . . . . . . . . . . . . . . . .  3
+     1.1.  Physical Connection and Logical Channels . . . . . . . . .  3
+   2.  Conformance Requirements . . . . . . . . . . . . . . . . . . .  4
+   3.  Interaction with other Extensions / Framing Mechanisms . . . .  5
+     3.1.  Choosing the point to apply an extension . . . . . . . . .  5
+   4.  Multiplexed Connections  . . . . . . . . . . . . . . . . . . .  7
+   5.  Flow Control . . . . . . . . . . . . . . . . . . . . . . . . .  8
+   6.  Framing  . . . . . . . . . . . . . . . . . . . . . . . . . . .  9
+   7.  Multiplex Control Blocks . . . . . . . . . . . . . . . . . . . 11
+     7.1.  AddChannelRequest  . . . . . . . . . . . . . . . . . . . . 11
+     7.2.  AddChannelResponse . . . . . . . . . . . . . . . . . . . . 14
+     7.3.  FlowControl  . . . . . . . . . . . . . . . . . . . . . . . 15
+     7.4.  DropChannel  . . . . . . . . . . . . . . . . . . . . . . . 16
+     7.5.  EncapsulatedControlFrame . . . . . . . . . . . . . . . . . 17
+   8.  Examples . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+   9.  Client Behavior  . . . . . . . . . . . . . . . . . . . . . . . 19
+   10. Buffering  . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+   11. Fairness . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+   12. Proxies  . . . . . . . . . . . . . . . . . . . . . . . . . . . 22
+   13. Nesting  . . . . . . . . . . . . . . . . . . . . . . . . . . . 23
+   14. Timeout  . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+   15. Close the Logical Channel  . . . . . . . . . . . . . . . . . . 25
+   16. Fail the Logical Channel . . . . . . . . . . . . . . . . . . . 26
+   17. Fail the Physical Connection . . . . . . . . . . . . . . . . . 27
+   18. Operations and Events on Multiplexed Connection  . . . . . . . 28
+   19. Security Considerations  . . . . . . . . . . . . . . . . . . . 29
+   20. IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 30
+   21. Normative References . . . . . . . . . . . . . . . . . . . . . 31
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 32
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012                [Page 2]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+1.  Overview
+
+   This document describes a multiplexing extension for the WebSocket
+   Protocol.  With this extension, one TCP connection can provide
+   multiple virtual WebSocket connections by tagging frames using
+   "Extension data".  A client that supports this extension will
+   advertise support for it in the client's opening handshake using the
+   "Sec-WebSocket-Extensions" header.  If the server supports this
+   extension and supports parameters compatible with the client's
+   request, it accepts the use of this extension by the
+   "Sec-WebSocket-Extensions" header in the server's opening handshake.
+
+1.1.  Physical Connection and Logical Channels
+
+   Under use of this extension, one transport connection is shared by
+   multiple application-level instances.  The WebSocket connection which
+   lies directly on the TCP connection and negotiated this multiplexing
+   extension is called "physical connection".  Data channels virtually
+   established by ID tagging are called "logical channels".  Control
+   information and data for each WebSocket appplication instances are
+   sent over corresponding logical channels.
+
+   Data for different logical channels are distinguished by the channel
+   ID allocated in the "Extension data" portion of each frame.
+
+   The opcode field in the base protocol's framing is used as-is to
+   indicate the type of a frame in transferring data frames of
+   multiplexed connections.  Not to confuse intermediaries that don't
+   understand multiplexing extension, multiplex control blocks are used
+   to transfer control frames of multiplexed connections.  For example,
+   it's possible that such intermediaries disconnect underlying
+   transport when they see a frame with opcode of close.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012                [Page 3]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+2.  Conformance Requirements
+
+   All diagrams, examples, and notes in this specification are non-
+   normative, as are all sections explicitly marked non-normative.
+   Everything else in this specification is normative.
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC2119 [RFC2119].
+
+   Requirements phrased in the imperative as part of algorithms (such as
+   "strip any leading space characters" or "return false and abort these
+   steps") are to be interpreted with the meaning of the key word
+   ("must", "should", "may", etc) used in introducing the algorithm.
+
+   Conformance requirements phrased as algorithms or specific steps MAY
+   be implemented in any manner, so long as the end result is
+   equivalent.  (In particular, the algorithms defined in this
+   specification are intended to be easy to follow, and not intended to
+   be performant.)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012                [Page 4]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+3.  Interaction with other Extensions / Framing Mechanisms
+
+   If any extension (e.g. compression) is placed before this extension
+   in the "Sec-WebSocket-Extensions" header of the physical connection,
+   that extension is applied to multiplexed connections unless otherwise
+   noted in the extension's spec.
+
+   If such an extension define fields in the "Extension data", they come
+   after this multiplexing extension's field.
+
+   If any extension is placed after this extension in the
+   "Sec-WebSocket-Extensions" header of the physical connection, that
+   extension is applied to frames after multiplexing on the sender side,
+   and before demultiplexing on the receiver side unless otherwise noted
+   in the extension's spec.
+
+   If such an extension define fields in the "Extension data", they come
+   before this multiplexing extension's field.
+
+   A client MAY request such an extension for both the physical
+   connection and the multiplexed connections by placing extension
+   entries before and after this multiplexing extension.  In this case,
+   the server SHOULD reject at least either of them if it's useless to
+   apply the same extension twice.
+
+   For example, if we have a compression extension called foo-compress,
+   the client sends
+
+     Sec-WebSocket-Extensions: foo-compress, mux, foo-compress
+
+   in the client's opening handshake of the physical connection to
+   request use of the compression for both physical and multiplexed
+   connections.  Then, the server would send back
+
+     Sec-WebSocket-Extensions: mux, foo-compress
+
+   to apply compression after multiplexing, or
+
+     Sec-WebSocket-Extensions: foo-compress, mux
+
+   to apply compression to multiplexed connections.
+
+3.1.  Choosing the point to apply an extension
+
+   Where to apply a compression extension makes difference to resource
+   consumption and flexibility.  Compression algorithms often use some
+   memory to keep its context.  Some of compression extensions may keep
+   using the same context for all the frames on the same connection.
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012                [Page 5]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+   If such an extension is applied to the physical connection,
+   intermediaries that want to demultiplex or multiplex the connection
+   need to decompress (before demultiplexing) and recompress (before
+   multiplexing again) all the frames.
+
+   If such an extension is applied to each multiplexed connection, we
+   can control to which channel we apply the compression, so we can
+   avoid applying compression to channels transferring incompressible
+   data.  Intermediaries that want to demultiplex can forward
+   Application data field leaving it untouched.  However, compressing
+   each multiplexed connection is expensive in terms of memory
+   consumption.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012                [Page 6]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+4.  Multiplexed Connections
+
+   The multiplexing extension maintains separate logical channels, each
+   of which provides fully the logical equivalent of an independent
+   WebSocket connection, including separate handshake headers.  If the
+   multiplexing extension is successfully negotiated, the headers on the
+   opening handshake of the physical connection are automatically taken
+   to mean one for the multiplexed connection 1 (served by the logical
+   channel with channel ID of 1), which is implicitly opened by
+   completing the handshake.  New channels are added by the client
+   issuing the AddChannelRequest multiplex control block (note that only
+   the client may initiate new WebSocket connections), including any
+   handshake headers which do not have the same value as the client's
+   opening handshake of the physical connection.  The server's
+   AddChannelResponse likewise includes any handshake headers which are
+   different from the server's opening handshake of the physical
+   connection (the details of this are TBD, but a simple suggestion for
+   a delta encoding is given below).  Channel 0 (control channel) is
+   reserved for multiplex control blocks and does not contain payload
+   data from any multiplexed connection.  In interpreting
+   "Sec-WebSocket-Extensions" header for a multiplexed connection, the
+   entry for this multiplexing extension is ignored but is used to
+   adjust parameters for the multiplexed connection.  A client which
+   attempts to add a channel to an existing connection that is not
+   accepted by the server SHOULD attempt to open a new underlying
+   connection and open a new WebSocket connection on it.
+
+   If any inconsistency is found between the "Sec-WebSocket-Extensions"
+   header for the physical channel and one for a logical channel (after
+   decoding header compression), the server MUST reject the
+   AddChannelRequest.
+
+   Once the multiplexing extension is negotiated on a connection, all
+   frames must be prefixed with a channel ID number in the "Extension
+   data".  Channel ID is assigned by client on issuing
+   AddChannelRequest.  Control frames with a channel ID 0 refer to the
+   physical connection.  Control frames of multiplexed connection MUST
+   be delivered by EncapsulatedControlFrame multiplex control block.
+   Control frames with non-zero channel ID MUST NOT be sent.  Control
+   frames SHOULD be sent only on channel 0 where
+
+   A receiver MAY process frames for different non-control logical
+   channels in parallel.  A receiver MUST process frames for the control
+   channel exclusively.
+
+   A receiver MUST _Fail the Physical Connection_ if any of these rules
+   are violated by the sender.
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012                [Page 7]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+5.  Flow Control
+
+   Each logical channel, including the implicitly created channel 1, is
+   initially given a send quota.  The send quota limits the number of
+   bytes in "Payload data" that may be transmitted in each direction
+   without acknowledgement.  It is illegal to send more bytes than the
+   remaining send quota, and the receiver MUST _Fail the Logical
+   Channel_ for any sender that does so.  The send quota is replenished
+   via control frames as the receiver processes the data.
+
+   The initial send quota is specified with the "quota" extension
+   parameter, and defaults to 64k (TBD) if it is not specified.  The
+   client and server each may specify a "quota" parameter and these are
+   unrelated -- each specifies how many bytes the other side may send
+   without acknowledgement.  The quota values in the opening handshakes
+   of the physical connection apply to the implicitly opened channel 1.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012                [Page 8]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+6.  Framing
+
+   If the extension is successfully negotiated during the opening
+   handshake, all frames have a channel ID in the "Extension data".  The
+   channel ID is encoded as a variable number of bytes, as follows:
+
+      0 1 2 3 4 5 6 7
+     +-+-------------+
+     |0|Channel ID(7)|
+     +-+-------------+
+
+      0                   1
+      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
+     +-+-+---------------------------+
+     |1|0|      Channel ID (14)      |
+     +-+-+---------------------------+
+
+      0                   1                   2
+      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
+     +-+-+-+-----------------------------------------+
+     |1|1|0|             Channel ID (21)             |
+     +-+-+-+-----------------------------------------+
+
+      0                   1                   2                   3
+      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+     +-+-+-+---------------------------------------------------------+
+     |1|1|1|                     Channel ID (29)                     |
+     +-+-+-+---------------------------------------------------------+
+
+   The base spec requires that a sequence of frames on the wire be a
+   sequence of valid fragments (or one of valid unfragmented frames).
+   The multiplexing extension relaxes this requirement to be for just
+   frames of one logical channel, and that frames of other logical
+   channels may be interleaved arbitrarily.
+
+   All frames with a non-zero channel ID MUST be delivered to the
+   corresponding multiplexed connection in the order they are received,
+   though fragmentation may be changed if appropriate.  Control frames
+   with a non-zero channel ID may also trigger additional processing by
+   the multiplexing extension.
+
+   Intermediaries MAY fragment or defragment frames with the same
+   channel ID as far as they maintain resulting frames prefixed with one
+   valid channel ID.  When multiple frames are defragmented into one
+   frame, channel ID field for second and later frames MUST be removed.
+   Frames MUST NOT be defragmented if there's any frame with channel ID
+   of 0 between them.  When a frames is fragmented into multiple frames,
+   all the resulting fragments MUST prefixed with the channel ID.
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012                [Page 9]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+   Control frames with a channel ID of 0 refer to the physical
+   connection, and may also trigger additional processing - for example,
+   a close frame on the physical connection will close all logical
+   channels as well (details TBD).
+
+   If a frame doesn't contain valid channel ID, _Fail the Physical
+   Connection_.  The cases where it's considered that the channel ID is
+   invalid are:
+
+   o  The "Payload data" portion doesn't contain a complete channel ID.
+
+   o  No channel has been opened for the channel ID.
+
+   o  The channel has been closed and not reopened.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 10]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+7.  Multiplex Control Blocks
+
+   Binary frames with a channel ID of 0 contain zero or more multiplex
+   control blocks in "Payload data".  Unless another negotiated
+   extension defines a meaning for them, endpoints MUST NOT send any
+   data frame with an opcode other than "binary frame" on the control
+   channel.  If an endpoint received such frame, it MUST _Fail the
+   Physical Connection_.  Control blocks has fields as follows:
+
+      0 1 2 3 4 5 6 7
+     +---------------+
+     | Objective     |
+     : channel ID    :
+     | (8-32 bit)    |
+     +-----+---------+
+     | Opc |         |
+     +-----+         :
+     | Opc specific  :
+     : data          :
+     |               |
+     +---------------+
+
+   Objective channel ID
+
+      The channel ID of the logical channel objective to this operation.
+      Encoding is the same as one used in the extension data (designated
+      as control channel).
+
+   Opc
+
+      A multiplex control opcode as defined in the following
+      subsections.  Opc of 5-7 are Reserved for future use (TBD: do we
+      need some support for quiescence?).
+
+   Opc specific data
+
+      Data interpreted according to that opcode.
+
+   Each of the following subsections describes one multiplex control
+   opcode and how to interpret opc specific data for that opcode.
+
+   If any incomplete multiplex control block is found, the endpoint MUST
+   _Fail the Physical Connection_.
+
+7.1.  AddChannelRequest
+
+   AddChannelRequest is used to create the objective channel, as if a
+   new connection were received on a separate transport connection,
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 11]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+   except for the encoding of the headers.  Multiplex control opcode of
+   AddChannelRequest is 0.  AddChannelRequest is sent only from clients.
+   AddChannelRequest has fields as follows:
+
+      0 1 2 3 4 5 6 7
+     +-+-+-+-+---+---+
+     |0|0|0|R|Enc|Len|
+     +-+-+-+-+---+---+
+     |Size of encoded|
+     :handshake      :
+     |(8-32 bit)     |
+     +---------------+
+     |Encoded        |
+     :handshake      :
+     |               |
+     +---------------+
+
+   R
+
+      Reserved for future use.
+
+   Len
+
+      The size of the size of encoded handshake field in bytes minus 1.
+
+   Enc
+
+      Encoding scheme type:
+
+      0 - identity
+
+         The handshake data that follow are sent as-is without any
+         special encoding or compression applied, and constitute the
+         complete set of a Request-Line and headers that would have been
+         sent on a WebSocket opening handshake.
+
+      1 - delta-encoded
+
+         The handshake data that follow are delta-encoded, where any
+         header that is not given is assumed to have the same value as
+         that given on the client's opening handshake of the physical
+         connection.  The only exceptions are the Request-Line and the
+         "Sec-WebSocket-Extensions" header.  The Request-Line MUST be
+         sent even if it's the same as one in the client's opening
+         handshake for the physical connection.  If the
+         "Sec-WebSocket-Extensions" header is not given, its value is
+         assumed to be the extension entry for this multiplexing
+         extension and ones following that in the client's opening
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 12]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+         handshake of the physical connection.  A header with an empty
+         value means that header is not inherited from the initial
+         connection.  When to send valueless headers, identity encoding
+         MUST be used.
+
+      2-3 - reserved
+
+         Reserved for future use.
+
+   Size of encoded handshake
+
+      The size of the following encoded handshake field in bytes in
+      network byte order.
+
+   Encoded handshake
+
+      The client's opening handshake as defined in Section 4 of RFC 6455
+      [RFC6455] for the new multiplexed connection.  This field is
+      encoded as defined in the description for the Enc field.  The
+      complete set of a Request-Line and headers after decoding is
+      treated exactly as if it was sent on a separate connection.
+
+   If there's already a logical channel with the same channel ID as one
+   specified in this AddChannelRequest, it MUST _Fail the Physical
+   Connection_.  Once the server receives an AddChannelRequest, it MUST
+   decide whether to accept or reject the request.  To accept the
+   request, it MUST create a new logical channel with the channel ID set
+   to the objective channel ID field of the AddChannelRequest.
+
+   Channel ID assignment is done by the client.  Client MAY use any
+   algorithm to choose channel IDs for new channels.  Note that channel
+   ID assignment might be changed by intermediaries, so it's not
+   guaranteed that the value of channel ID is the same on the other
+   peer.
+
+   The server MUST respond to the request with an AddChannelResponse,
+   described below.
+
+   The same limit on simultaneous opening handshake as specified in
+   Section 4.1 of [RFC6455] is applied to AddChannelRequests for
+   multiplexed channels.
+
+   Different from non-multiplexed WebSocket connection, data frames of
+   multiplexed channel except for the channel 1 opened by default MAY be
+   sent before receiving AddChannelResponse as far as there's sufficient
+   send quota.  In case the AddChannelRequest fails, those frames are
+   ignored by the other peer.  This doesn't mean that the user of this
+   protocol such as the WebSocket API need to allow their user to send
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 13]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+   frames before receiving the server's opening handshake.
+
+7.2.  AddChannelResponse
+
+   AddChannelResponse is sent in response to the AddChannelRequest.
+   Multiplex control opcode of the AddChannelResponse is 1.
+   AddChannelResponse is sent only from servers.  AddChannelResponse has
+   fields as follows:
+
+      0 1 2 3 4 5 6 7
+     +-+-+-+-+---+---+
+     |0|0|1|F|Enc|Len|
+     +-+-+-+-+---+---+
+     |Size of encoded|
+     :handshake      :
+     |(8-32 bit)     |
+     +---------------+
+     |Encoded        |
+     :handshake      :
+     |               |
+     +---------------+
+
+   F
+
+      If F is set, then the server has rejected the AddChannelRequest
+      and this SHOULD be treated exactly the same as if a separate
+      connection was attempted and the opening handshake failed.  Enc
+      MUST be set to identity in this case, and encoded handshake field
+      MUST contain the response to an HTTP Upgrade request for the
+      request made by the AddChannelRequest, For example:
+
+        HTTP/1.1 404 Not found
+
+        404 message body...
+
+      If F is not set, then the server has accepted the
+      AddChannelRequest.
+
+   Len
+
+      The size of the size of encoded handshake field in bytes minus 1.
+
+   Enc
+
+      Encoding scheme type the same as defined for the AddChannelRequest
+      opcode (but replacing "Request-Line" with "Response-Line").
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 14]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+   Size of encoded handshake
+
+      The size of the following encoded handshake field in bytes in
+      network byte order.
+
+   Encoded handshake
+
+      The server's opening handshake as defined in Section 4 of RFC 6455
+      [RFC6455] for this multiplexed connection.  This field is encoded
+      according to Enc. The complete set of a Response-Line and headers
+      after decoding is treated exactly as if it was received in
+      response to a client's opening handshake on a separate connection.
+
+   If the server's opening handshake is validated, the client MUST take
+   this as _The WebSocket Connection is Established_.
+
+7.3.  FlowControl
+
+   FlowControl is used to replenish the other peer's send quota for each
+   logical channel.  Multiplex control opcode of FlowControl is 2.
+   FlowControl has fields as follows.
+
+      0 1 2 3 4 5 6 7
+     +-+-+-+-----+---+
+     |0|1|0| RSV |Len|
+     +-+-+-+-----+---+
+     |Replenished    |
+     :quota          :
+     |(8-32 bit)     |
+     +---------------+
+
+   RSV
+
+      Reserved for future use.
+
+   Len
+
+      The size of replenished quota field in bytes minus 1.
+
+   Replenished quota
+
+      An unsigned integer in network byte order added to the quota of
+      the number of bytes the receiver can have outstanding towards the
+      sender of the FlowControl message.  (TBD: is it worth having some
+      non-linear encoding to reduce the average bits required to
+      represent these values?)
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 15]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+7.4.  DropChannel
+
+   DropChannel is used to close a logical channel.  Multiplex control
+   opcode of DropChannel is 3.  DropChannel has fields as follows:
+
+      0 1 2 3 4 5 6 7
+     +-+-+-+-+---+---+
+     |0|1|1|F|RSV|Len|
+     +-+-+-+-+---+---+
+     |Size of reason |
+     :(8-32 bit)     :
+     |               |
+     +---------------+
+     |Reason         |
+     :               :
+     |               |
+     +---------------+
+
+   F
+
+      F is set when this DropChannel is due to multiplexing level error.
+      F is unset when this DropChannel is sent because the multiplexed
+      connection is asked to _Close the WebSocket Connection_, and the
+      reason field MUST be empty for this case.
+
+   RSV
+
+      Reserved for future use.
+
+   Len
+
+      The size of the size of reason field in bytes minus 1.
+
+   Size of reason
+
+      The size of the reason field in bytes in network byte order.
+
+   Reason
+
+      The reason of closure.
+
+   When an endpoint received DropChannel, the endpoint MUST remove the
+   logical channel and the application instance that used the logical
+   channel MUST treat this as closure of underlying transport.  Once a
+   logical channel is removed by the DropChannel request, the channel ID
+   of the logical channel becomes available again for AddChannelRequest.
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 16]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+7.5.  EncapsulatedControlFrame
+
+   EncapsulatedControlFrame is used to transfer control frames of
+   multiplexed connections.  Multiplex control opcode of
+   EncapsulatedControlFrame is 4.
+
+      0 1 2 3 4 5 6 7
+     +-+-+-+---------+
+     |1|0|0|   RSV   |
+     +-+-+-+---------+
+     |Encapsulated   |
+     :frame          :
+     |               |
+     +---------------+
+
+   RSV
+
+      Reserved for future use.
+
+   Encapsulated frame
+
+      One encapsulated control frame including the original WebSocket
+      header.  MASK bit in the encapsulated control frame MUST be unset
+      and the "Payload data" in it MUST be unmasked.
+
+   When an endpoint received EncapsulatedControlFrame, the endpoint MUST
+   treat the control frame encapsulated in it as one received for the
+   corresponding multiplexed channel.
+
+   Multiplex control blocks are sent in data frames, so they can be
+   fragmented.  Processing of a multiplex control block MAY be done once
+   the block is received completely without waiting for the whole binary
+   message is received (and becomes available after decoding if any).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 17]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+8.  Examples
+
+   _This section is non-normative._
+
+   The examples below assume the handshake has already completed and the
+   mux extension was negotiated.
+
+   01 06 01 "Hello" 81 04 02 "bye" 80 07 01 " world"
+
+      This is a fragmented text message of "Hello world" on channel 1
+      interleaved with a text message of "bye" on channel 2.  Note that
+      the sequence of opcodes/FIN bits cannot be understood without
+      considering the channel ID of each frame.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 18]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+9.  Client Behavior
+
+   When a client is asked to _Establish a WebSocket Connection_ by some
+   WebSocket application instance, it MAY choose to reuse an existing
+   WebSocket connection if all of the following are true:
+
+   o  the multiplexing extension was successfully negotiated on that
+      connection
+
+   o  the scheme portions of the URIs match exactly
+
+   o  the host portions of the URIs either match exactly or resolve to
+      the same IP address (TBD: consider DNS rebind attacks)
+
+   o  the port portions of the URIs (either explicit or implied by the
+      scheme) match exactly
+
+   o  the connection has an availablle logical channel ID
+
+   If the client chooses to reuse an existing multiplexed connection, it
+   sends an AddChannelRequest as described above.  If the
+   AddChannelRequest is accepted, WebSocket frames may be sent over that
+   channel as normal.  If the server rejects the AddChannel, the client
+   SHOULD attempt to open a new physical WebSocket connection (for
+   example, in a shared hosting environment a server may not be prepared
+   to multiplex connections from different customers despite having a
+   single IP address for them).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 19]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+10.  Buffering
+
+   There will be lots of small frames sent in this protocol
+   (particularly replenishing send quotas), so a sender SHOULD attempt
+   to aggregate multiplex control blocks into larger WebSocket frames.
+   For data frames, a sender also SHOULD attempt to aggregate fragments
+   into one packet of the underlying transport.  However, care must be
+   taken to avoid introducing excessive latency - the exact heuristics
+   for delaying in order to aggregate blocks is TBD.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 20]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+11.  Fairness
+
+   A multiplexing implementation MUST ensure reasonable fairness among
+   the logical channels.  This is accomplished in several ways:
+
+   Receiver side
+
+   o  The receiver MAY limit the send quota of a logical channel by not
+      replenishing it to make sure that any logical channel doesn't
+      dominate the connection.
+
+   o  Send quota for one logical channel SHOULD be determined
+      considering the processing capacity (buffer size, processing
+      power, throughput, etc.) of that logical channel.  For example,
+      when a logical channel with excess load cannot drain data from the
+      connection smoothly, the other logical channels get stuck even
+      when they have room of processing capacity.  Unless there's
+      special need to give such a big quota for the channel, such
+      condition just makes overall performance low.
+
+   Sender side
+
+   o  The sender MUST use a fair mechanism for selecting which logical
+      channel's data to send in the next WebSocket frame.  Simple
+      implementations may choose a round-robin scheduler, while more
+      advanced implementations may adjust priority based on the amount
+      or frequency of data sent by each logical channel.
+
+   o  The sender MUST fragment a large message into smaller frames to
+      prevent a large message in a logical channel occupying the
+      physical connection and thus delaying messages in other logical
+      channels.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 21]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+12.  Proxies
+
+   Proxies which do not multiplex/demultiplex are not affected by the
+   presence of this extension -- they simply process WebSocket frames as
+   usual.  Proxies which filter or monitor WebSocket traffic will need
+   to understand the multiplexing extension in order to extract the data
+   from logical connections or to terminate individual logical
+   connections when policy is violated.  Proxies which actively
+   multiplex connections or demultiplex them (for example, a mobile
+   network might have a proxy which aggregates WebSocket connections at
+   a single cell to conserve bandwidth to the main gateway) will require
+   additional configuration (perhaps including the client) that is
+   outside the scope of this document.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 22]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+13.  Nesting
+
+   TBD: Should we allow nesting of multiplexed channels, or should we
+   require that an intermediary multiplexing channels flatten it?  The
+   advantage of nesting is it is conceptually cleaner and less work for
+   an intermediary, while the disadvantage is that flow control messages
+   will get amplified by nesting and the ultimate server's job is a bit
+   more complicated to keep a tree of channel mappings.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 23]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+14.  Timeout
+
+   When all the logical channels are closed, each endpoint MAY _Start
+   the WebSocket Closing Handshake_ on the physical connection.  Such
+   _Start the WebSocket Closing Handshake_ operation SHOULD be delayed
+   assuming the physical connection may be reused after some idle
+   period.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 24]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+15.  Close the Logical Channel
+
+   To _Close the Logical Channel_, an endpoint MUST send a DropChannel
+   multiplex control block with F bit unset.  The endpoint MAY provide
+   the reason of failure in the DropChannel block.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 25]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+16.  Fail the Logical Channel
+
+   To _Fail the Logical Channel_, an endpoint MUST send a DropChannel
+   multiplex control block with F bit set.  The endpoint MAY provide the
+   reason of failure in the DropChannel block.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 26]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+17.  Fail the Physical Connection
+
+   To _Fail the Physical Connection_, an endpoint MUST send a
+   DropChannel multiplex control block with objective channel ID of 0
+   and F bit set, and then _Fail the WebSocket Connection_ on the
+   physical connection with status code of 1002 (TBD).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 27]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+18.  Operations and Events on Multiplexed Connection
+
+   When an endpoint is asked to perform any operation defined in the
+   WebSocket Protocol except for _Close the WebSocket Connection_ by
+   some application instance, the endpoint MUST perform the operation on
+   the corresponding logical channel.  If the operation involves control
+   frames, they MUST be encapsulated in EncapsulatedControlFrame
+   multiplex control blocks.
+
+   Any event on a logical channel except for _The WebSocket Connection
+   is Closed_, MUST be taken as one for the corresponding application
+   instance.
+
+   When an endpoint is asked to do _Close the WebSocket Connection_ by
+   some application instance, it MUST perform _Close the Logical
+   Channel_ on the corresponding logical channel.
+
+   When a DropChannel is received, or the physical connection is closed,
+   it MUST be taken as _The WebSocket Connection is Closed_ event for
+   the corresponding application instance(s).
+
+   What to set to _Extension In Use_ for each multiplexed connection is
+   TBD.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 28]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+19.  Security Considerations
+
+   To protect a server from denial-of-service attack, implementation
+   SHOULD have a way to limit the number of concurrent logical channels.
+
+   TBD
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 29]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+20.  IANA Considerations
+
+   This specification is registering a value of the Sec-WebSocket-
+   Extension header field in accordance with Section 11.4 of the
+   WebSocket protocol [RFC6455] as follows:
+
+   Extension Identifier
+
+      mux
+
+   Extension Common Name
+
+      Multiplexing Extension for WebSockets
+
+   Extension Definition
+
+      This document
+
+   Known Incompatible Extensions
+
+      None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 30]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+21.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC6455]  Fette, I. and A. Melnikov, "The WebSocket Protocol",
+              RFC 6455, December 2011.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 31]
+
+Internet-Draft   A Multiplexing Extension for WebSockets      April 2012
+
+
+Authors' Addresses
+
+   John A. Tamplin
+   Google, Inc.
+
+   Email: jat@google.com
+
+
+   Takeshi Yoshino
+   Google, Inc.
+
+   Email: tyoshino@google.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tamplin & Yoshino        Expires October 6, 2012               [Page 32]
+

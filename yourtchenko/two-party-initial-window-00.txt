@@ -1,0 +1,896 @@
+
+
+
+Network Working Group                                     A. Yourtchenko
+Internet-Draft                                                  A. Begen
+Intended status:  Standards Track                             A. Ramaiah
+Expires:  June 6, 2011                                             Cisco
+                                                        December 3, 2010
+
+
+   TIE: Two-Party Selection of TCP Initial Congestion Window Estimate
+             draft-yourtchenko-two-party-initial-window-00
+
+Abstract
+
+   There are several proposals on increasing the TCP initial congestion
+   window to a new hardcoded value and subsequent updates of this
+   hardcoded value.  This document explores the mechanism of dynamically
+   determining the potentially unbounded Initial Window.  This would
+   allow for the future growth after only one software upgrade of the
+   existing TCP stacks.  Also this would allow automatic adjustment of
+   the Initial Window size depending on the connectivity properties of
+   the particular Internet host, while minimizing the retransmissions
+   that result from overly optimistic initial congestion window
+   selection.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on June 6, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2010 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                  [Page 1]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Notational Conventions . . . . . . . . . . . . . . . . . . . .  4
+   3.  The Case for a Two-Party Adaptive Approach . . . . . . . . . .  4
+   4.  How to Choose the Initial Congestion Window  . . . . . . . . .  5
+   5.  How to Update the Initial Congestion Window Estimate . . . . .  6
+   6.  How to Communicate the ICWE  . . . . . . . . . . . . . . . . .  8
+   7.  How to Determine the Loss of the Initial Burst of Data . . . .  8
+   8.  Simulation Results . . . . . . . . . . . . . . . . . . . . . .  9
+   9.  Conclusions  . . . . . . . . . . . . . . . . . . . . . . . . . 10
+   10. Interoperability With the Hosts That Do Not Support TIE  . . . 10
+   11. Acknowledgements . . . . . . . . . . . . . . . . . . . . . . . 10
+   12. IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 10
+   13. Security Considerations  . . . . . . . . . . . . . . . . . . . 11
+   14. Simulation Code  . . . . . . . . . . . . . . . . . . . . . . . 11
+   15. References . . . . . . . . . . . . . . . . . . . . . . . . . . 14
+     15.1.  Normative References  . . . . . . . . . . . . . . . . . . 14
+     15.2.  Informative References  . . . . . . . . . . . . . . . . . 14
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 15
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                  [Page 2]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+1.  Introduction
+
+   There is a growing need to have the value of the initial congestion
+   window increased from the 2-4 segments RFC5681 [RFC5681] to bigger
+   values - in order to decrease the latency on the initial exchange in
+   client-server protocols like HTTP.  This would have a big positive
+   impact on the short-lived connections.  IW10 references page
+   [URL.IW10-references-page] has the references to some of the related
+   studies.
+
+   There are two alternative proposals that both talk about increasing
+   the initial congestion window.  I-D.ietf-tcpm-initcwnd
+   [I-D.ietf-tcpm-initcwnd] proposes a fixed new value of 10, and
+   I-D.allman-tcpm-bump-initcwnd [I-D.allman-tcpm-bump-initcwnd]
+   proposes a fixed value of 6 as well as the schedule for the future
+   increases in the initial congestion window value.
+
+   The first of the two notes that there is a very modest increase in
+   retransmissions for most applications (0.3% to 0.7%, and for a
+   specific application that created multiple connections, it was
+   between 0.9% and 1.85%).  Also that test data shows that slower
+   connections show noticeably bigger increase in retransmissions in
+   case of a bigger initial congestion window.
+
+   The second document specifies the initial congestion window of 6
+   segments, with the schedule for future increases in that value.
+   Although this value should result in a smaller impact than the value
+   of 10, the potential problem with the "predefined schedule" approach
+   is that it would force the upgrade cycles of the existing
+   installations.
+
+   There was also a proposal for Quick Start RFC4782 [RFC4782] in which
+   the nodes explicitly supply the desired rate of data.  That proposal,
+   however, assumes the cooperation of all the routers across the path -
+   and in case the routers do not support this extension, the hosts will
+   use the full proposed bandwidth - therefore increasing the potential
+   for extra packet loss.
+
+   Another performance enhancement keeps the RTT and cwnd estimates in a
+   per-host cache RFC2140 [RFC2140] - implemented in a FreeBSD (and
+   reportedly in Linux and Solaris) TCP stack.  The practice shows it is
+   a very useful enhancement, but it would not cater for the cases where
+   the hosts did not communicate before - as is the case for a lot of
+   client-server interactions on the Internet.
+
+   In this document we explore an alternative approach, in which the
+   initial congestion window would be probed over time by the Internet
+   host, and present the initial simulations that in the authors'
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                  [Page 3]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+   opinion illustrate the bigger flexibility of it.
+
+   We claim that choosing the initial congestion window value in an
+   adaptive manner is able to cope with networks and applications that
+   vary widely in their nature.  There are networks that can easily
+   handle quite large (even larger than 10) initial congestion window
+   values, while there are others that still struggle with values of
+   2-4.   There are applications that will greatly benefit from using
+   large initial congestion window values.  For example, HTTP
+   transactions that tend to last for a short amount of time (often less
+   than 10 RTTs) will naturally favor larger initial congestion window
+   values since the download times could be reduced substantially.  On
+   the other hand, HTTP transactions that will last longer (e.g., big
+   file downloads) are unlikely to see any improvement at all.  For some
+   other types of applications, a larger initial congestion window
+   bundled with an aggressive sender or receiver window may do more harm
+   than benefit.  While performance improvements can be observed
+   individually, the overall performance across the network may degrade.
+   One could suggest to set the initial congestion window values per
+   application, however, even within a single application (or
+   application-layer protocol), there could be enough variation that
+   warrants setting the initial congestion window value differently.
+   Furthermore, this could be seen as a layer violation.  To follow the
+   KISS approach, we propose to determine the initial congestion window
+   value in an adaptive manner that takes the past observations into
+   account.  For multi-interface hosts, the value could be specified per
+   interface.
+
+   There exist also some proposals like Adaptive Start
+   [URL.Adaptive-Start], which explore the change to the slow start
+   algorithm itself in order to optimize the case of short-lived
+   connections.  Changes of that magnitude are out of scope for this
+   document - however, the mechanism described here could be used as
+   input for these alternative mechanisms as well.
+
+
+2.  Notational Conventions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC2119 [RFC2119].
+
+
+3.  The Case for a Two-Party Adaptive Approach
+
+   The use of hardcoded initial congestion window is attractive in its
+   simplicity.  However, it has a drawback:  to cater well for all the
+   deployments it either needs to be a "lowest common denominator" or
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                  [Page 4]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+   make a preference towards a better service for some scenarios at the
+   expense of others.  The current initial congestion window has been in
+   place for a relatively long time - so it could have been incorporated
+   as one of the constraints into the design of networking components as
+   well as the design criterion for the networks themselves.
+   Unilaterally increasing this value could impose a choice on some of
+   the networks - observe the increased amount of retransmissions or
+   upgrade.  A typical upgrade cycle in a network usually involves a
+   large amount of testing and verification by the network architecture
+   team - likewise, the change of the product design assumptions is also
+   a difficult and laborious process.  We believe that the adaptive
+   approach to the initial congestion window would allow to adapt the
+   behavior of TCP to the de-facto capabilities of the equipment, not
+   otherwise.  Additionally, the nature of adaptive algorithm would
+   allow for future growth - opening the room for more innovative
+   networking solutions.
+
+   One might argue that a single-party adaptive approach is enough.
+   According to the simulations, the difference in efficiency of a
+   single-party approach is where it is intuitively expected to be:  in
+   the middle between the static value choice and the two party approach
+   that is proposed in this document.  Arguably adding the second party
+   can be called an optimization - however, we think this optimization
+   is significant enough to discuss it separately.
+
+
+4.  How to Choose the Initial Congestion Window
+
+   We propose the choice of the initial congestion window to become part
+   of the standard three-way handshake - much like the choice of the
+   Maximum Segment Size (MSS).  In the SYN segment, each host would
+   notify the other party of the value for the Initial Congestion Window
+   Estimate (ICWE) that they consider would be the best from their
+   perspective, and after completing the three-way handshake both would
+   select the minimum of the two values.  This would allow to
+   incorporate the knowledge about the connectivity from both sides of
+   the connection and allow for a better performance without storing a
+   lot of state information - the knowledge about the initial congestion
+   window value will be distributed across all the communicating hosts,
+   and will be supplied and used just when it is needed.
+
+   Graphically the process can be depicted as follows:
+
+
+
+
+
+
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                  [Page 5]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+   TCP A                                 TCP B
+   -----                                 -----
+     |                                     |
+     |--- TCP SYN, ICWE_A ----->           |
+     |                                     |
+     |        <--- TCP SYNACK, ICWE_B -----|
+     |                                     |
+   ICW_A = min(ICWE_A,ICWE_B)         ICW_B = min(ICWE_A,ICWE_B)
+     |                                     |
+    ...                                   ...
+
+   The method of communication of the ICWE values is described in a
+   separate section below.
+
+   There are several assumptions that this method makes:
+
+   o  "At least one of the sides has a component in the path that has
+      the significant impact on burst tolerance of the path across all
+      of the connections this node makes".  This assumption is not
+      correct in all cases, however, it is a weaker assumption than the
+      one imposed by the fixed initial congestion window value - all
+      paths may tolerate the burst of X segments, where X is the initial
+      congestion window value.  It is also weaker than the assumption
+      that the quality of one connection is always correlated to the
+      quality of another one - which the single-party mechanism makes.
+
+   o  "The congestion tolerance properties of the path are symmetric".
+      This assumption is the result of the fact that both sides select
+      the common ICWE.  This is obviously untrue for a significant
+      portion of cases (e.g., ADSL).  However, the typical use case for
+      such environments is that the hosts will be most interested in the
+      best possible use of the capacities of the downstream path - i.e.,
+      the ICWE will matter only in one direction.  The adaptive nature
+      of the algorithm allows to find the good value for the initial
+      congestion window in case the use patterns are different.
+
+
+5.  How to Update the Initial Congestion Window Estimate
+
+   The operation of the host in the initial state starts with the
+   congestion window that is equal to the currently defined one (e.g
+   between 2 and 4 segments).  From there on, the host will need to look
+   at the retransmission rate and make a decision whether to increment
+   the congestion window estimate or to decrement it.  This decision
+   process needs to satisfy the following criteria:
+
+
+
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                  [Page 6]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+   o  It MUST NOT be overly dynamic.  The loss of the segments may be
+      caused either by the inherent properties of the path, temporary
+      congestion or by packet corruption as in the case of wireless
+      transmission.
+
+   o  It MUST NOT be overly static.  If the characteristics of the path
+      change, the host must be able to adapt to the new conditions on a
+      timescale that is closer to order of minutes than to order of
+      weeks.
+
+   o  It MUST be conservative to avoid the negative effects on the
+      Internet as a whole.
+
+   For the purposes of the initial simulation experiments, the decision
+   process is naive:
+
+   o  The party with the smaller ICWE is allowed to increment it if it
+      experienced no losses for the initial burst of traffic within the
+      N past connections.
+
+   o  The party with the smaller ICWE MUST decrement it in case it
+      experienced loss on one of its connections.
+
+   o  If there is no way to conclusively determine the presence or
+      absence of loss (e.g., a smaller amount of data than chosen ICWE
+      was sent over a connection), ICWE values on both sides MUST remain
+      unchanged.
+
+   The rationale in the second bullet point to decrement the smaller of
+   the two ICWE estimates, not the larger one, is as follows.  Suppose
+   we have two parties - party A, which enjoys better connectivity and
+   can use larger initial congestion window values, and a party B that
+   uses smaller congestion window values.  If they make a connection,
+   the ICWE proposed by B will be smaller and will be chosen for the
+   connection.  If this estimate is inadequate - it is the
+   responsibility of B, since it was its ICWE that was chosen.
+
+   This also allows to not influence the connections between the well-
+   connected hosts by the connections from the hosts that have poorer
+   connectivity.
+
+   This algorithm may not necessarily satisfy all of the requirements
+   above in all cases.  More experimentation is needed to find a better
+   mechanism.
+
+   {DISCUSS:  if the connection experiences slow start several times,
+   can we count it as several slow starts ?  The reliable detection/
+   action in this case is only possible by one side - then only if the
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                  [Page 7]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+   sender had a smaller ICWE can anything be done. }
+
+
+6.  How to Communicate the ICWE
+
+   The first obvious choice of communicating the ICWE is introducing the
+   new TCP option.  However, this approach is difficult in its practical
+   implementation because of the limited TCP option space.  Instead,
+   another approach is proposed below.
+
+   Based on the observations, the TCP Window Size in the initial
+   segment's TCP header is an an even value.  This means that the TCP
+   stack can signal to the peer its awareness about the adaptive initial
+   congestion window by setting the least significant bit to 1.  Then,
+   the TCP Window field will contain the ICWE value sent by this peer.
+
+   Upon sending the ACKs for the data received, each side can then
+   communicate the TCP Window according to the TCP specification.
+
+   {discuss:  setting the LSB to 1 for the window allows to have an
+   'update' for ICWE in some form, throughout the life of the
+   connection.  Whether it is needed is a separate topic.  Probably
+   not}.
+
+   An argument against such "LSB signaling" would be that we are
+   changing the semantics of the TCP Window field.  However, this
+   equally goes about using TCP Window to clamp the initial congestion
+   window imposed by the other methods - because in that case it is no
+   longer an amount of data that the host is ready to receive, but the
+   amount of data that the host thinks the other party should transmit.
+
+   During the transmission, the ICWE is supposed to be encoded in the
+   same metric as TCP Window - e.g., in octets.  This mechanism can help
+   with interoperability with the stacks that do not perform the
+   adaptive initial congestion window selection, but that are overly
+   optimistic with their congestion window.
+
+
+7.  How to Determine the Loss of the Initial Burst of Data
+
+   {FIXME:  this section needs more brainstorming/work}
+
+   Determining the loss of the initial congestion window of data on the
+   side that has filled it by sending the data is simple - it can be
+   done by verifying if it did any retransmits of this data or not.
+   However, since the algorithm does not imply the communication between
+   the parties beyond the exchange of ICWEs in the very beginning of the
+   connection, both sides need to detect the congestion - and on the
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                  [Page 8]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+   receiver side of the burst it may not be easy.
+
+   {this is where the discussion is needed}
+
+   There may be a condition where the amount of data sent is smaller
+   than the initial congestion window - i.e., it is not possibly to
+   determine whether the ICWE estimate was right or wrong.  In such
+   cases the values of the ICWE on both sides MUST remain unchanged.
+
+
+8.  Simulation Results
+
+   This section shows the results obtained using the simulation enclosed
+   in the Appendix A.
+
+   {FIXME:  to be expanded, for now just pasting from the tcpm mail}
+
+
+  1) Static IW=10, access capacity 5..8, backbone capacity 8..15
+
+  ./a.out 10 0 1000 5 8 8 15 1 | grep round
+
+  Results from the round: loss: 423, headroom: 0, avg IW size: 10.000000
+  Results from the round: loss: 436, headroom: 0, avg IW size: 10.000000
+  Results from the round: loss: 423, headroom: 0, avg IW size: 10.000000
+  Results from the round: loss: 426, headroom: 0, avg IW size: 10.000000
+
+  2) One-side-adjustment of the IW:
+
+  ./a.out 10 1 1000 5 8 8 15 1 | grep round
+
+  Results from the round: loss: 66, headroom: 10, avg IW size: 6.380000
+  Results from the round: loss: 52, headroom: 14, avg IW size: 6.180000
+  Results from the round: loss: 62, headroom: 10, avg IW size: 6.350000
+  Results from the round: loss: 63, headroom: 9, avg IW size: 6.210000
+
+  3) Two-party adjustment of the IW:
+
+  ./a.out 10 1 1000 5 8 8 15 0 | grep round
+
+  Results from the round: loss: 1, headroom: 32, avg IW size: 5.420000
+  Results from the round: loss: 0, headroom: 37, avg IW size: 5.350000
+  Results from the round: loss: 1, headroom: 29, avg IW size: 5.350000
+  Results from the round: loss: 1, headroom: 41, avg IW size: 5.350000
+  Results from the round: loss: 0, headroom: 50, avg IW size: 5.290000
+
+   It needs noting that the value of N needs to be sufficiently large in
+   order to show the best results, below is the result with N=10:
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                  [Page 9]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+   ./a.out 10 1 10 5 8 8 15 0 | grep round
+
+   Results from the round: loss: 13, headroom: 27, avg IW size: 5.630000
+   Results from the round: loss: 12, headroom: 6, avg IW size: 5.690000
+   Results from the round: loss: 10, headroom: 16, avg IW size: 5.650000
+   Results from the round: loss: 12, headroom: 23, avg IW size: 5.680000
+   Results from the round: loss: 12, headroom: 13, avg IW size: 5.650000
+
+
+   We can see that the results are still better than the one-sided
+   judgement, however, they are of the same order of magnitude.
+
+
+9.  Conclusions
+
+   The choice of the best possible criteria for the increase/decrease of
+   the ICWE values is to be explored further, however, the initial
+   results show that the proposed algorithm provides the results better
+   than unilateral decision on the initial congestion window.
+
+
+10.  Interoperability With the Hosts That Do Not Support TIE
+
+   If one of the sides of the connection does support the method
+   mentioned in this document, and the other does not, then the side
+   supporting it MAY use its best judgement with respect to the initial
+   congestion window, namely the fixed increased initial congestion
+   window of 10 as described in I-D.ietf-tcpm-initcwnd
+   [I-D.ietf-tcpm-initcwnd].  However, in this case the hosts MUST
+   implement the appropriate mechanisms for fallback in case of the
+   losses due to this increased initial window similar to the ones
+   proposed by Joe Touch.
+
+   {FIXME:  this section needs more discussion/further work}
+
+
+11.  Acknowledgements
+
+   Thanks to Philip Gladstone, Dan Wing, Preethi Natarajan, Stig Venaas
+   for the review and useful comments and suggestions.
+
+
+12.  IANA Considerations
+
+   None.
+
+
+
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                 [Page 10]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+13.  Security Considerations
+
+   The adaptive nature of this mechanism is a challenge in case of
+   malicious hosts who want to affect the peer's estimate for the future
+   connections.  The malicious host would use the larger ICWE than the
+   party and then force the packet loss on the connection.  This would
+   result in the decrease of the other party's ICWE for the subsequent
+   connections.
+
+   However, this would work only in case of low volume of the legitimate
+   connections - in case there is a high volume, the ICWE will quickly
+   return to the good value based on the other connections'
+   information.
+
+   {FIXME:  There is potentially more of interesting things here.  Needs
+   more work}
+
+
+14.  Simulation Code
+
+   The below code is enclosed so the readers can verify the results and
+   run their own experiments:
+
+   #include <stdio.h>
+
+   #define COUNT 10
+
+   int access_capacity[COUNT];
+   int backbone_capacity[COUNT][COUNT];
+   int node_iw[COUNT];
+   int node_noloss[COUNT];
+
+   void fill_initial(int iw, int lac, int hac, int lbc, int hbc) {
+     int i, j;
+     for(i=0; i<COUNT; i++) {
+       node_iw[i] = iw;
+       node_noloss[i] = 0;
+       access_capacity[i] = rand() % (hac-lac) + lac;
+       for(j=0;j<COUNT;j++) {
+         backbone_capacity[i][j] = rand() % (hbc-lbc) + lbc;
+       }
+     }
+   }
+
+   void iterate(int no_hint, int adjust, int loss_thresh,
+                int *rloss, int *rheadroom, int *riw) {
+     // return the loss on the connection
+     int i,j;
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                 [Page 11]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+     int iw;
+     int mincap;
+     int loss;
+     int headroom;
+
+     i = rand() % COUNT;
+     j = rand() % COUNT;
+
+     if(no_hint) {
+        iw = node_iw[i];
+     } else {
+        iw = node_iw[j] < node_iw[i] ? node_iw[j] : node_iw[i];
+     }
+
+     *riw = iw;
+     printf("Connection between %d[iw %d, cap %d] "
+            "and %d[iw %d, cap %d], resulting "
+            "iw = %d, backbone cap: %d\n",
+            i, node_iw[i], access_capacity[i],
+            j, node_iw[j], access_capacity[j],
+            iw, backbone_capacity[i][j] );
+
+     // calculate the min capacity = min of two access and backbone
+
+     mincap = backbone_capacity[i][j];
+     if (mincap > access_capacity[i]) { mincap = access_capacity[i]; }
+     if (mincap > access_capacity[j]) { mincap = access_capacity[j]; }
+
+     // loss occurs if iw is bigger than a minimum capacity.
+     loss = iw > mincap ? iw - mincap : 0;
+
+     // headroom is a measure of inefficiency - how much
+     // did we underuse the capacity of the path
+     headroom = iw < mincap ? mincap - iw : 0;
+
+     if (adjust) {
+
+       if (no_hint) {
+         if (loss) {
+           if(node_iw[i] > 2) { node_iw[i]--; }
+         } else {
+           node_noloss[i]++;
+           if(node_noloss[i] > loss_thresh) { node_iw[i] += 1; }
+         }
+       } else {
+
+         // A very simplistic mechanism of adapting the ICWE
+         // Loss = decrement the ICWE on the node
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                 [Page 12]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+         // that had a smaller ICWE
+         // No loss for more than loss_thresh
+         //      consequtive connections =
+         //      = increment the ICWE on the side
+         //      that had the smaller ICWE.
+         if (loss) {
+           node_noloss[i] = node_noloss[j] = 0;
+
+           if (node_iw[i] < node_iw[j]) {
+             // node_iw[i] /= 2;
+             // if(node_iw[j] > 2) { node_iw[j] -= 1; }
+             if(node_iw[i] > 2) { node_iw[i] -= 1; }
+           } else {
+             // node_iw[j] /= 2;
+             // if(node_iw[i] > 2) { node_iw[i] -= 1; }
+             if(node_iw[j] > 2) { node_iw[j] -= 1; }
+           }
+         } else {
+           node_noloss[i]++;
+           node_noloss[j]++;
+
+           // no loss, can try incrementing the smaller side
+           if (node_iw[i] < node_iw[j]) {
+             if(node_noloss[i] > loss_thresh) { node_iw[i] += 1; }
+           } else {
+             if(node_noloss[j] > loss_thresh) { node_iw[j] += 1; }
+           }
+         }
+       }
+     }
+
+     printf("   result headroom: %d, loss: %d, "
+            "new iw %d = %d, new iw %d = %d\n",
+            headroom, loss,
+            i, node_iw[i],
+            j, node_iw[j]);
+
+     *rloss = loss;
+     *rheadroom = headroom;
+   }
+
+
+   int main(int argc, char **argv) {
+     int i = 0;
+     int loss, headroom;
+     int iws;
+     int closs, cheadroom;
+     int ciw;
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                 [Page 13]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+     int count = 100;
+     if(argc < 9) {
+       printf("usage: %d <initial window> <adjust: 1/0>"
+              " <IW increment success threshold> "
+              "<lower access cap> <higher access cap> "
+              "<lower bb cap> <higher bb cap> "
+              "<one-side-only-decision>\n");
+       exit(0);
+     }
+     fill_initial(atoi(argv[1]), atoi(argv[4]),
+                  atoi(argv[5]), atoi(argv[6]), atoi(argv[7]));
+     while(1) {
+       iws = loss = headroom = 0;
+       for(i=0;i<count;i++) {
+         iterate(atoi(argv[8]), atoi(argv[2]),
+                 atoi(argv[3]), &closs, &cheadroom, &ciw);
+         loss += closs;
+         headroom += cheadroom;
+         iws += ciw;
+       }
+       printf("Results from the round: loss: %d, "
+              "headroom: %d, avg IW size: %f\n",
+              loss, headroom, ((float)iws)/((float)count));
+
+     }
+   }
+
+
+
+15.  References
+
+15.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC5681]  Allman, M., Paxson, V., and E. Blanton, "TCP Congestion
+              Control", RFC 5681, September 2009.
+
+15.2.  Informative References
+
+   [I-D.allman-tcpm-bump-initcwnd]
+              Allman, M., "Initial Congestion Window Specification",
+              draft-allman-tcpm-bump-initcwnd-00 (work in progress),
+              November 2010.
+
+   [I-D.ietf-tcpm-initcwnd]
+              Chu, J., Dukkipati, N., Cheng, Y., and M. Mathis,
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                 [Page 14]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+              "Increasing TCP's Initial Window",
+              draft-ietf-tcpm-initcwnd-00 (work in progress),
+              October 2010.
+
+   [RFC2140]  Touch, J., "TCP Control Block Interdependence", RFC 2140,
+              April 1997.
+
+   [RFC4782]  Floyd, S., Allman, M., Jain, A., and P. Sarolahti, "Quick-
+              Start for TCP and IP", RFC 4782, January 2007.
+
+   [URL.Adaptive-Start]
+              "Adaptive Start", <http://paleale.eecs.berkeley.edu/
+              ~varaiya/papers_ps.dir/jeng.pdf>.
+
+   [URL.IW10-references-page]
+              "IW10 references page",
+              <http://code.google.com/speed/protocols/tcpm-IW10.html>.
+
+
+Authors' Addresses
+
+   Andrew Yourtchenko
+   Cisco
+   7 de Kleetlaan
+   Diegem  1831
+   Belgium
+
+   Phone:  +32 2 704 5494
+   Email:  ayourtch@cisco.com
+
+
+   Ali Begen
+   Cisco
+   181 Bay Street
+   Toronto, ON  M5J 2T3
+   Canada
+
+   Email:  abegen@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                 [Page 15]
+
+Internet-Draft    Two-Party TCP Initial Window Estimate    December 2010
+
+
+   Anantha Ramaiah
+   Cisco
+   170 Tasman Drive
+   San Jose, CA  95134
+   USA
+
+   Phone:  +1 (408) 525-6486
+   Email:  ananth@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yourtchenko, et al.       Expires June 6, 2011                 [Page 16]
+

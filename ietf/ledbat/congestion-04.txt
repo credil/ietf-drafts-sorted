@@ -1,0 +1,896 @@
+
+
+
+LEDBAT WG                                                    S. Shalunov
+Internet-Draft                                                  G. Hazel
+Intended status: Experimental                             BitTorrent Inc
+Expires: September 15, 2011                                   J. Iyengar
+                                           Franklin and Marshall College
+                                                           M. Kuehlewind
+                                                 University of Stuttgart
+                                                          March 14, 2011
+
+
+             Low Extra Delay Background Transport (LEDBAT)
+                  draft-ietf-ledbat-congestion-04.txt
+
+Abstract
+
+   LEDBAT is an experimental delay-based congestion control algorithm
+   that attempts to utilize the available bandwidth on an end-to-end
+   path while limiting the consequent increase in queueing delay on the
+   path.  LEDBAT uses changes in one-way delay measurements to limit
+   congestion induced in the network by the LEDBAT flow.  LEDBAT is
+   designed for use by background bulk-transfer applications; it is
+   designed to be no more aggressive than TCP congestion control and to
+   yield in the presence of competing TCP flows, thus limiting
+   interference with the network performance of the competing TCP flows.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on September 15, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2011 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+
+
+
+Shalunov, et al.       Expires September 15, 2011               [Page 1]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Requirements notation  . . . . . . . . . . . . . . . . . . . .  3
+   2.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+     2.1.  Design Goals . . . . . . . . . . . . . . . . . . . . . . .  3
+     2.2.  Applicability  . . . . . . . . . . . . . . . . . . . . . .  4
+   3.  LEDBAT Congestion Control  . . . . . . . . . . . . . . . . . .  4
+     3.1.  Overview . . . . . . . . . . . . . . . . . . . . . . . . .  4
+     3.2.  Preliminaries  . . . . . . . . . . . . . . . . . . . . . .  5
+     3.3.  Receiver-Side Operation  . . . . . . . . . . . . . . . . .  5
+     3.4.  Sender-Side Operation  . . . . . . . . . . . . . . . . . .  5
+       3.4.1.  An Overview  . . . . . . . . . . . . . . . . . . . . .  5
+       3.4.2.  The Complete Sender Algorithm  . . . . . . . . . . . .  6
+     3.5.  Parameter Values . . . . . . . . . . . . . . . . . . . . .  7
+   4.  Understanding LEDBAT Mechanisms  . . . . . . . . . . . . . . .  8
+     4.1.  Delay Estimation . . . . . . . . . . . . . . . . . . . . .  8
+       4.1.1.  Estimating Base Delay  . . . . . . . . . . . . . . . .  8
+       4.1.2.  Estimating Queueing Delay  . . . . . . . . . . . . . .  9
+     4.2.  Managing the Congestion Window . . . . . . . . . . . . . .  9
+       4.2.1.  Window Increase: Probing For More Bandwidth  . . . . .  9
+       4.2.2.  Window Decrease: Responding To Congestion  . . . . . .  9
+     4.3.  Choosing The Queuing Delay Target  . . . . . . . . . . . . 10
+   5.  Discussion . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+     5.1.  Framing and Ack Frequency Considerations . . . . . . . . . 10
+     5.2.  Competing With TCP Flows . . . . . . . . . . . . . . . . . 11
+     5.3.  Fairness Among LEDBAT Flows  . . . . . . . . . . . . . . . 11
+   6.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 12
+   7.  Security Considerations  . . . . . . . . . . . . . . . . . . . 12
+   8.  Acknowledgements . . . . . . . . . . . . . . . . . . . . . . . 12
+   9.  References . . . . . . . . . . . . . . . . . . . . . . . . . . 13
+     9.1.  Normative References . . . . . . . . . . . . . . . . . . . 13
+     9.2.  Informative References . . . . . . . . . . . . . . . . . . 13
+   Appendix A.  Timestamp errors  . . . . . . . . . . . . . . . . . . 13
+     A.1.  Clock offset . . . . . . . . . . . . . . . . . . . . . . . 13
+     A.2.  Clock skew . . . . . . . . . . . . . . . . . . . . . . . . 13
+     A.3.  Clock skew correction mechanism  . . . . . . . . . . . . . 14
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 15
+
+
+
+
+Shalunov, et al.       Expires September 15, 2011               [Page 2]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+1.  Requirements notation
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in [RFC2119].
+
+
+2.  Introduction
+
+   TCP congestion control [RFC5681] seeks to share bandwidth at a
+   bottleneck link equitably among flows competing at the bottleneck,
+   and it is the predominant congestion control mechanism used on the
+   Internet.  Not all applications seek an equitable share of network
+   throughput, however---"background" applications, such as software
+   updates or file-sharing applications, seek to operate without
+   interfering with the performance of more interactive and delay-
+   and/or bandwidth-sensitive "foreground" applications---and standard
+   TCP may be too aggressive for use with such background applications.
+
+   LEDBAT is an experimental delay-based congestion control mechanism
+   that reacts early to congestion in the network, thus enabling network
+   use by applications that seek to avoid interfering with the network
+   performance of TCP flows.  LEDBAT uses one-way delay measurements to
+   determine congestion on the data path, and keeps latency across the
+   bottleneck link in the end-to-end path low while attempting to
+   utilize the available bandwidth on the end-to-end path.
+
+   Delay-based congestion control protocols, such as TCP-Vegas [Bra94],
+   are generally designed to achieve more, not less throughput than
+   standard TCP, and often outperform TCP under particular network
+   settings.  LEDBAT, however, is designed to be no more aggressive than
+   TCP; LEDBAT is a "scavenger" congestion control mechanism that seeks
+   to utilize all available bandwidth and yields quickly when competing
+   with standard TCP at a bottleneck link.  A LEDBAT sender uses one-way
+   delay measurements to estimate the amount of queueing on the data
+   path, controls the LEDBAT flow's congestion window based on this
+   estimate, and minimizes interference with competing TCP flows by
+   adding low extra queueing delay on the end-to-end path.
+
+2.1.  Design Goals
+
+   LEDBAT congestion control seeks to:
+   1.  keep delay low when no other traffic is present,
+   2.  add little to the queuing delays induced by TCP traffic,
+   3.  quickly yield to flows using standard TCP congestion control that
+       share the same bottleneck link,
+
+
+
+
+
+Shalunov, et al.       Expires September 15, 2011               [Page 3]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+   4.  utilize end-to-end available bandwidth, and
+   5.  operate well in networks with FIFO queues and tail-drop queue
+       management.
+
+2.2.  Applicability
+
+   LEDBAT is a "scavenger" congestion control mechanism---a LEDBAT flow
+   seeks to utilize all available bandwidth and to yield quickly to a
+   competing standard TCP flow---and is primarily motivated by
+   background bulk-transfer applications, such as large file transfers
+   (as with file-sharing applications) and software updates.  It can be
+   used with any application that seeks to minimize its impact on the
+   network and on other interactive delay- and/or bandwidth-sensitive
+   network applications.  LEDBAT is expected to work well when the
+   sender and/or receiver is connected via a residential access network.
+
+   This document specifies a congestion control mechanism that can be
+   used as part of a transport protocol or as part of an application.
+   LEDBAT can be used where the data transmission mechanisms are capable
+   of carrying timestamps and acknowledging data frequently.  LEDBAT can
+   be used, with appropriate extensions where necessary, with TCP, SCTP,
+   and DCCP, and with proprietary application protocols such as those
+   built atop UDP for P2P applications.
+
+
+3.  LEDBAT Congestion Control
+
+3.1.  Overview
+
+   A standard TCP sender increases its congestion window until a loss
+   occurs [RFC5681], which, in the absence of any Active Queue
+   Management (AQM) in the network, occurs only when the queue at the
+   bottleneck link on the end-to-end path overflows.  Since packet loss
+   at the bottleneck link is expected to be preceded by an increase in
+   the queueing delay at the bottleneck link, LEDBAT congestion control
+   uses this increase in queueing delay as an early signal of
+   congestion, enabling it to respond to congestion earlier than
+   standard TCP, and enabling it to yield bandwidth to a competing TCP
+   flow.
+
+   LEDBAT employs one-way delay measurements to estimate queueing delay.
+   When the estimated queueing delay is less than a pre-determined
+   target, LEDBAT infers that the network is not yet congested, and
+   increases its sending rate to utilize any spare capacity in the
+   network.  When the estimated queueing delay becomes greater than a
+   pre-determined target, LEDBAT decreases its sending rate quickly as a
+   response to potential congestion in the network.
+
+
+
+
+Shalunov, et al.       Expires September 15, 2011               [Page 4]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+3.2.  Preliminaries
+
+   A LEDBAT sender uses a congestion window (cwnd) that gates the amount
+   of data that the sender can send into the network in one RTT.  A
+   sender can choose to maintain a cwnd in bytes or in packets; this
+   document uses cwnd in bytes.  LEDBAT requires that each data segment
+   carries a "timestamp" from the sender, based on which the receiver
+   computes the one-way delay from the sender, and sends this computed
+   value back to the sender.
+
+   In addition to the LEDBAT mechanism described below, we note that a
+   slow start mechanism can be used as specified in [RFC5681].  Since
+   slow start leads to faster increase in the window than that specified
+   in LEDBAT, conservative congestion control implementations employing
+   LEDBAT may skip slow start altogether and start with an initial
+   window of MIN_CWND MSS (MIN_CWND is described later in Section 3.5.
+
+3.3.  Receiver-Side Operation
+
+   A LEDBAT receiver operates as follows:
+
+   on data_packet:
+       remote_timestamp = data_packet.timestamp
+       acknowledgement.delay = local_timestamp() - remote_timestamp
+       # fill in other fields of acknowledgement
+       acknowlegement.send()
+
+3.4.  Sender-Side Operation
+
+3.4.1.  An Overview
+
+   As a first approximation, a LEDAT sender operates as shown below; the
+   complete algorithm is specified later in Section 3.4.2.  TARGET is
+   the maximum queueing delay that LEDBAT itself can introduce in the
+   network, and GAIN determines the rate at which the congestion window
+   responds to changes in queueing delay; both constants are specified
+   later.  Since off_target can be positive or negative, the congestion
+   window (cwnd) increases or decreases in proportion to off_target.
+
+   on initialization:
+       base_delay = +INFINITY
+
+   on acknowledgement:
+       current_delay = acknowledgement.delay
+       base_delay = min(base_delay, current_delay)
+       queuing_delay = current_delay - base_delay
+       off_target = (TARGET - queuing_delay) / TARGET
+       cwnd += GAIN * off_target * bytes_newly_acked / cwnd
+
+
+
+Shalunov, et al.       Expires September 15, 2011               [Page 5]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+3.4.2.  The Complete Sender Algorithm
+
+   The simplified mechanism above ignores noise filtering and base delay
+   expiration, which we now take into account in our complete sender
+   algorithm below. update_base_delay() maintains a list of one-way
+   delay minima over a number of one-minute intervals, to measure and
+   track changes in the base delay of the end-to-end path.
+   update_current_delay() maintains a list of one-way delay
+   measurements, of which the minimum is used as an estimate of the
+   current end-to-end delay.  Note that while this document uses the
+   minimum to filter any noise in the one-way delay, a different and
+   more sophisticated filter MAY be used.
+
+   This complete algorithm restricts cwnd growth after a period of
+   inactivity, where the cwnd is clamped down to a little more than
+   flightsize using max_allowed_cwnd.  Finally, to be TCP-friendly on
+   data loss, LEDBAT halves its congestion window.  The full sender-side
+   algorithm is given below:
+
+   on initialization:
+       create current_delays list with CURRENT_FILTER elements
+       create base_delays list with BASE_HISTORY number of elements
+       inialize elements in current_delays and base_delays to +INFINITY
+       last_rollover = -INFINITY # More than a minute in the past.
+       cwnd = INIT_CWND * MSS
+
+   on acknowledgement:
+       # flightsize is the amount of data oustanding before this ack
+       #    was received and is updated later by update_flightsize();
+       # bytes_newly_acked is the number of bytes that this ack
+       #    newly acknowledges, and it MAY be set to MSS; and
+       # cwnd is in bytes.
+
+       delay = acknowledgement.delay
+       update_base_delay(delay)
+       update_current_delay(delay)
+       queuing_delay = MIN(current_delays) - MIN(base_delays)
+       off_target = (TARGET - queuing_delay) / TARGET
+       cwnd += GAIN * off_target * bytes_newly_acked / cwnd
+       max_allowed_cwnd = flightsize + ALLOWED_INCREASE * MSS
+       cwnd = min(cwnd, max_allowed_cwnd)
+       cwnd = max(cwnd, MIN_CWND * MSS)
+       update_flightsize()  #subtracts bytes_newly_acked from flightsize
+
+   on data loss:
+       # atmost once per RTT
+       cwnd = cwnd/2
+       cwnd = max(cwnd, MIN_CWND * MSS)
+
+
+
+Shalunov, et al.       Expires September 15, 2011               [Page 6]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+ update_current_delay(delay)
+     # Maintain a list of CURRENT_FILTER last delays observed.
+     delete first item in current_delays list
+     append delay to current_delays list
+
+ update_base_delay(delay)
+     # Maintain BASE_HISTORY min delays. Each represents a minute.
+     if round_to_minute(now) != round_to_minute(last_rollover)
+         last_rollover = now
+         delete first item in base_delays list
+         append delay to tail of base_delays list
+     else
+         tail of base_delays list = MIN(tail of base_delays list, delay)
+
+
+   Note, that random fluctuations in inter-packet transmission time is
+   assumed; see section Section 5.3 for a discussion.
+
+   To implement an approximate minimum over the last N minutes, a LEDBAT
+   sender stores BASE_HISTORY+1 separate minima---BASE_HISTORY for the
+   last BASE_HISTORY minutes, and one for the running current minute.
+   At the end of the current minute, the window moves---the earliest
+   minimum is dropped and the latest minimum is added.  When the
+   connection is idle for a given minute, no data is available for the
+   one-way delay and, therefore, no minimum is stored.  When the
+   connection has been idle for N minutes, the measurement begins anew.
+   Thus even if no data has sent and consequently no acknowledgements
+   have been received the implementation have to mainatin the base delay
+   vector.
+
+3.5.  Parameter Values
+
+   TARGET MUST be 100 milliseconds or less, and this choice of value is
+   explained further in Section 4.3.  Note that using the same TARGET
+   value across LEDBAT flows enables equitable sharing of the bottleneck
+   bandwidth---flows with a higher TARGET may get a larger share of the
+   bottleneck bandwidth.  It is possible to consider the use of
+   different TARGET values for implementing a relative priority between
+   two competing LEDBAT flows by setting a higher TARGET value for the
+   higher-priority flow.
+
+   ALLOWED_INCREASE SHOULD be 1, and it MUST be greater than 0.  An
+   ALLOWED_INCREASE of 0 results in no cwnd growth at all, and an
+   ALLOWED_INCREASE of 1 allows and limits cwnd increase based on
+   flightsize in the previous RTT.  An ALLOWED_INCREASE greater than 1
+   MAY be used when interactions between LEDBAT and the framing protocol
+   provide a clear reason for doing so.  GAIN MUST be set to 1 or less.
+   A GAIN of 1 limits the maximum congestion window ramp-up to the same
+
+
+
+Shalunov, et al.       Expires September 15, 2011               [Page 7]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+   rate as TCP Reno in Congestion Avoidance.  BASE_HISTORY SHOULD be 10;
+   MIN_CWND SHOULD be 2, and it MUST be at least 1.  INIT_CWND SHOULD be
+   2, and it MUST be at least 1.  The choice of MIN_CWND and INIT_CWND
+   are strongly connected to the framing protocol; a larger MIN_CWND
+   and/or INIT_CWND MAY be used if the framing protocol allows it.  For
+   instance, TCP senders may use a larger INIT_CWND as specified in
+   [RFC3390].
+
+   A LEDBAT sender uses the current_delays list to maintain delay
+   measurements made within an RTT amount of time in the past, seeking
+   to eliminate noise spikes in its measurement of the current one-way
+   delay through the network.  The size of this list, CURRENT_FILTER,
+   may be variable, and depends on the number of successful measurements
+   made within an RTT amount of time in the past.  CURRENT_FILTER SHOULD
+   be 1, and it MUST be at least 1 and limited such that no samples in
+   list are older than an RTT in the past.  Note that after a long
+   silent period, a LEDBAT sender will still have at least 1
+   current_delay sample; any current_delay samples older than an RTT
+   MUST NOT be used in computing queueing_delay.  A simple
+   implementation with a fixed-size list replaces measurements in the
+   list that are older than an RTT with +INFINITY.
+
+
+4.  Understanding LEDBAT Mechanisms
+
+   This section describes the delay estimation and window management
+   mechanisms used in LEDBAT congestion control.
+
+4.1.  Delay Estimation
+
+   To observe an increase in the queueing delay in the network, LEDBAT
+   separates the queueing delay component from the rest of the end-to-
+   end delay.  This section explains how LEDBAT decomposes the observed
+   changes in end-to-end delay into these two components.
+
+   LEDBAT estimates congestion in the direction of the data flow, and to
+   avoid measuring queue build-up on the reverse path (or ack path),
+   LEDBAT uses one-way delay estimates.  LEDBAT assumes measurements are
+   done with data packets, thus avoiding the need for separate
+   measurement packets and avoiding the pitfall of measurement packets
+   being treated differently from the data packets in the network.
+
+4.1.1.  Estimating Base Delay
+
+   End-to-end delay can be decomposed into transmission (or
+   serialization) delay, propagation (or speed-of-light) delay, queueing
+   delay, and processing delay.  On any given path, barring some noise,
+   all delay components except for queueing delay are constant.  Since
+
+
+
+Shalunov, et al.       Expires September 15, 2011               [Page 8]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+   queuing delay is always additive to the end-to-end delay, we estimate
+   the sum of the constant delay components, which we call "base delay",
+   to be the minimum delay observed on the end-to-end path.  Using the
+   minimum observed delay also allows LEDBAT to eliminate noise in the
+   delay estimation, such as due to spikes in processing delay at a node
+   on the path.
+
+   To respond to true changes in the base delay, as can be caused by a
+   route change, LEDBAT uses only recent measurements in estimating the
+   base delay.The duration of the observation window itself is a
+   tradeoff between robustness of measurement and responsiveness to
+   change: a larger observation window increases the chances that the
+   true base delay will be detected (as long as the true base delay is
+   unchanged), whereas a smaller observation window results in faster
+   response to true changes in the base delay.
+
+4.1.2.  Estimating Queueing Delay
+
+   Given that the base delay is constant, the queueing delay is
+   represented by the variable component of the measured end-to-end
+   delay.  LEDBAT measures queueing delay as simply the difference
+   between an end-to-end delay measurement and the current estimate of
+   base delay.
+
+4.2.  Managing the Congestion Window
+
+4.2.1.  Window Increase: Probing For More Bandwidth
+
+   A LEDBAT sender increases its congestion window if the queuing delay
+   is smaller than a target value, proportionally to the relative
+   difference between the current queueing delay and the delay target.
+   To be friendly to competing TCP flows, we set this highest rate of
+   window growth to be the same as TCP's.  In other words, A LEDBAT flow
+   thus never ramps up faster than a competing TCP flow over the same
+   path.
+
+4.2.2.  Window Decrease: Responding To Congestion
+
+   When the sender's queueing delay estimate is higher than the target,
+   the LEDBAT flow's rate should be reduced.  LEDBAT uses a simple
+   linear controller to detemine sending rate as a function of the delay
+   estimate, where the response is proportional to the difference
+   between the current queueing delay estimate and the target.  In
+   limited experiments with Bittorrent nodes, this controller seems to
+   work well.
+
+   Unlike TCP-like loss-based congestion control, LEDBAT does not induce
+   losses and so a LEDBAT sender is not expected to normally rely on
+
+
+
+Shalunov, et al.       Expires September 15, 2011               [Page 9]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+   losses to determine the sending rate.  However, when data loss does
+   occur, LEDBAT must respond as standard TCP does; even if the queueing
+   delay estimates indicate otherwise, a loss is assumed to be a strong
+   indication of congestion.  Thus, to deal with severe congestion when
+   packets are dropped in the network, and to provide a fallback against
+   incorrect queuing delay estimates, a LEDBAT sender halves its
+   congestion window when a loss event is detected.  As with TCP New-
+   Reno, LEDBAT reduces its cwnd by half at most once per RTT.
+
+4.3.  Choosing The Queuing Delay Target
+
+   The queueing delay target is a tradeoff.  A target that is too low
+   might result in under-utilization of the bottleneck link, especially
+   if the LEDBAT flow is the only flow on the link, and may also be more
+   sensitive to error in the measured delay.  The International
+   Telecommunication Union's (ITU's) Recommendation G.114 defines a
+   delay of 150 ms to be acceptable for most user voice applications.
+   Thus the extra delay induced by LEDBAT must be below 150 ms to reduce
+   impact on delay-sentive applications.
+
+   Our recommendation of 100 ms or less as the target is based on these
+   considerations.  Anecdotal evidence indicates that this value works
+   well: LEDBAT has been been implemented and successfully deployed with
+   a target value of 100 ms in two Bittorrent implementations---
+   BitTorrent DNA as the exclusive congestion control mechanism and in
+   uTorrent as an experimental mechanism.
+
+
+5.  Discussion
+
+5.1.  Framing and Ack Frequency Considerations
+
+   While the actual framing and wire format of the protocols using
+   LEDBAT are outside the scope of this document, we briefly consider
+   the data framing and ack frequency needs of LEDBAT mechanisms.
+
+   To compute the data path's one-way delay, our discussion of LEDBAT
+   assumes a framing that allows the sender to timestamp packets and for
+   the receiver to convey the measured one-way delay back to the sender
+   in ack packets.  LEDBAT does not require this particular method, but
+   it does require unambiguous delay estimates using data and ack
+   packets.
+
+   A LEDBAT receiver may send an ack as frequently as one for every data
+   packet received or less frequently; LEDBAT does require that the
+   receiver MUST transmit at least one ack in every RTT.
+
+
+
+
+
+Shalunov, et al.       Expires September 15, 2011              [Page 10]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+5.2.  Competing With TCP Flows
+
+   LEDBAT is designed to respond to congestion indications earlier than
+   loss-based TCP.  A LEDBAT flow is more aggressive when the queueing
+   delay estimate is lower; since the queueing delay estimate is non-
+   negative, LEDBAT is most aggressive when its queuing delay estimate
+   is zero.  In this case, LEDBAT ramps up its congestion window at the
+   same rate as TCP does.  LEDBAT reduces its rate earlier than TCP
+   does, always halving the congestion window on loss.  Thus, in the
+   worst case where the delay estimates are completely and consistently
+   off, a LEDBAT flow falls back to TCP mechanisms and is as aggressive
+   as a TCP flow.
+
+5.3.  Fairness Among LEDBAT Flows
+
+   The primary design goals of LEDBAT are focussed on the aggregate
+   behavior of LEDBAT flows when they compete with standard TCP.  Since
+   LEDBAT is designed for background traffic, we consider link
+   utilization to be more important than fairness amongst LEDBAT flows.
+   Nevertheless, we now consider fairness issues that might arise
+   amongst competing LEDBAT flows.
+
+   LEDBAT as described so far lacks a mechanism specifically designed to
+   equalize utilization amongst LEDBAT flows.  Anecdotally observed
+   behavior of existing implementations indicates that a rough
+   equalization does occur since in most enviroments some amount of
+   randomness in the inter-packet transmission times exist, as explained
+   further below.
+
+   Delay-based congestion control systems suffer from the possibility of
+   late-comers incorrectly measuring and using a higher base-delay than
+   an active flow that started earlier.  Suppose a LEDBAT flow is the
+   only flow on the bottleneck, which the flow saturates, steadily
+   maintaining the queueing delay at a target delay.  When a new LEDBAT
+   flow arrives, it might incorrectly measure the current end-to-end
+   delay, including the queueing delay being maintained by the first
+   LEDBAT flow, as its base delay, and the incoming flow might now
+   effectively seek to build on top of the existing, already maximal
+   queueing delay.  As the second flow builds up, the first flow sees
+   the true queueing delay and backs off, while the late-comer keeps
+   building up, using up the entire link's capacity; this advantage is
+   called the "late-comer's advantage".
+
+   In the worse case, if the first flow yields at the same rate as the
+   new flow increases its sending rate, the new flow will see constant
+   end-to-end delay, which it assumes is the base delay, until the first
+   flow backs off completely.  As a result, by the time the second flow
+   stops increasing its cwnd, it would have added twice the target
+
+
+
+Shalunov, et al.       Expires September 15, 2011              [Page 11]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+   queueing delay to the network.
+
+   This advantage can be reduced if the the first flow yields quickly
+   enough to empty the bottleneck queue faster than the incoming flow
+   increases its occupancy in the queue; as a result, the late-comer
+   might measure a delay closer to the base delay.  While such a
+   reduction might be achieved through a multiplicative decrease of the
+   congestion window, this might cause stronger fluctuations in flow
+   throughput during steady state.
+
+   In practice, however, this concern seems to be alleviated by the
+   burstiness of network traffic: all that's needed to measure the base
+   delay is one small gap in transmission schedules between the LEDBAT
+   flows.  These gaps can occur for a number of reasons such as latency
+   introduced due to OS scheduling at the sender, processing delay at
+   the sender or any network node, and link contention.  When such a gap
+   occurs while the late-comer is starting, base delay is immediately
+   correctly measured.  With a small number of LEDBAT flows, system
+   noise seems to sufficiently regulate the late-comer's advantage.
+
+
+6.  IANA Considerations
+
+   There are no IANA considerations for this document.
+
+
+7.  Security Considerations
+
+   A network on the path might choose to cause higher delay measurements
+   than the real queuing delay so that LEDBAT backs off even when
+   there's no congestion present.  While shaping of traffic into an
+   artificially narrow bottleneck by increasing the queueing delay
+   cannot be trivially counteracted, a protocol using LEDBAT should seek
+   to minimize the risk of such an attack by authenticating the
+   timestamp and delay fields in the packets.
+
+
+8.  Acknowledgements
+
+   We thank folks in the LEDBAT working group for their comments and
+   feedback.  Special thanks to Murari Sridharan and Rolf Winter for
+   their patient and untiring shepherding.
+
+
+9.  References
+
+
+
+
+
+
+Shalunov, et al.       Expires September 15, 2011              [Page 12]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+9.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC3390]  Allman, M., Floyd, S., and C. Partridge, "Increasing TCP's
+              Initial Window", RFC 3390, October 2002.
+
+   [RFC5681]  Allman, M., Paxson, V., and E. Blanton, "TCP Congestion
+              Control", RFC 5681, September 2009.
+
+9.2.  Informative References
+
+   [Bra94]    Brakmo, L., O'Malley, S., and L. Peterson, "TCP Vegas: New
+              techniques for congestion detection and avoidance",
+              Proceedings of SIGCOMM '94, pages 24-35, August 1994.
+
+
+Appendix A.  Timestamp errors
+
+   One-way delay measurement needs to deal with timestamp errors.  We'll
+   use the same locally linear clock model and the same terminology as
+   Network Time Protocol (NTP).  This model is valid for any
+   differentiable clocks.  NTP uses the term "offset" to refer to
+   difference from true time and "skew" to refer to difference of clock
+   rate from the true rate.  The clock will thus have a fixed offset
+   from the true time and a skew.  We'll consider what we need to do
+   about the offset and the skew separately.
+
+A.1.  Clock offset
+
+   First, consider the case of zero skew.  The offset of each of the two
+   clocks shows up as a fixed error in one-way delay measurement.  The
+   difference of the offsets is the absolute error of the one-way delay
+   estimate.  We won't use this estimate directly, however.  We'll use
+   the difference between that and a base delay.  Because the error
+   (difference of clock offsets) is the same for the current and base
+   delay, it cancels from the queuing delay estimate, which is what
+   we'll use.  Clock offset is thus irrelevant to the design.
+
+A.2.  Clock skew
+
+   The clock skew manifests in a linearly changing error in the time
+   estimate.  For a given pair of clocks, the difference in skews is the
+   skew of the one-way delay estimate.  Unlike the offset, this no
+   longer cancels in the computation of the queuing delay estimate.  On
+   the other hand, while the offset could be huge, with some clocks off
+   by minutes or even hours or more, the skew is typically small.  For
+
+
+
+Shalunov, et al.       Expires September 15, 2011              [Page 13]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+   example, NTP is designed to work with most clocks, yet it gives up
+   when the skew is more than 500 parts per million (PPM).  Typical
+   skews of clocks that have never been trained seem to often be around
+   100-200 PPM.  Previously trained clocks could have 10-20 PPM skew due
+   to temperature changes.  A 100-PPM skew means accumulating 6
+   milliseconds of error per minute.  The base delay updates mostly
+   takes care of clock skew unless the skew is unusually high or extreme
+   values have been chosen for TARGET and BASE_HISTORY so that the clock
+   skew in BASE_DELAY minutes is larger than the TARGET.
+
+   Clock skew can be in two directions: either the sender's clock is
+   faster than the receiver's, or vice versa.
+
+   If the senders's clock is faster the one-way delay measurement will
+   get more and more reduced by the clock drift over time.  Whenever
+   there is no additional delay the base delay will be updated by a
+   smaller one-way delay value and the skew is compensated.  This will
+   happen continuously as LEBDAT is design to keep the queue empty.  If
+   a competing flow introduces additional queueing delay LEDBAT will
+   anyway get out of the way quickly and an overestimated one-way delay
+   will just speed-up the back-off.
+
+   When the receiver clock runs faster, the raw delay estimate will
+   drift up with time.  This can suppress the throughput unnecessarily.
+   In this case a skew correction mechanim can be benefital.  Further
+   condersiderations based on a deployed implementation and LEDBAT
+   specific preconditions are given in the next section.
+
+A.3.  Clock skew correction mechanism
+
+   The following paragraph describes the deployed clock skew correction
+   mechanism in the BitTorrent implementation for documentation purpose.
+
+   In the BitTorrent implemtation the receiver sends back the raw
+   (sending and receiving) timestamps.  Based on this imfomation and the
+   system time at feedback receiption the sender can estimated the one-
+   way delay in both directions.  Thus the sender can run the same base
+   delay calculation algorithm it runs for itself for the receiver as
+   well.  If the sender can detect the receiver reducing its base delay,
+   it can infer that this is due to clock drift.  The sender can be
+   compensated for by increasing the it's base delay by the same amount.
+   To apply this mechanism symmetrical framing is need (i.e., same
+   information about delays transmitted in both way).
+
+   The following considerations can be used for an alternative
+   implementation as a reference:
+
+
+
+
+
+Shalunov, et al.       Expires September 15, 2011              [Page 14]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+   o  Skew correction with faster virtual clock:
+      Since having a faster clock on the sender will continuousely
+      update the base delay, a faster virtual clock for sender
+      timestamping can be applied.  This virual clock can be computed
+      from the default machine clock through a linear transformation.
+      E.g. with a 500 PPM speed-up the sender's clock is very likely to
+      be faster than any receiver's clock and thus LEDBAT will benefit
+      from the implicit correction when updating the base delay.
+
+   o  Skew correction with estimating drift:
+      With LEDBAT the history of base delay minima is already kept for
+      each minute.  This can provide a base to compute the clock skew
+      difference between the two hosts.  The slope of a linear function
+      fitted to the set of minima base delays gives an estimate of the
+      clock skew.  This estimation can be used to correct the clocks.
+      If the other endpoint is doing the same, the clock should be
+      corrected by half of the estimated skew amount.
+
+   o  Byzantine skew correction:
+      When it is known that each host maintains long-lived connections
+      to a number of different other hosts, a byzantine scheme can be
+      used to estimate the skew with respect to the true time.  Namely,
+      calculate the skew difference for each of the peer hosts as
+      described with the previous approach, then take the median of the
+      skew differences.  While this scheme is not universally
+      applicable, it combines well with other schemes, since it is
+      essentially a clock training mechanism.  The scheme also acts the
+      fastest, since the state is preserved between connections.
+
+
+Authors' Addresses
+
+   Stanislav Shalunov
+   BitTorrent Inc
+   612 Howard St, Suite 400
+   San Francisco, CA  94105
+   USA
+
+   Email: shalunov@bittorrent.com
+   URI:   http://shlang.com
+
+
+
+
+
+
+
+
+
+
+
+Shalunov, et al.       Expires September 15, 2011              [Page 15]
+
+Internet-Draft                   LEDBAT                       March 2011
+
+
+   Greg Hazel
+   BitTorrent Inc
+   612 Howard St, Suite 400
+   San Francisco, CA  94105
+   USA
+
+   Email: greg@bittorrent.com
+
+
+   Janardhan Iyengar
+   Franklin and Marshall College
+   415 Harrisburg Ave.
+   Lancaster, PA  17603
+   USA
+
+   Email: jiyengar@fandm.edu
+
+
+   Mirja Kuehlewind
+   University of Stuttgart
+   Stuttgart
+   DE
+
+   Email: mirja.kuehlewind@ikr.uni-stuttgart.de
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Shalunov, et al.       Expires September 15, 2011              [Page 16]
+

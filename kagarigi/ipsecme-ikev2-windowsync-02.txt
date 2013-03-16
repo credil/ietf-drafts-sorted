@@ -1,0 +1,505 @@
+
+
+
+Network Working Group                                         G. Kalyani
+Internet-Draft                                                     Cisco
+Intended status: Standards Track                            July 1, 2010
+Expires: January 2, 2011
+
+
+                IKEv2 window synchronisation among peers
+               draft-kagarigi-ipsecme-ikev2-windowsync-02
+
+Abstract
+
+   This document describes an extension to the IKEv2 protocol that
+   allows the synchronisation of ikev2 windows between the peers.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on January 2, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2010 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+
+
+
+
+Kalyani                  Expires January 2, 2011                [Page 1]
+
+Internet-Draft        IKEv2 window synchronisation             July 2010
+
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . . . 3
+   2.  Terminology . . . . . . . . . . . . . . . . . . . . . . . . . . 3
+   3.  Description of the solution . . . . . . . . . . . . . . . . . . 4
+   4.  Details of implementation . . . . . . . . . . . . . . . . . . . 5
+   5.  Notify Types  . . . . . . . . . . . . . . . . . . . . . . . . . 6
+   6.  Actions on the Peer Device  . . . . . . . . . . . . . . . . . . 7
+   7.  Security Considerations . . . . . . . . . . . . . . . . . . . . 7
+   8.  Interaction with other drafts . . . . . . . . . . . . . . . . . 7
+   9.  IANA Considerations . . . . . . . . . . . . . . . . . . . . . . 8
+   10. Acknowledgements  . . . . . . . . . . . . . . . . . . . . . . . 8
+   11. Normative References  . . . . . . . . . . . . . . . . . . . . . 8
+   Author's Address  . . . . . . . . . . . . . . . . . . . . . . . . . 9
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kalyani                  Expires January 2, 2011                [Page 2]
+
+Internet-Draft        IKEv2 window synchronisation             July 2010
+
+
+1.  Introduction
+
+   IKEv2 RFC states that "An IKE endpoint MUST NOT exceed the peer's
+   stated window size for transmitted IKE requests".
+
+   As per the protocol , all IKEv2 packets must follow a request-
+   response paradigm.  The initiator of an IKEv2 request MUST retransmit
+   the request, until it has received a response from the peer.  IKEv2
+   introduces a windowing mechanism that allows multiple requests to be
+   outstanding at a given point of time, but mandates that the sender
+   window does not move until the oldest message sent from one peer to
+   another is acknowledged.  Loss of even a single packet leads to
+   repeated retransmissions followed by an IKEv2 SA teardown if the
+   retransmissions are unacknowledged.
+
+   HA for IKEv2 is required to ensure that in case of crash of active
+   device , the stand-by device becomes active immediately.  The
+   stand-by device is expected to have the exact values of message id
+   fields of active device when it crashed.  Even with the best efforts
+   to update the message Id values from active to stand-by device, the
+   values at standby device can be stale due to following reasons.
+   o  standby device does not have a retransmission buffer corresponding
+      to that of old active SA .
+   o  standby device is unaware of the last message that was received
+      and acknowledged by the older active device as failover could have
+      happened before the standby could be updated.
+
+   When a stand-by device takes over as the active device, it would
+   start the message id ranges from previously updated values.  This
+   would make it reject requests from the peer , since the values would
+   be stale.  As a sender, the stand-by device may end up reusing a
+   stale message-id which will cause the peer to drop the request.
+   Eventually there is a high probability of the IKEv2 and corresponding
+   IPsec SAs getting torn down simply because of a transitory message-id
+   mismatch.  This is not a desirable feature of HA.
+
+   Hence a mechanism is required in HA to ensure that the stand-by
+   device has correct values of message Id values, so that sessions are
+   not torn down just because of window ranges.
+
+
+2.  Terminology
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC 2119 [RFC2119].
+
+
+
+
+
+Kalyani                  Expires January 2, 2011                [Page 3]
+
+Internet-Draft        IKEv2 window synchronisation             July 2010
+
+
+   o  stand-by device : The device which will take control , when the
+      active device crashes.
+   o  active device : This is the primary device in the cluster.  The
+      stand-by and active device form a cluster.
+   o  peer device: This is the device with which any device in the
+      cluster , would establish an IKEv2 session.
+   o  Message SYNC Request : The information exchange request to
+      synchronize the message Id information
+   o  Message SYNC Response : The information exchange response to
+      synchronize the message Id information.
+
+
+3.  Description of the solution
+
+   After the stand-by device takes control over the active device, the
+   stand-by device would request the peer to send its values of message
+   Id fields.
+
+   The stand-by device would then update its values of message Id fields
+   and then start sending/receiving the requests.
+
+   The ability of a device to participate in syncing the message Id MUST
+   be announced using the notify SYNC_MESSAGE_ID_INFO_SUPPORTED in AUTH
+   exchange.  After the peer device responds with this capability, the
+   active device MUST sync this to the stand-by device so that stand-by
+   device is aware of the capability and can use it when it takes
+   control over the active device.
+
+
+      Active Device                          Peer Device
+      ===========                       ===========
+      HDR, SK {IDi, [CERT,] [CERTREQ,] [IDr,]
+                     AUTH, SAi2, TSi, TSr,
+       N[SYNC_MESSAGE_ID_INFO_SUPPORTED]} ---->
+
+                <----- HDR, SK {IDi, [CERT,] [CERTREQ,] [IDr,]
+                                    AUTH, SAi2, TSi, TSr,
+                   N[SYNC_MESSAGE_ID_INFO_SUPPORTED]}
+
+
+
+   when the stand-by device takes control over the active device, it has
+   to request the peer for the message Id values.  Stand-by device would
+   initiate the Message SYNC Request with an INFORMATIONAL exchange
+   containing the notify SYNC_MESSAGE_ID_INFO .  Nonce payload MUST be
+   sent in Message SYNC Request.
+
+   Peer device would respond back with the notify SYNC_MESSAGE_ID_INFO.
+
+
+
+Kalyani                  Expires January 2, 2011                [Page 4]
+
+Internet-Draft        IKEv2 window synchronisation             July 2010
+
+
+   The Nonce payload received in request MUST be sent back same by peer
+   device in the reponse.  This is done to counter the replay of Message
+   SYNC response.
+
+
+      Stand by Device                          Peer Device
+      ===========                                      ===========
+      HDR, SK {N[SYNC_MESSAGE_ID_INFO]} -------->
+
+                <--------- HDR, SK {N[SYNC_MESSAGE_ID_INFO]}
+
+
+
+4.  Details of implementation
+
+   The message Id used in this exchange MUST be zero so that it is not
+   vaildated upon receipt.  Message Id zero MUST be permitted only for
+   informational exchange that would have NOTIFY of type
+   SYNC_MESSAGE_ID_INFO.  If any packet uses the message Id Zero,
+   without having this Notify along with the Nonce payload, then such
+   packets MUST be discarded upon decryption.
+
+   The stand-by device can initiate this Exchange
+   o  when it has to send/receive the request.
+   o  It has just got the control from active device and want to update
+      the values before-hand, so that it need not start this exchange at
+      the time of sending/receiving the request.
+
+   Since there can be many sessions at Stand-by device, and sending
+   exchanges from all of the sessions can cause throttling, the stand-by
+   device can chose to initiate the exchange when it has to send or
+   receive the request.  Thus the trigger to initiate this exchange
+   depends on the requirement/discretion of the stand-by device.
+
+   The device which has not announced its capability
+   SYNC_MESSAGE_ID_INFO_SUPPORTED MUST NOT send/receive the notify
+   SYNC_MESSAGE_ID_INFO.
+
+   If a device gets this type of exchange even though it did not
+   announce its capability, then it MUST drop this packet with error
+   INVALID_SYNTAX.
+
+   If responder of this exchange does not reply to this exchange, even
+   though responder has announced its capability in AUTH Exchange, then
+   the initiator SHOULD retransmit.  The responder MUST retransmit the
+   Message SYNC response only if gets a retransmitted request..
+
+   If responder of this exchange does not reply to this exchange, even
+
+
+
+Kalyani                  Expires January 2, 2011                [Page 5]
+
+Internet-Draft        IKEv2 window synchronisation             July 2010
+
+
+   though responder has announced its capability in AUTH Exchange, then
+   the initiator SHOULD retransmit.  The responder MUST retransmit the
+   Message SYNC response only for the earlier received Message SYNC
+   Request.
+
+
+5.  Notify Types
+
+   Below are the two notify types that are newly defined
+   o  SYNC_MESSAGE_ID_INFO_SUPPORTED: This notify would be similar to
+      that any other simple notify with the notify type being
+      SYNC_MESSAGE_ID_INFO_SUPPORTED.
+
+
+                             1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       | Next Payload  |C|  RESERVED   |         Payload Length        |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |Protocol ID(=0)| SPI Size (=0) |      Notify Message Type      |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+
+
+                        SYNC_MESSAGE_ID_INFO_SUPPORTED
+
+   o  SYNC_MESSAGE_ID_INFO : This notify would be similar to that of any
+      other notify but with Notify message type being
+      SYNC_MESSAGE_ID_INFO.Additionally it contains the following data.
+      *  NONCE : This is some random value of size 32 bits.  The NONCE
+         is placed in the notify to detect the replay of Message SYNC
+         responses.  The NONCE sent in the request and reply MUST match.
+      *  EXPECTED_SEND_REQ_MESSAGE_ID : This field is used by the sender
+         of this notify, to indicate the message Id it will use in the
+         next request, that it will send to the peer.
+      *  EXPECTED_RECV_REQ_MESSAGE_ID : This field is used by the sender
+         of this notify, to indicate the message Id it can accept in the
+         next request, received from the peer.
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kalyani                  Expires January 2, 2011                [Page 6]
+
+Internet-Draft        IKEv2 window synchronisation             July 2010
+
+
+                         1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       | Next Payload  |C|  RESERVED   |         Payload Length        |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |Protocol ID(=0)| SPI Size (=0) |      Notify Message Type      |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |    NONCE                                                      |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |EXPECTED_SEND_REQ_MESSAGE_ID                                   |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |EXPECTED_RECV_REQ_MESSAGE_ID                                   |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+
+
+                             SET_MESSAGE_ID_INFO
+
+
+6.  Actions on the Peer Device
+
+   The Peer MUST start the window from higher value and MUST NOT wait
+   for any pending requests.  For example, If the Peer device is
+   expecting the next request with message Id K, then it should send the
+   EXPECTED_SEND_REQ_MESSAGE_ID as K. If it has received some request
+   through K-P but not P , then it should send the
+   EXPECTED_SEND_REQ_MESSAGE_ID as P.
+
+
+7.  Security Considerations
+
+   There can be two types of DOS attacks.
+   o  Replay of Message SYNC Request.  This can be countered by rate
+      limiting the number of such requests a peer device can receive.
+      The rate limiting can be done either by number or the time delay
+      between which Message SYNC request can be received or both.These
+      options are configurable.
+   o  Replay of Message SYNC Response.  This can be countered by sending
+      the NONCE payload along with the SYNC_MESSAGE_ID_INFO notify.  The
+      payload has to be returned same in response.  Thus the stand-by
+      device can accept the reply only for the current request.  After
+      it receives the response, it MUST not accept the same response
+      again and MUST drop the response.
+
+
+8.  Interaction with other drafts
+
+   The primary assumption of message sync proposal is IKE SA has
+
+
+
+Kalyani                  Expires January 2, 2011                [Page 7]
+
+Internet-Draft        IKEv2 window synchronisation             July 2010
+
+
+   established between active member of cluster and peer and then
+   failover event occurred and now stand-by member has "become" active.
+   It also assumes the IKE SA state has been synced between active and
+   stand-by member of the cluster.
+   o  Session Resumption Failover event occurs on the cluster, so its
+      known to all member of the cluster i.e. gateway or responder, now
+      stand-by member who becomes active will initiates the message id
+      sync.  While session resumption assumes that peer i.e. client or
+      initiator detects the need to re-establish the session.  These
+      primary assumption are mutually exclusive.  Also in Hot Standby
+      Cluster, client establishes the tunnel with cluster IP address, so
+      it will not detect the event of failover in the gateway cluster
+      until standby member took very long to become active and IKE SA
+      times out through liveness check.
+   o  Redirect Redirect mechanism for load-balancing can be used during
+      init (IKE_SA_INIT) and auth (IKE_AUTH) and after session
+      establishment.  While message id sync is used after IKE SA has
+      been established and failover event has occurred.  So it is
+      mutually exclusive with redirect during init and auth.  The
+      redirect after session established is used to timed or planned
+      shutdown/maintenance.  The failover event is can not detected on
+      active member so using redirect after session establishment is not
+      possible in case of failover.
+   o  Crash detection.  Either message id sync or crash detection
+      approach can be taken by standby gateway on failover event.
+
+
+9.  IANA Considerations
+
+   This document two new IKEv2 Notification Message types as described
+   in Section 5.The new Notify Message Types must be assigned values
+   between 16396 and 40959.
+   o  SYNC_MESSAGE_ID_INFO_SUPPORTED
+   o  SYNC_MESSAGE_ID_INFO
+
+
+10.  Acknowledgements
+
+   I would like to thank Pratima Sethi, Frederic Detienne and HA Design
+   team for their valuable reviews and suggestions.  Thanks to Yaron for
+   proposing the use of NONCE in the messages to prevent the replay
+   attack of responses.
+
+
+11.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+
+
+Kalyani                  Expires January 2, 2011                [Page 8]
+
+Internet-Draft        IKEv2 window synchronisation             July 2010
+
+
+   [RFC4306]  Kaufman, C., "Internet Key Exchange (IKEv2) Protocol",
+              RFC 4306, December 2005.
+
+   [RFC4718]  Eronen, P. and P. Hoffman, "IKEv2 Clarifications and
+              Implementation Guidelines", RFC 4306, October 2006.
+
+
+Author's Address
+
+   Kalyani Garigipati
+   Cisco Systems, Inc.
+   SEZ Unit, Cessna Business Park
+   Bangalore, Karnataka  560025
+   India
+
+   Phone: +91 80 4426 4831
+   Email: kagarigi@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kalyani                  Expires January 2, 2011                [Page 9]
+
+

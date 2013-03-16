@@ -1,0 +1,840 @@
+
+
+
+Network Working Group                                     T. Bruijnzeels
+Internet-Draft                                                  RIPE NCC
+Intended status: Informational                         November 22, 2012
+Expires: May 26, 2013
+
+
+                     RPKI Repository Delta Protocol
+               draft-tbruijnzeels-sidr-delta-protocol-00
+
+Abstract
+
+   The current RPKI Resource Certificate Repository Structure (RFC6480 &
+   RFC6481) uses rsync as both a delta and transfer protocol.  Concerns
+   have been raised about the scalability of this repository and the
+   reliance on rsync.  This document provides an analysis of these
+   concerns and specifies a new transport agnostic delta protocol that
+   addresses these concerns.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on May 26, 2013.
+
+Copyright Notice
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+
+
+
+Bruijnzeels               Expires May 26, 2013                  [Page 1]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Requirements notation  . . . . . . . . . . . . . . . . . . . .  4
+   2.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  4
+   3.  Concerns With Rsync  . . . . . . . . . . . . . . . . . . . . .  4
+     3.1.  Scalability of rsync(d) deltas . . . . . . . . . . . . . .  4
+     3.2.  Update frequency and propagation times . . . . . . . . . .  5
+       3.2.1.  Migrating to another ASN . . . . . . . . . . . . . . .  5
+       3.2.2.  Mistake in ROA . . . . . . . . . . . . . . . . . . . .  5
+       3.2.3.  BGPSec re-keying . . . . . . . . . . . . . . . . . . .  5
+     3.3.  Lack of rsync standard and implementations . . . . . . . .  5
+     3.4.  Inconsistent Responses . . . . . . . . . . . . . . . . . .  6
+   4.  Delta Protocol Requirements  . . . . . . . . . . . . . . . . .  6
+     4.1.  Transport Agnostic . . . . . . . . . . . . . . . . . . . .  6
+     4.2.  Support Transactions . . . . . . . . . . . . . . . . . . .  6
+     4.3.  Reduce Load on Central Repositories  . . . . . . . . . . .  6
+     4.4.  Update notifications . . . . . . . . . . . . . . . . . . .  7
+     4.5.  Signed Deltas  . . . . . . . . . . . . . . . . . . . . . .  7
+   5.  Delta Protocol Implementation  . . . . . . . . . . . . . . . .  7
+     5.1.  Overview . . . . . . . . . . . . . . . . . . . . . . . . .  7
+     5.2.  File Format  . . . . . . . . . . . . . . . . . . . . . . .  8
+     5.3.  Update Nofication File . . . . . . . . . . . . . . . . . .  8
+       5.3.1.  Header . . . . . . . . . . . . . . . . . . . . . . . .  8
+       5.3.2.  List of Full Dump URIs . . . . . . . . . . . . . . . .  9
+       5.3.3.  List of Delta URIs . . . . . . . . . . . . . . . . . .  9
+       5.3.4.  Dump and Delta Availability Requirements . . . . . . .  9
+     5.4.  Full Dump Format . . . . . . . . . . . . . . . . . . . . . 10
+       5.4.1.  Header . . . . . . . . . . . . . . . . . . . . . . . . 10
+       5.4.2.  Objects  . . . . . . . . . . . . . . . . . . . . . . . 10
+     5.5.  Incremental Dump Format  . . . . . . . . . . . . . . . . . 10
+       5.5.1.  Header . . . . . . . . . . . . . . . . . . . . . . . . 11
+       5.5.2.  Updates  . . . . . . . . . . . . . . . . . . . . . . . 11
+     5.6.  Pointing to the update notification file . . . . . . . . . 11
+   6.  Using the protocol as a Relying Party  . . . . . . . . . . . . 12
+     6.1.  Managing a Local Cache . . . . . . . . . . . . . . . . . . 12
+     6.2.  Update Mechanism Preference  . . . . . . . . . . . . . . . 12
+     6.3.  Typical Exchanges  . . . . . . . . . . . . . . . . . . . . 13
+       6.3.1.  New Update Location  . . . . . . . . . . . . . . . . . 13
+       6.3.2.  Polling for Updates  . . . . . . . . . . . . . . . . . 13
+       6.3.3.  Deltas Available . . . . . . . . . . . . . . . . . . . 13
+       6.3.4.  SessionId Changed  . . . . . . . . . . . . . . . . . . 13
+       6.3.5.  Multiple 'fnpn' SIA entries found  . . . . . . . . . . 14
+   7.  Supporting the protocol as a Publication Server  . . . . . . . 14
+     7.1.  Making Deltas Available  . . . . . . . . . . . . . . . . . 14
+     7.2.  Using http caches or CDNs  . . . . . . . . . . . . . . . . 14
+
+
+
+Bruijnzeels               Expires May 26, 2013                  [Page 2]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+       7.2.1.  Use Unique URLs  . . . . . . . . . . . . . . . . . . . 14
+       7.2.2.  Don't cache the update notification file . . . . . . . 14
+       7.2.3.  Do cache everything else.. . . . . . . . . . . . . . . 14
+   8.  Security Considerations  . . . . . . . . . . . . . . . . . . . 14
+   9.  Acknowledgements . . . . . . . . . . . . . . . . . . . . . . . 15
+   10. Normative References . . . . . . . . . . . . . . . . . . . . . 15
+   Author's Address . . . . . . . . . . . . . . . . . . . . . . . . . 15
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Bruijnzeels               Expires May 26, 2013                  [Page 3]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+1.  Requirements notation
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in [RFC2119] .
+
+
+2.  Introduction
+
+   The current RPKI Resource Certificate Repository Structure (RFC6480 &
+   RFC6481) uses rsync as both a delta and transfer protocol and
+   recommends that repositories be set up in a hierarchical way such
+   that relying parties (validation tools) can fetch all updates in a
+   single repository efficiently while performing top-down validation.
+
+   This structure has its benefits.  In particular it has allowed for
+   early deployment of RPKI without the need to re-invent a delta
+   protocol, and this has allowed early adopters of RPKI to build up
+   operational experience more quickly.  The delta protocol also has
+   benefits for relying party tools, allowing them to quickly retrieve
+   what's new in a repository limiting fetch time and bandwidth usage.
+
+   Operational experience shows that the current RPKI infrastructure
+   works fairly well under most circumstances.  However, operational
+   experience, as well as lab testing, have also shown that there are
+   emergent concerns with the current infrastructure that justify that
+   the WG thinks about improvements in this space.
+
+
+3.  Concerns With Rsync
+
+3.1.  Scalability of rsync(d) deltas
+
+   Rsync is a very efficient tool when used 1:1 between a client and
+   server.  The problem is that in a globally deployed RPKI we can
+   expect in the order of 40k clients, roughly corresponding to the
+   number of ASNs, to connect regularly to a repository server.
+
+   When the rsync built-in delta protocol is used (recursive fetching),
+   the server is computationally involved in calculating the delta for
+   each connected client.  Performance measurements in a lab have shown
+   that the maximum clients that can be processed per second
+   (throughput), and the maximum number of concurrent clients are both
+   linearly dependent on the repository size.  The throughput is limited
+   by server CPU.  Concurrency is limited by server memory.
+
+   As a result a sufficiently large repository has to invest heavily in
+   running multiple rsyncd instances to cope with the load of a large
+
+
+
+Bruijnzeels               Expires May 26, 2013                  [Page 4]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+   number of clients, and to counter the risks of DDoS attacks.
+
+3.2.  Update frequency and propagation times
+
+   The retrieval of signed object is described in an RFC6480 (section
+   6).  There are no formal limits imposed by this informational RFC on
+   the update frequency, but to prevent the overloading of repository
+   servers as described above, the typical update interval of current
+   tools is between 1-24 hours.
+
+   In previous discussions in the WG it was suggested that human scale
+   propagation times (i.e. up to 24 hours) are good enough for the
+   problem that we are trying to solve.  There are however good reasons
+   why much faster retrieval of new signed objects desirable.
+
+3.2.1.  Migrating to another ASN
+
+   A ROA exists for a prefix and ASN, but the prefix needs to be
+   announced from another ASN.
+
+   In many cases the PP can know this in advance and create an
+   appropriate ROA well in advance, but there are also failure cases
+   possible where this was not foreseeable.
+
+3.2.2.  Mistake in ROA
+
+   A wrong ROA is mistakenly issued and picked up by some RPs, the
+   situation needs to be corrected asap.
+
+3.2.3.  BGPSec re-keying
+
+   The BGPSec protocol is still being discussed.  However there are
+   indications that it would be desirable if propagation times for new
+   router certificates and CRLs could be reduced.
+
+3.3.  Lack of rsync standard and implementations
+
+   There is only one known implementation of rsync and the standard is
+   not described by any RFC.  The implementation is non-modular, making
+   it impossible to use the code as a library even when coding in the
+   same language.
+
+   As a result all current implementations of relying party tooling have
+   had no option but to use rsync as a pre-installed external process.
+
+   This has several major draw backs for the quality of implementations:
+
+
+
+
+
+Bruijnzeels               Expires May 26, 2013                  [Page 5]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+   o  RP tools require that rsync is installed on a system, and they can
+      not assume which version is installed.
+   o  Because there is only one implementation all RPKI repositories can
+      be affected by a single bug or exploit in rsync.
+   o  Calling an external process is expensive limiting the benefits
+      that can be gained from parallel processing.
+   o  Parsing downloaded objects is inefficient -- objects have to be
+      downloaded to disk first before they can be read and parsed.
+   o  Dealing with errors is complicated -- exit codes are not always
+      clear, stderr may have to be parsed.  Exit codes and messages are
+      not guaranteed to be the same across rsync versions.
+
+3.4.  Inconsistent Responses
+
+   Rsync is non-transactional and as a result RPs may get partially
+   updated CA repository objects if it happens to fetch while the
+   objects on disk are being updated.  This is confusing to RPs who can
+   not tell the difference between this and an attack involving partial
+   replay or withholding.  Current wisdom for the RP is to try again and
+   hope for the best.
+
+
+4.  Delta Protocol Requirements
+
+4.1.  Transport Agnostic
+
+   A future delta protocol should be transport agnostic, allowing
+   agility in future transport protocols between RPs and repositories,
+   and sharing of deltas between RPs.
+
+   In this document I will use http as an example protocol.
+
+4.2.  Support Transactions
+
+   A future delta protocol should allow for transactional updates with
+   regard to *all* objects for CA certificate publication point.
+
+4.3.  Reduce Load on Central Repositories
+
+   In a full deployment scenario a large number of RPs is expected to
+   approach a single repository server regularly.  Estimates of how
+   large this number of RPs is, and how regularly they will fetch
+   updates vary.  However as a starting point one might expect one RP
+   tool for each ASN, currently 40k, to fetch updates every five
+   minutes.  Whatever the real numbers may be it should be noted that
+   the repository server has very little control over these numbers.
+
+   Because of this it makes sense to look into a delta protocol where
+
+
+
+Bruijnzeels               Expires May 26, 2013                  [Page 6]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+   the number of clients and frequency of fetching, has the least
+   possible effect on the central repository server.  Pre-computing
+   updates as described later on in this document allows for such
+   minimal involvement.  Deltas can be offloaded to caches or CDNs.
+
+   Although this results in a protocol that is less efficient 1:1 for
+   the Relying Party, the trade-off chosen here is that offloading CPU
+   cycles to, say, 40k RPs every 5 minutes scales better than spending
+   them on the server.
+
+4.4.  Update notifications
+
+   Higher update frequencies and shorter propagation times are desired.
+   For this reason a delta protocol would do well to support update
+   notifications to RPs.
+
+   Two basic strategies exist: poll and push.  Because the poll model is
+   simpler to implement I will focus on this here.  This does not
+   exclude work on a push model though.
+
+4.5.  Signed Deltas
+
+   RPs are vulnerable to attacks where information is withheld or
+   replayed.  RPs can notice such attacks if they rely on manifests to
+   inform them about:
+   o  which objects should be expected
+   o  when the next update is expected at the latest
+
+   If deltas were signed it would be possible for RPs to detect attacks
+   or transport errors sooner.  However, signing deltas comes at a cost
+   of complexity.  In particular it will be difficult to communicate
+   keys used for signing in a secure and dynamic (allow rolls) way.  The
+   benefit seems too limited to warrant this.
+
+
+5.  Delta Protocol Implementation
+
+5.1.  Overview
+
+   Relying Parties regularly poll a small update notification file with
+   pointers to deltas that can be used for getting up to date quickly,
+   and full dumps if there are no deltas available for this.
+
+   The idea is that the notification file is small enough and can be
+   pre-calculated so that there should be no problem with 10.000s of RPs
+   polling for this file every couple of minutes.  Caching of this file
+   by CDNs could be allowed to reduce dependency on the back-end server,
+   as long as this file is not cached for too long, eg 5 minutes.
+
+
+
+Bruijnzeels               Expires May 26, 2013                  [Page 7]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+   Note that full dumps and deltas are immutable.  Even if one considers
+   the practice of replacing objects sharing the same rsync URI, the
+   actual objects themselves are unchanged, they are just replaced.  And
+   this replacement does not change the fact that the URI used to be
+   associated with another object.
+
+   Following this logic full dumps and deltas are made be available over
+   truly unique URLs, making it possible to let CDNs cache them
+   indefinitely (space permitting).  This can help speed (more local
+   delivery) and reduces the dependency on the back-end servers being
+   available.
+
+5.2.  File Format
+
+   For now I will assume that xml can be used, but at this stage it's
+   really an implementation detail.  The important thing to discuss
+   first is the content of the files and the usage semantics.
+
+   One thing to note though is that all files include headers with all
+   relevant context information.  In other words this is not just
+   implied by the URI where the files were found, so they can be
+   retrieved from different locations, or shared between RPs.
+
+5.3.  Update Nofication File
+
+   This file can be used by RPs to discover whether new objects exist,
+   and where the files containing full and/or incremental dumps can be
+   retrieved.
+
+5.3.1.  Header
+
+   The header contains the following information:
+
+   +------------+------------------------------------------------------+
+   |   Element  | Description                                          |
+   +------------+------------------------------------------------------+
+   | Session_Id | UUID with time encoding identifying the session id   |
+   |            | of the publication server.                           |
+   |  File_Type | UPDATE NOTIFICATION                                  |
+   |   Version  | Integer representing the current version of the      |
+   |            | repository.                                          |
+   +------------+------------------------------------------------------+
+
+   The current version number is intended to be continuous.  If a
+   repository server gets confused it MUST reset the session id and
+   start with version 0.  If the number reaches max integer... reset
+   session id and start with version 0
+
+
+
+
+Bruijnzeels               Expires May 26, 2013                  [Page 8]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+5.3.2.  List of Full Dump URIs
+
+   A list of all full repository dumps that are made available with the
+   following information:
+
+   +---------+---------------------------------------------------------+
+   | Element | Description                                             |
+   +---------+---------------------------------------------------------+
+   | Version | The version number of the repository for this full      |
+   |         | dump.                                                   |
+   |   URI   | A unique URI pointing to this full dump.  It is         |
+   |         | RECOMMENDED to construct this URI based on the session  |
+   |         | id and version.  E.g.                                   |
+   |         | http://host/dumps/SESSION_ID/1.xml                      |
+   |   Hash  | The hash of that file (no added security, just helps    |
+   |         | detect transport errors)                                |
+   +---------+---------------------------------------------------------+
+
+5.3.3.  List of Delta URIs
+
+   A list of all available deltas:
+
+   +--------------+----------------------------------------------------+
+   |    Element   | Description                                        |
+   +--------------+----------------------------------------------------+
+   | Version_From | The first version contained in the delta.          |
+   |  Version_To  | The last version contained in the delta.           |
+   |      URI     | A unique URI pointing to this full dump.  It is    |
+   |              | RECOMMENDED to construct this URI based on the     |
+   |              | session id and versions for this delta.  E.g.      |
+   |              | http://host/deltas/SESSION_ID/1/2.xml              |
+   |     Hash     | The hash of that file (no added security, just     |
+   |              | helps detect transport errors)                     |
+   +--------------+----------------------------------------------------+
+
+5.3.4.  Dump and Delta Availability Requirements
+
+   It is RECOMMENDED that publication servers aggregate deltas after
+   some time to reduce the number of fetches that RPs need to perform.
+   There are several strategies possible to optimise this, so this is
+   not limited strictly here.
+
+   The publication server MUST provide at least a minimal set of deltas
+   that allows RPs to synchronise to the current version number,
+   starting with any of the full dumps listed.  The RP MAY need to
+   process more than one delta file to achieve this.  A synchronisation
+   algorithm for RPs is desribed later in this document.
+
+
+
+
+Bruijnzeels               Expires May 26, 2013                  [Page 9]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+5.4.  Full Dump Format
+
+   A full dump MUST contain all objects currently published by the
+   publication server.
+
+5.4.1.  Header
+
+   Similar to the update notification file header, but contains slightly
+   different informtation:
+
+   +------------+------------------------------------------------------+
+   |   Element  | Description                                          |
+   +------------+------------------------------------------------------+
+   | Session_Id | Same as above                                        |
+   |  File_Type | FULL DUMP                                            |
+   |   Version  | Integer representing the current version for this    |
+   |            | dump.                                                |
+   +------------+------------------------------------------------------+
+
+5.4.2.  Objects
+
+   The following information is listed for each published RPKI object:
+
+   +---------+---------------------------------------------------------+
+   | Element | Description                                             |
+   +---------+---------------------------------------------------------+
+   |   URI   | A reference to how the current version of this object   |
+   |         | might be fetched directly                               |
+   |  Object | Base64 Encoded Object                                   |
+   +---------+---------------------------------------------------------+
+
+   The URI is useful for current RP implementations that use URIs to
+   work out relations in the PKI.  It should be noted though that RPs
+   can also work this out based on manifests and object properties such
+   as key identifiers, signatures and the hash of the binary object.
+   See: http://www.ietf.org/internet-drafts/
+   draft-tbruijnzeels-sidr-validation-local-cache-00.txt
+
+   The extension of the filename can be used by the RP to determine the
+   type of object.
+
+5.5.  Incremental Dump Format
+
+   An incremental dump file contains all changes between the start and
+   end versions.
+
+
+
+
+
+
+Bruijnzeels               Expires May 26, 2013                 [Page 10]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+5.5.1.  Header
+
+   Similar to the update notification file header, but contains slightly
+   different informtation:
+
+   +--------------+----------------------------------------------------+
+   |    Element   | Description                                        |
+   +--------------+----------------------------------------------------+
+   |  Session_Id  | Same as above                                      |
+   |   File_Type  | DELTA                                              |
+   | Version_From | Integer representing the start version for this    |
+   |              | delta.                                             |
+   |  Version_To  | Integer representing the last version for this     |
+   |              | delta.                                             |
+   +--------------+----------------------------------------------------+
+
+5.5.2.  Updates
+
+   All changes are listed.  Note that this follows the publication
+   protocol closely.  The following information is listed for each
+   version covered by this detla and each object that changed in that
+   version:
+
+   +------------------+------------------------------------------------+
+   |      Element     | Description                                    |
+   +------------------+------------------------------------------------+
+   |      Version     | The version when the change occurred.          |
+   | publish/withdraw | Informs the RP whether the object was          |
+   |                  | published or withdrawn (see also publication   |
+   |                  | protocol)..                                    |
+   |        URI       | Same as full dump                              |
+   |      Object      | Same as full dump                              |
+   +------------------+------------------------------------------------+
+
+5.6.  Pointing to the update notification file
+
+   The location of the update notification files for a CA certificate
+   publication point can be communicated by including an SIA pointer for
+   this.  This should probably be recognisable by protocol.  E.g.
+   fnpn*://rpki.ripe.net/updates.xml
+
+   *: fancy new protocol name (yes, this is obviously a working title..)
+
+   The protocol implies the actual transport protocol, eg. http, and
+   semantics described in this document.
+
+
+
+
+
+
+Bruijnzeels               Expires May 26, 2013                 [Page 11]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+6.  Using the protocol as a Relying Party
+
+6.1.  Managing a Local Cache
+
+   It is recommended that the RP uses a local cache of unvalidated
+   objects for validation and does not rely on URIs to build up its
+   internal representation of the PKI tree.  For one way describing how
+   to do this see: http://www.ietf.org/internet-drafts/
+   draft-tbruijnzeels-sidr-validation-local-cache-00.txt
+
+   This appraoch has the advantage that it's irrelevant where objects
+   were retrieved from, and whether they were found once or many times.
+   The RPKI objects are *defined* by their content: the bits.  The name
+   is a useful indicator, but not the definition of what the object
+   *is*.  So building the PKI tree based on this, makes it easier to
+   deal with multiple possible fetch mechanisms such as rscync or the
+   protocol proposed here, as well as the possible occurrence of more
+   than one URI for each protocol.  It is no longer relevant to know
+   objects by name.
+
+   In particular an RP can just add any new objects it finds to its
+   local cache and ignore that objects have been withdrawn.  This makes
+   it much easier to deal with updates as described below because it
+   allows that only one local unvalidated cache is used, and it largely
+   eliminates the need to keep a detailed record of the current state
+   compared to repositories; except some minimal information to keep
+   track of what the latest version seen is.
+
+   Because the local cache is ultimately space limited RPs MAY delete
+   objects it no longer needs.  For example old superseeded manifests
+   and CRLs may be purged.  If the manifest is used as the authoritative
+   list of objects to validate then any object no longer referenced by
+   any still relevant manifest can be deleted as well.
+
+6.2.  Update Mechanism Preference
+
+   If a Relying Party notices a 'fnpn' SIA pointer on CA certificates it
+   SHOULD prefer to use this method to get all objects from this
+   publication server.  If a RP finds the same pointer on multiple CA
+   certificates it may assume that the publication server includes the
+   products for all those CAs.  If a RP finds a valid CA certificate
+   that points to a different publication server, or one that only has
+   the current rsync directory and manifests pointers, then it should
+   use the retrieval mechanisms appropriate to that publication point.
+
+
+
+
+
+
+
+Bruijnzeels               Expires May 26, 2013                 [Page 12]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+6.3.  Typical Exchanges
+
+6.3.1.  New Update Location
+
+   The RP should retrieve the update file and store the session id and
+   version locally.  Since the RP will have no prior session for this
+   update server it will give itself version 0.
+
+   Now the RP can find the full dump with the highest number in the
+   notification file and fetch it.  Adding any objects not previously
+   known to its own local cache.
+
+   The latest full dump MAY not have all the latest changes.  The RP can
+   update further as described below.
+
+6.3.2.  Polling for Updates
+
+   It is RECOMMENDED that the RP regularly retrieves the update files
+   and checks the session id and current versions for any 'fnpn' Update
+   Locations it has learnt.
+
+6.3.3.  Deltas Available
+
+   If the notification file lists a higher current version number than
+   what we currently have then the RP can try to fetch updates using the
+   following recursive approach:
+   o  As long as the RPs current version is smaller than the published
+      current version
+   o  Find deltas with version-from smaller than or equal to the RPs
+      version
+   o  If no such deltas can be found, fall back to the latest full dump
+      listed and update from there
+   o  Otherwise select the delta with the highest version-to
+   o  Replay it, adding all unknown objects to the local cache
+   o  Update the current RP version to 'version-to' of the processed
+      delta
+   o  Repeat until in sync with current version on update notification
+      file
+
+6.3.4.  SessionId Changed
+
+   If the session id changed the RP MUST reset its own current version,
+   and retrieve a full dump and deltas as described in the 'New Update
+   Location' exchange.
+
+
+
+
+
+
+
+Bruijnzeels               Expires May 26, 2013                 [Page 13]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+6.3.5.  Multiple 'fnpn' SIA entries found
+
+   It is RECOMMENDED that the RP uses ALL publication servers it knows
+   about to protect itself against outages or other problems (eg cause
+   by attacks) with any one repository.  If one local unvalidated cache
+   is used as described above the overhead of doing this should be
+   minimal.
+
+
+7.  Supporting the protocol as a Publication Server
+
+7.1.  Making Deltas Available
+
+   It is no coincidence that the proposed delta format closely resembles
+   the messages used in the current draft for the publication protocol.
+   One thing to note is that it MUST be possible to combine multiple
+   publish and withdraw elements in a single message from a client CA to
+   a publiction server.  This allows the CA to provide updates in units
+   of 'consistent sets' that it is responsible for, and it minimises the
+   the work needed to compute deltas for the publication server.  It can
+   just take such a message as a single increment and easily translate
+   the publish/withdraw elements to the format described above.
+
+7.2.  Using http caches or CDNs
+
+7.2.1.  Use Unique URLs
+
+   Publication Servers SHOULD use unique URLs, eg bases on a UUID and
+   the versions involved, for full dumps and deltas.  The reason is that
+   as long as these resources can be uniquely identified, it is much
+   easier to offload serving them from http caches or CDNs.
+
+7.2.2.  Don't cache the update notification file
+
+   It is recommended that the update notification file is not cached, or
+   at least not cached longer than say 5 minutes, except when the back-
+   end publication server is unavailable for some reason.
+
+7.2.3.  Do cache everything else..
+
+   It is recommended that all other (unique) resources are cached.  It
+   should be safe to drop full dumps and deltas no longer referenced any
+   recent update notification file, e.g. last referenced 72 hours ago...
+
+
+8.  Security Considerations
+
+   TBD
+
+
+
+Bruijnzeels               Expires May 26, 2013                 [Page 14]
+
+Internet-Draft       RPKI Repository Delta Protocol        November 2012
+
+
+9.  Acknowledgements
+
+   TBD
+
+
+10.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+
+Author's Address
+
+   Tim Bruijnzeels
+   RIPE NCC
+
+   Email: tim@ripe.net
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Bruijnzeels               Expires May 26, 2013                 [Page 15]
+

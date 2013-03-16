@@ -1,0 +1,412 @@
+
+
+
+Internet Engineering Task Force                               J. Kundrat
+Internet-Draft                                           August 18, 2012
+Intended status: Standards Track
+Expires: February 17, 2013
+
+
+                     IMAP QRESYNC-ARRIVED Extension
+                    draft-kundrat-qresync-arrived-00
+
+Abstract
+
+   This document updates the QRESYNC extension of the IMAP protocol to
+   use a new untagged response, the ARRIVED one, to inform about the
+   UIDs of newly arriving messages.  Deprecating the EXISTS response,
+   this extension prevents a possible race condition where clients can
+   lose synchronization of message UIDs in a selected mailbox when new
+   arrivals are immediately expunged.
+
+
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on February 17, 2013.
+
+Copyright Notice
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Kundrat                Expires February 17, 2013                [Page 1]
+
+Internet-Draft       IMAP QRESYNC-ARRIVED Extension          August 2012
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  2
+     1.1.  Requirements Language  . . . . . . . . . . . . . . . . . .  2
+   2.  Race Condition in QRESYNC  . . . . . . . . . . . . . . . . . .  2
+   3.  IMAP Protocol Changes  . . . . . . . . . . . . . . . . . . . .  4
+     3.1.  QRESYNC-ARRIVED Parameter to SELECT/EXAMINE  . . . . . . .  4
+     3.2.  ARRIVED Response . . . . . . . . . . . . . . . . . . . . .  4
+   4.  Acknowledgements . . . . . . . . . . . . . . . . . . . . . . .  5
+   5.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . .  5
+   6.  Formal Syntax  . . . . . . . . . . . . . . . . . . . . . . . .  5
+   7.  Security Considerations  . . . . . . . . . . . . . . . . . . .  6
+   8.  References . . . . . . . . . . . . . . . . . . . . . . . . . .  6
+   Appendix A. Changelog  . . . . . . . . . . . . . . . . . . . . . .  6
+     Appendix A.1.  Changes in 00 since private-02  . . . . . . . . .  6
+     Appendix A.2.  Changes in private-02 since private-01  . . . . .  6
+     Appendix A.3.  Changes in private-01 sice private-00 . . . . . .  6
+   Author's Address . . . . . . . . . . . . . . . . . . . . . . . . .  7
+
+1.  Introduction
+
+   The QRESYNC extension [RFC5162] introduces the VANISHED response, a
+   UID-based supplement to the sequence-number-based EXPUNGED [RFC3501].
+   The VANISHED response is also explicitly allowed to refer to non-
+   existing message UIDs.  Such a situation present a possible race
+   condition where clients could lose track of the sequence -> UID
+   mapping where new arrivals are removed in a parallel session.
+
+   This document updates the QRESYNC extension with a new response to be
+   used instead of EXISTS, the ARRIVED one.  It also adds a mechanism
+   for activating this extension and explains backward compatibility
+   concerns.
+
+1.1.  Requirements Language
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC 2119 [RFC2119].
+
+2.  Race Condition in QRESYNC
+
+   This section illustrates an example where a fully-compliant QRESYNC
+   client loses track of UIDs of some messages in its mailbox.
+
+   Suppose a client has opened a mailbox using the SELECT ... QRESYNC
+   command.  The mailbox contains a single message with UID 5; UIDNEXT
+   is 11.  The client is fully synchronized with the server.  In this
+   situation, the server informs client about new arrival:
+
+                             S: * 3 EXISTS
+
+
+
+
+
+
+
+Kundrat                Expires February 17, 2013                [Page 2]
+
+Internet-Draft       IMAP QRESYNC-ARRIVED Extension          August 2012
+
+
+   Upon receiving the EXISTS reponse, IMAP client would typically
+   proceed towards discovering various message metadata like theirs UIDs
+   and flags, either through the UID SEARCH ALL command, or via UID
+   FETCH (FLAGS).  However, when the new arrivals are immediately
+   expunged (perhaps as a result of an activity in a parallel session),
+   the server can possibly process the request for additinal metadata
+   only after the expunge has been reported to the client.  The VANISHED
+   response actually complicates matter in this situation:
+
+                          S: * VANISHED 12:20
+
+   This response informs about permanent removal of messages with UIDs
+   between 12 and 20, inclusively.  Unfortunately, as the VANISHED
+   response is explicitly allowed to reference non-existing UIDs, the
+   client doesn't know whether this VANISHED response affects two newly
+   arriving messages.  Immediately after having received these two
+   responses, the client cannot make any assumptions about the rest of
+   the mailbox (i.e.  messages with UIDs > 6).  Specifically, any of the
+   following can be true:
+
+   o  The mailbox now contains only one message with UID 5
+
+   o  The mailbox contains two messages; first of them has UID 5 and
+      nothing is known about the other one
+
+   o  The mailbox contains three messages; first of them has UID 5 and
+      nothing is known about the rest of them
+
+   In absence of the QRESYNC-ARRIVED extension or when talking to
+   servers not offering that, clients MUST be prepared to work around
+   the described race condition.  An example of such a behavior is
+   issuing an explicit UID SEARCH command to rediscover the unclear
+   portion of the sequence -> UID mapping:
+
+                        S: * 3 EXISTS
+                        S: * VANISHED 12:20
+                        C: x UID SEARCH UID 11:*
+                        S: * SEARCH
+                        S: x OK Search completed
+
+   A single search operation is enough to recover the complete UID
+   mapping, but it induces unnecessary round trip before a full mapping
+   can be established again.  In addition, clients would have to ignore
+   any unsolicited FETCH responses not containing UID of the target
+   message:
+
+                       S: * 3 EXISTS
+                       S: * 2 FETCH (FLAGS (foo))
+                       S: * 3 FETCH (FLAGS (bar))
+                       S: * VANISHED 12:20
+                       C: x UID SEARCH UID 11:*
+                       S: * SEARCH
+                       S: x OK Search completed
+
+Kundrat                Expires February 17, 2013                [Page 3]
+
+Internet-Draft       IMAP QRESYNC-ARRIVED Extension          August 2012
+
+
+   Clients have no chance but to ignore any FETCH response which affects
+   messages whose UID is not yet known.
+
+   This race condition can be avoided by switching to UID-based
+   equivalent of EXISTS, the ARRIVED response.  Alternatively, the same
+   goal would be achieved if the QRESYNC specification mandated that
+   VANISHED responses MUST NOT refer to UIDs which were not present in
+   the mailbox at the time immediately before the VANISHED response was
+   generated.
+
+3.  IMAP Protocol Changes
+
+3.1.  QRESYNC-ARRIVED Parameter to SELECT/EXAMINE
+
+   The QRESYNC-ARRIVED parameter to SELECT/EXAMINE commands shares
+   syntax with the QRESYNC parameter defined in [RFC5162]; the only
+   exception is that it is identified by the "QRESYNC-ARRIVED" atom.
+
+   For backward compatibility, IMAP servers supporting this extension
+   MUST support QRESYNC as defined by [RFC5162].  In addition, such
+   servers SHOULD NOT sent VANISHED responses containing UIDs of
+   messages which were expunged before, and SHOULD NOT send the untagged
+   EXPUNGED instead of VANISHED.
+
+3.2.  ARRIVED Response
+
+   Contents:  ordered list of UIDs
+
+   The ARRIVED response reports that the specified UIDs have been
+   delivered to the mailbox.  It is similar in functionality to the
+   EXISTS response [RFC3501]; however, it can return information about
+   multiple messages, and it returns UIDs instead of message numbers.
+   The first benefit saves bandwidth, while the second elliminates the
+   potential of client losing track of assigned UIDs in a mailbox.
+
+   If the client has opened the mailbox with the QRESYNC-ARRIVED
+   parameter to SELECT/EXAMINE command, the EXISTS response MUST be
+   still sent during the initial mailbox synchronization, i.e.  between
+   having received the SELECT or EXAMINE command and the corresponding
+   tagged response, as in [RFC3501].  Servers MAY send the EXISTS
+   response several times, but they SHOULD send it only once to conserve
+   resources.  The number given in the EXISTS response MUST NOT shrink.
+   The clients MUST treat the last occurence as the final data.
+
+   Servers MUST NOT issue ARRIVED prior to issuing a tagged OK for the
+   SELECT/EXAMINE command to prevent uncertanities about the
+   HIGHESTMODSEQ value.  New arrivals since the last time the mailbox
+   has been selected are reported using FETCH responses with embedded
+   UID, as in regular QRESYNC.
+
+
+
+
+
+Kundrat                Expires February 17, 2013                [Page 4]
+
+Internet-Draft       IMAP QRESYNC-ARRIVED Extension          August 2012
+
+
+   After the mailbox has been selected, all further updates about new
+   arrivals MUST use the ARRIVED response.  If servers were allowed to
+   fall back to untagged EXISTS, the possibility of race conditions
+   would return.
+
+   UIDs sent in the ARRIVED response must be always presented in a
+   sorted order, lowest UID first.  The sequence MUST NOT contain
+   duplicate UIDs.  Servers SHOULD take advantage of the compression
+   capabilities of the sequence-set syntax and use the range syntax if
+   possible.
+
+   The ARRIVED response MUST NOT be sent unless the client has passed
+   the QRESYNC-ARRIVED option to the last SELECT or EXAMINE command.
+
+4.  Acknowledgements
+
+   This text builds upon the QRESYNC IMAP extension [RFC5162].
+
+5.  IANA Considerations
+
+   IMAP4 capabilities are registered by publishing a standards track or
+   IESG approved experimental RFC.  The registry is currently located
+   at:
+
+   http://www.iana.org/assignments/imap4-capabilities
+
+   This document defines the QRESYNC-ARRIVED IMAP capability.  IANA will
+   be asked to add this capability to the registry.
+
+6.  Formal Syntax
+
+   The following syntax specification uses the Augmented Backus-Naur
+   Form (ABNF) notation as specified in [RFC5234].
+
+   Non-terminals referenced but not defined below are as defined by
+   [RFC3501], [RFC5162], or [RFC5234].
+
+   capability          =/ "QRESYNC-ARRIVED"
+   
+   select-param        =/ "QRESYNC-ARRIVED" SP "(" uidvalidity SP
+                          mod-sequence-value [SP known-uids]
+                          [SP seq-match-data] ")"
+                          ;; conforms to the generic select-param
+                          ;; syntax defined in [IMAPABNF]
+   
+   message-data        =/ arrived-resp
+   
+   arrived-resp        = "ARRIVED" SP sorted-sequence-set
+   
+   sorted-sequence-set = sequence-set
+                       ;; sequence of UIDs, "*" is not allowed
+                       ;; UIDs must be sorted, lowest first, no duplicates
+   
+
+Kundrat                Expires February 17, 2013                [Page 5]
+
+Internet-Draft       IMAP QRESYNC-ARRIVED Extension          August 2012
+
+
+7.  Security Considerations
+
+   This extensions adds no functionality on top of what is already
+   defined in the QRESYNC extension, and therefore we believe that no
+   additional security implications have to be considered.
+
+8.  References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC3501]  Crispin, M., "INTERNET MESSAGE ACCESS PROTOCOL - VERSION
+              4rev1", RFC 3501, March 2003.
+
+   [RFC5162]  Melnikov, A., Cridland, D. and C. Wilson, "IMAP4
+              Extensions for Quick Mailbox Resynchronization", RFC 5162,
+              March 2008.
+
+   [RFC5234]  Crocker, D. and P. Overell, "Augmented BNF for Syntax
+              Specifications: ABNF", STD 68, RFC 5234, January 2008.
+
+Appendix A.  Changelog
+
+Appendix A.1.  Changes in 00 since private-02
+
+   o  Fixed ABNF syntax for the select-param
+
+   o  Better abstract
+
+   o  Clearer formatting
+
+Appendix A.2.  Changes in private-02 since private-01
+
+   o  ENABLE is still required, otherwise clients have no way of
+      activating VANISHED
+
+Appendix A.3.  Changes in private-01 sice private-00
+
+   o  Clarified that UIDs presented in the ARRIVED response MUST be
+      always presented in a sorted order
+
+   o  Used a special non-terminal in the ABNF grammar
+
+   o  Used correct format for FETCH responses
+
+   o  Clarify that EXISTS must be sent at least once and SHOULD be sent
+      only once
+
+   o  Clarify that ARRIVED MUST NOT occur before the tagged response to
+      SELECT/EXAMINE
+
+   o  Clarify that arrivals since the last time are to be reported
+      through usual UID FETCH, as in old QRESYNC
+
+Kundrat                Expires February 17, 2013                [Page 6]
+
+Internet-Draft       IMAP QRESYNC-ARRIVED Extension          August 2012
+
+
+Author's Address
+
+   Jan Kundrat
+   Eledrova 558
+   Prague 181 00
+   CZ
+   
+   Email: jkt@flaska.net
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kundrat                Expires February 17, 2013                [Page 7]

@@ -1,0 +1,804 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type='text/xsl' href='./rfc2629.xslt' ?>
+
+<?rfc toc="yes"?>
+<?rfc symrefs="no"?>
+<?rfc compact="yes" ?>
+<?rfc sortrefs="yes" ?>
+<?rfc strict="yes" ?>
+<?rfc linkmailto="yes" ?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" >
+    
+<?rfc toc="yes"?>
+<?rfc symrefs="yes"?>
+<?rfc compact="yes" ?>
+<?rfc subcompact="yes" ?>
+<?rfc sortrefs="yes" ?>
+<rfc ipr="trust200902" docName="draft-ietf-ipsecme-failure-detection-00" category="std">
+  <front>
+    <title abbrev="Quick Crash Detection">A Quick Crash Detection Method for IKE</title>
+    <author initials="Y." surname="Nir" fullname="Yoav Nir" role="editor">
+      <organization abbrev="Check Point">Check Point Software Technologies Ltd.</organization>
+      <address>
+        <postal>
+          <street>5 Hasolelim st.</street>
+          <city>Tel Aviv</city>
+          <code>67897</code>
+          <country>Israel</country>
+        </postal>
+        <email>ynir@checkpoint.com</email>
+      </address>
+    </author>
+    <author initials="D." surname="Wierbowski" fullname="David Wierbowski">
+      <organization abbrev="IBM">International Business Machines</organization>
+      <address>
+        <postal>
+          <street>1701 North Street</street>
+          <city>Endicott</city>
+          <region>New York</region>
+          <code>13760</code>
+          <country>United States</country>
+        </postal>
+        <email>wierbows@us.ibm.com</email>
+      </address>
+    </author>
+    <!-- Do Pratima and Frederic want to be co-authors?
+    <author initials="F." surname="Detienne" fullname="Frederic Detienne">
+      <organization abbrev="Cisco">Cisco Systems, Inc.</organization>
+      <address>
+        <postal>
+          <street>De Kleetlaan, 7</street>
+          <city>Diegem</city>
+          <code>B-1831</code>
+          <country>Belgium</country>
+        </postal>
+        <phone>+32 2 704 5681</phone>
+        <email>fd@cisco.com</email>
+      </address>
+    </author>
+    <author initials="P." surname="Sethi" fullname="Pratima Sethi">
+      <organization abbrev="Cisco">Cisco Systems, Inc.</organization>
+      <address>
+        <postal>
+          <street>O'Shaugnessy Road, 11</street>
+          <city>Bangalore</city>
+          <region>Karnataka</region>
+          <code>560027</code>
+          <country>India</country>
+        </postal>
+        <phone>+91 80 4154 1654</phone>
+        <email>psethi@cisco.com</email>
+      </address>
+    </author>
+    -->
+    <date year="2010"/>
+    <area>Security Area</area>
+    <workgroup>IPsecME Working Group</workgroup>
+    <keyword>Internet-Draft</keyword>
+    <abstract>
+      <t> This document describes an extension to the IKEv2 protocol that allows for faster 
+        detection of SA desynchronization using a saved token.</t>
+      <t> When an IPsec tunnel between two IKEv2 peers is disconnected due to a restart of one peer,
+        it can take as much as several minutes for the other peer to discover that the reboot has 
+        occurred, thus delaying recovery. In this text we propose an extension to the protocol, 
+        that allows for recovery immediately following the restart.</t>
+    </abstract>
+  </front>
+  <middle>
+    <!-- ====================================================================== -->
+    <section anchor="introduction" title="Introduction">
+      <t> IKEv2, as described in <xref target="IKEv2bis"/> and its predecessor RFC 4306, has a 
+        method for recovering from a reboot of one peer. As long as traffic flows in both 
+        directions, the rebooted peer should re-establish the tunnels immediately. However, in many 
+        cases the rebooted peer is a VPN gateway that protects only servers, or else the 
+        non-rebooted peer has a dynamic IP address. In such cases, the rebooted peer will not be 
+        able to re-establish the tunnels. <xref target="SCR"/> describes how recovery works under 
+        RFC 4306, and explains why it may take several minutes.</t> 
+      <t> The method proposed here, is to send an octet string, called a "QCD token" in the 
+        IKE_AUTH exchange that establishes the tunnel. That token can be stored on the peer as part 
+        of the IKE SA. After a reboot, the rebooted implementation can re-generate the token, and 
+        send it to the peer, so as to delete the IKE SA. Deleting the IKE SA results is a quick 
+        establishment of new IPsec tunnels. This is described in <xref target="outline"/>.</t>
+      <section anchor="mustshouldmay" title="Conventions Used in This Document">
+        <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT",
+          "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described
+          in <xref target="RFC2119"/>.</t>
+        <t> The term "token" refers to an octet string that an implementation can generate using 
+          only the properties of a protected IKE message (such as IKE SPIs) as input. A conforming 
+          implementation MUST be able to generate the same token from the same input even after 
+          rebooting.</t>
+        <t> The term "token maker" refers to an implementation that generates a token and sends it
+          to the peer as specified in this document.</t>
+        <t> The term "token taker" refers to an implementation that stores such a token or a digest
+          thereof, in order to verify that a new token it receives is identical to the old token it
+          has stored.</t>
+        <t> The term "non-volatile storage" in this document refers to a data storage module, that
+          persists across restarts of the token maker. Examples of such a storage module include an
+          internal disk, an internal flash memory module, an external disk and an external 
+          database. A small non-volatile storage module is required for a token maker, but a larger
+          one can be used to enhance performance, as described in <xref target="operation_esp"/>.</t>
+      </section>
+      </section>
+      <section anchor="SCR" title="RFC 4306 Crash Recovery">
+        <t> When one peer loses state or reboots, the other peer does not get any notification, so 
+          unidirectional IPsec traffic can still flow. The rebooted peer will not be able to 
+          decrypt it, however, and the only remedy is to send an unprotected INVALID_SPI 
+          notification as described in section 3.10.1 of <xref target="IKEv2bis"/>.  That section 
+          also describes the processing of such a notification:</t>
+        <figure><artwork><![CDATA[
+      "If this Informational Message is sent outside the
+  context of an IKE_SA, it should be used by the recipient
+  only as a "hint" that something might be wrong (because it
+  could easily be forged)."
+        ]]></artwork></figure>
+        <t> Since the INVALID_SPI can only be used as a hint, the non-rebooted peer has to determine
+          whether the IPsec SA, and indeed the parent IKE SA are still valid.  The method of doing 
+          this is described in section 2.4 of <xref target="IKEv2bis"/>. This method, called 
+          "liveness check" involves sending a protected empty INFORMATIONAL message, and awaiting a 
+          response. This procedure is sometimes referred to as "Dead Peer Detection" or DPD.</t>
+        <t> Section 2.4 does not mandate how many times the liveness check message should be 
+          retransmitted, or for how long, but does recommend the following:</t>
+        <figure><artwork><![CDATA[
+                                                            "It is
+ suggested that messages be retransmitted at least a dozen times over
+ a period of at least several minutes before giving up on an SA..."
+        ]]></artwork></figure>
+        <t> Those "at least several minutes" are a time during which both peers are active, but 
+          IPsec cannot be used.</t>
+      </section>
+      <section anchor="outline" title="Protocol Outline">
+        <t> Supporting implementations will send a notification, called a "QCD token", as described
+          in <xref target="format_notif"/> in the last IKE_AUTH exchange messages. These are the 
+          final IKE_AUTH request and final IKE_AUTH response that contain the AUTH payloads.  The 
+          generation of these tokens is a local matter for implementations, but considerations are 
+          described in <xref target="tokengen"/>. Implementations that send such a token will be
+          called "token makers".</t>
+        <t> A supporting implementation receiving such a token MUST store it (or a digest thereof)
+          along with the IKE SA. Implementations that support this part of the protocol will be 
+          called "token takers". <xref target="operation_who"/> has considerations for which 
+          implementations need to be token takers, and which should be token makers. Implementation 
+          that are not token takers will silently ignore QCD tokens.</t>
+        <t> When a token maker receives a protected IKE request message with unknown IKE SPIs, it 
+          SHOULD generate a new token that is identical to the previous token, and send it to the 
+          requesting peer in an unprotected IKE message as described in <xref target="format_info"/>.</t>
+        <t> When a token taker receives the QCD token in an unprotected notification, it MUST verify 
+          that the TOKEN_SECRET_DATA matches the token stored with the matching IKE SA. If the 
+          verification fails, or if the IKE SPIs in the message do not match any existing IKE SA,
+          it SHOULD log the event. If it succeeds, it MUST silently delete the IKE SA associated 
+          with the IKE_SPI fields, and all dependant child SAs. This event MAY also be logged. The 
+          token taker MUST accept such tokens from any IP address and port combination, so as to 
+          allow different kinds of high-availability configurations of the token maker.</t>
+        <t> A supporting token taker MAY immediately create new SAs using an Initial exchange, 
+          or it may wait for subsequent traffic to trigger the creation of new SAs.</t>
+        <t> See <xref target="int_resume"/> for a short discussion about this extensions&apos;s 
+          interaction with IKEv2 Session Resumption (<xref target="RFC5723"/>).</t>
+      </section>
+      <section anchor="format" title="Formats and Exchanges">
+        <section anchor="format_notif" title="Notification Format">
+          <t> The notification payload called "QCD token" is formatted as follows:</t>
+          <figure><artwork><![CDATA[
+                         1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    ! Next Payload  !C!  RESERVED   !         Payload Length        !
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    !  Protocol ID  !   SPI Size    ! QCD Token Notify Message Type !
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    !                                                               !
+    ~                       TOKEN_SECRET_DATA                       ~
+    !                                                               !
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+          ]]></artwork></figure>
+          <t><list style="symbols">
+            <t>Protocol ID (1 octet) MUST be 1, as this message is related to an IKE SA.</t>
+            <t>SPI Size (1 octet) MUST be zero, in conformance with section 3.10 of 
+              <xref target="IKEv2bis"/>.</t>
+            <t>QCD Token Notify Message Type (2 octets) - MUST be xxxxx, the value assigned for QCD
+              token notifications. TBA by IANA.</t>
+            <t>TOKEN_SECRET_DATA (16-128 octets) contains a generated token as described in 
+              <xref target="tokengen"/>.</t>
+          </list></t>
+        </section>
+        <section anchor="format_auth" title="Passing a Token in the AUTH Exchange">
+          <t> For brevity, only the EAP version of an AUTH exchange will be presented here. The 
+            non-EAP version is very similar. The figures below are based on appendix C.3 of
+            <xref target="IKEv2bis"/>.</t>
+          <figure><artwork><![CDATA[
+ first request       --> IDi,
+                         [N(INITIAL_CONTACT)],
+                         [[N(HTTP_CERT_LOOKUP_SUPPORTED)], CERTREQ+],
+                         [IDr],
+                         [CP(CFG_REQUEST)],
+                         [N(IPCOMP_SUPPORTED)+],
+                         [N(USE_TRANSPORT_MODE)],
+                         [N(ESP_TFC_PADDING_NOT_SUPPORTED)],
+                         [N(NON_FIRST_FRAGMENTS_ALSO)],
+                         SA, TSi, TSr,
+                         [V+]
+
+ first response      <-- IDr, [CERT+], AUTH,
+                         EAP,
+                         [V+]
+
+                   / --> EAP
+ repeat 1..N times |
+                   \ <-- EAP
+
+ last request        --> AUTH
+                         [N(QCD_TOKEN)]
+
+ last response       <-- AUTH,
+                         [N(QCD_TOKEN)]
+                         [CP(CFG_REPLY)],
+                         [N(IPCOMP_SUPPORTED)],
+                         [N(USE_TRANSPORT_MODE)],
+                         [N(ESP_TFC_PADDING_NOT_SUPPORTED)],
+                         [N(NON_FIRST_FRAGMENTS_ALSO)],
+                         SA, TSi, TSr,
+                         [N(ADDITIONAL_TS_POSSIBLE)],
+                         [V+]
+          ]]></artwork></figure>
+          <t> Note that the QCD_TOKEN notification is marked as optional because it is not required
+            by this specification that every implementation be both token maker and token taker. 
+            If only one peer sends the QCD token, then a reboot of the other peer will not be 
+            recoverable by this method. This may be acceptable if traffic typically originates from 
+            the other peer.</t>
+          <t> In any case, the lack of a QCD_TOKEN notification MUST NOT be taken as an indication
+            that the peer does not support this standard. Conversely, if a peer does not understand 
+            this notification, it will simply ignore it. Therefore a peer MAY send this notification 
+            freely, even if it does not know whether the other side supports it.</t>
+          <t> The QCD_TOKEN notification is related to the IKE SA and MUST follow the AUTH payload
+            and precede the Configuration payload and all payloads related to the child SA.</t>
+        </section>
+        <section anchor="format_rekey" title="Replacing Tokens After Rekey or Resumption">
+          <t> After rekeying an IKE SA, the IKE SPIs are replaced, so the new SA also needs to have
+            a token.  If only the responder in the rekey exchange is the token maker, this can be
+            done within the CREATE_CHILD_SA exchange. If the initiator is a token maker, then we 
+            need an extra informational exchange.</t>
+          <t> The following figure shows the CREATE_CHILD_SA exchange for rekeying the IKE SA. Only
+            the responder sends a QCD token.</t>
+          <figure><artwork><![CDATA[
+   request             --> SA, Ni, [KEi]
+
+   response            <-- SA, Nr, [KEr], N(QCD_TOKEN)            
+          ]]></artwork></figure>
+          <t> If the initiator is also a token maker, it SHOULD soon initiate an INFORMATIONAL
+            exchange as follows:</t>
+          <figure><artwork><![CDATA[
+   request             --> N(QCD_TOKEN)
+
+   response            <--             
+          ]]></artwork></figure>
+          <t> For session resumption, as specified in <xref target="RFC5723"/>, the situation is 
+            similar. The responder, which is necessarily the peer that has crashed, SHOULD send a 
+            new ticket within the protected payload of the IKE_SESSION_RESUME exchange. If the 
+            Initiator is also a token maker, it needs to send a QCD_TOKEN in a separate 
+            INFORMATIONAL exchange.</t>
+          <t> The INFORMATIONAL exchange described in this section can also be used if QCD tokens
+            need to be replaced due to a key rollover. However, since token takers are required to
+            verify at least 4 QCD tokens, this is only necessary if secret QCD keys are rolled over
+            more than four times as often as IKE SAs are rekeyed.</t>
+        </section>
+        <section anchor="format_mob" title="Replacing the Token for an Existing SA">
+          <t> With some token generation methods, such as that described in <xref target="tg2"/>,
+            a QCD token may sometimes become invalid, although the IKE SA is still perfectly valid.</t>
+          <t> In such a case, the token maker MUST send the new token in a protected message under
+            that IKE SA. That exchange could be a simple INFORMATIONAL, such as in the last figure 
+            in the previous section, or else it can be part of a MOBIKE INFORMATIONAL exchange such
+            as in the following figure taken from section 2.2 of <xref target="RFC4555"/> and
+            modified by adding a QCD_TOKEN notification:</t>
+          <figure><artwork><![CDATA[
+  (IP_I2:4500 -> IP_R1:4500)
+  HDR, SK { N(UPDATE_SA_ADDRESSES),
+            N(NAT_DETECTION_SOURCE_IP),
+            N(NAT_DETECTION_DESTINATION_IP) }  -->
+
+                        <-- (IP_R1:4500 -> IP_I2:4500)
+                            HDR, SK { N(NAT_DETECTION_SOURCE_IP),
+                                 N(NAT_DETECTION_DESTINATION_IP) }
+
+                        <-- (IP_R1:4500 -> IP_I2:4500)
+                            HDR, SK { N(COOKIE2), [N(QCD_TOKEN)] }
+
+  (IP_I2:4500 -> IP_R1:4500)
+  HDR, SK { N(COOKIE2), [N(QCD_TOKEN)] }  -->
+          ]]></artwork></figure>
+          <t> A token taker MUST accept such gratuitous QCD_TOKEN notifications as long as they are
+            carried in protected exchanges. A token maker SHOULD NOT generate them unless it is
+            no longer able to generate the old QCD_TOKEN.</t>
+        </section>
+        <section anchor="format_info" title="Presenting the Token in an INFORMATIONAL Exchange">
+          <t> This QCD_TOKEN notification is unprotected, and is sent as a response to a protected
+            IKE request, which uses an IKE SA that is unknown.</t>
+          <figure><artwork><![CDATA[
+         request             --> N(INVALID_IKE_SPI), N(QCD_TOKEN)+
+          ]]></artwork></figure>
+          <t> If child SPIs are persistently mapped to IKE SPIs as described in 
+            <xref target="operation_esp"/>, a token taker may get the following unprotected message 
+            in response to an ESP or AH packet.</t>
+          <figure><artwork><![CDATA[
+         request             --> N(INVALID_SPI), N(QCD_TOKEN)+
+          ]]></artwork></figure>
+          <t> The QCD_TOKEN and INVALID_IKE_SPI notifications are sent together to support both 
+            implementations that conform to this specification and implementations that don&apos;t. 
+            Similar to the description in section 2.21 of <xref target="IKEv2bis"/>, The IKE SPI and 
+            message ID fields in the packet headers are taken from the protected IKE request.</t>
+          <t> To support a periodic rollover of the secret used for token generation, the token 
+            taker MUST support at least four QCD_TOKEN notifications in a single packet. The token
+            is considered verified if any of the QCD_TOKEN notifications matches. The token maker 
+            MAY generate up to four QCD_TOKEN notifications, based on several generations of keys.</t>
+          <t> If the QCD_TOKEN verifies OK, an empty response MUST be sent. If the QCD_TOKEN 
+            cannot be validated, a response MUST NOT be sent. <xref target="tokengen"/>
+            defines token verification.</t>
+        </section>
+      </section>
+      <section anchor="tokengen" title="Token Generation and Verification">
+        <t> No token generation method is mandated by this document. Two method are documented in
+          the following sub-sections, but they only serve as examples.</t>
+        <t> The following lists the requirements from a token generation mechanism:<list style="symbols">
+          <t> Tokens MUST be at least 16 octets long, and no more than 128 octets long, to 
+            facilitate storage and transmission. Tokens SHOULD be indistinguishable from random data.</t>
+          <t> It should not be possible for an external attacker to guess the QCD token generated
+            by an implementation. Cryptographic mechanisms such as PRNG and hash functions are
+            RECOMMENDED.</t>
+          <t> The token maker, MUST be able to re-generate or retrieve the token based on the 
+            IKE SPIs even after it reboots.</t>
+          <t> The method of token generation MUST be such, that a collision of QCD tokens between 
+            different pairs of IKE SPI will be highly unlikely.</t>
+        </list></t>
+        <section anchor="tg1" title="A Stateless Method of Token Generation">
+          <t> This describes a stateless method of generating a token:<list style="symbols">
+            <t> At installation or immediately after the first boot of the token maker, 32 random 
+              octets are generated using a secure random number generator or a PRNG.</t>
+            <t> Those 32 bytes, called the "QCD_SECRET", are stored in non-volatile storage on 
+              the machine, and kept indefinitely.</t>
+            <t> If key rollover is required by policy, the implementation MAY periodically generate
+              a new QCD_SECRET and keep up to 3 previous generations. When sending an unprotected 
+              QCD_TOKEN, as many as 4 notification payloads may be sent, each from a different
+              QCD_SECRET.</t>
+            <t> The TOKEN_SECRET_DATA is calculated as follows:</t></list></t>
+          <figure><artwork><![CDATA[
+            
+         TOKEN_SECRET_DATA = HASH(QCD_SECRET | SPI-I | SPI-R)
+
+          ]]></artwork></figure>
+        </section>
+        <section anchor="tg2" title="A Stateless Method with IP addresses">
+          <t> This method is similar to the one in the previous section, except that the IP 
+            address of the token taker is also added to the block being hashed. This has the 
+            disadvantage that the token needs to be replaced (as described in 
+            <xref target="format_mob"/>) whenever the token taker changes its address.</t>
+          <t> The reason to use this method is described in <xref target="operation_with_ip"/>.
+            When using this method, the TOKEN_SECRET_DATA field is calculated as follows:</t>
+          <figure><artwork><![CDATA[
+            
+      TOKEN_SECRET_DATA = HASH(QCD_SECRET | SPI-I | SPI-R | IPaddr-T)
+
+          ]]></artwork></figure>
+          <t> The IPaddr-T field specifies the IP address of the token taker. Secret rollover 
+            considerations are similar to those in the previous section.</t>
+        </section>
+        <section anchor="toklifetime" title="Token Lifetime">
+          <t> The token is associated with a single IKE SA, and SHOULD be deleted by the token taker
+            when the SA is deleted or expires. More formally, the token is associated with the pair 
+            (SPI-I, SPI-R).</t>
+        </section>
+      </section>
+      <section anchor="backupgw" title="Backup Gateways">
+        <t> Making crash detection and recovery quick is a worthy goal, but since rebooting a 
+          gateway takes a non-zero amount of time, many implementations choose to have a stand-by 
+          gateway ready to take over as soon as the primary gateway fails for any reason. 
+          <xref target="cluster"/> describes consideration for such clusters of gateways with 
+          synchronized state, but the rest of this section is relevant even when there is no 
+          synchnorized state.</t>
+        <t> If such a configuration is available, it is RECOMMENDED that the stand-by gateway be
+          able to generate the same token as the active gateway. if the method described in 
+          <xref target="tg1"/> is used, this means that the QCD_SECRET field is identical in both 
+          gateways. This has the effect of having the crash recovery available immediately.</t>
+        <t> Note that this refers to "high availability" configurations, where only one gateway is
+          active at any given moment. This is different from "load sharing" configurations where
+          more than one gateway is active at the same time. For load sharing configurations, please 
+          see <xref target="sec_trans"/> for security considerations.</t>
+      </section>
+      <section anchor="whynot" title="Alternative Solutions">
+        <section anchor="newikesa" title="Initiating a new IKE SA">
+        <t> Instead of sending a QCD token, we could have the rebooted implementation start an 
+          Initial exchange with the peer, including the INITIAL_CONTACT notification. This would
+          have the same effect, instructing the peer to erase the old IKE SA, as well as establishing
+          a new IKE SA with fewer rounds.</t>
+        <t> The disadvantage here, is that in IKEv2 an authentication exchange MUST have
+          a piggy-backed Child SA set up. Since our use case is such that the rebooted implementation
+          does not have traffic flowing to the peer, there are no good selectors for such a Child
+          SA.</t>
+        <t> Additionally, when authentication is asymmetric, such as when EAP is used, it is not 
+          possible for the rebooted implementation to initiate IKE.</t>
+        </section>
+        <section anchor="sir" title="SIR">
+          <t> Another proposal that was considered for this work item is the SIR extension,
+            which is described in <xref target="recovery"/>. Under that proposal, the non-rebooted 
+            peer sends a non-protected query to the possibly rebooted peer, asking whether the IKE
+            SA exists. The peer replies with either a positive or negative response, and the
+            absence of a positive response, along with the existence of a negative response is 
+            taken as proof that the IKE SA has really been lost.</t>
+          <t> The working group preferred the QCD proposal to this one.</t>
+        </section>
+        <section anchor="bcerts" title="Birth Certificates">
+          <t> Birth Certificates is a method of crash detection that has never been formally
+            defined. Bill Sommerfeld suggested this idea in a mail to the IPsec mailing list on 
+            August 7, 2000, in a thread discussing methods of crash detection:</t>
+          <figure><artwork><![CDATA[
+    If we have the system sign a "birth certificate" when it 
+    reboots (including a reboot time or boot sequence number), 
+    we could include that with a "bad spi" ICMP error and in 
+    the negotiation of the IKE SA.
+          ]]></artwork></figure>
+          <t> We believe that this method would have some problems. First, it requires Alice to
+            store the certificate, so as to be able to compare the public keys. That requires more
+            storage than does a QCD token. Additionally, the public-key operations needed to verify 
+            the self-signed certificates are more expensive for Alice.</t>
+          <t> We believe that a symmetric-key operation such as proposed here is more light-weight
+            and simple than that implied by the Birth Certificate idea.</t>
+        </section>
+        <section anchor="shortwait" title="Reducing Liveness Check Length">
+          <t> Some have suggested that the RFC 4306 procedure described in <xref target="SCR"/> can
+            be tweaked by requiring fewer retransmissions over a shorter period of time for cases
+            of liveness check started because of an INVALID_SPI or INVALID_IKE_SPI notification.</t>
+          <t> We believe that the default retransmission policy should represent a good balance 
+            between the need for a timely discovery of a dead peer, and a low probability of false 
+            detection. We expect the policy to be set to take the shortest time such that this 
+            probability achieves a certain target. Therefore, reducing elapsed time and 
+            retransmission count will create an unacceptably high probability of false detection,
+            and this can be triggered by a single INVALID_IKE_SPI notification.</t>
+          <t> Additionally, even if the retransmission policy is reduced to, say, one minute, it
+            is still a very noticeable delay from a human perspective, from the time that the 
+            gateway has come up until the tunnels are active, or from the time the backup 
+            gateway has taken over until the tunnels are active.</t>
+        </section>
+      </section>
+      <section anchor="int_resume" title="Interaction with Session Resumption">
+        <t> Session Resumption, specified in <xref target="RFC5723"/> proposes to make setting 
+          up a new IKE SA consume less computing resources. This is particularly useful in the case 
+          of a remote access gateway that has many tunnels. A failure of such a gateway would 
+          require all these many remote access clients to establish an IKE SA either with the 
+          rebooted gateway or with a backup gateway. This tunnel re-establishment should occur 
+          within a short period of time, creating a burden on the remote access gateway. Session
+          Resumption addresses this problem by having the clients store an encrypted derivative of 
+          the IKE SA for quick re-establishment.</t>
+        <t> What Session Resumption does not help, is the problem of detecting that the peer 
+          gateway has failed. A failed gateway may go undetected for as long as the lifetime of a 
+          child SA, because IPsec does not have packet acknowledgement, and applications cannot
+          signal the IPsec layer that the tunnel "does not work". Before establishing a new 
+          IKE SA using Session Resumption, a client should ascertain that the gateway has indeed 
+          failed. This could be done using either a liveness check (as in RFC 4306) or using the 
+          QCD tokens described in this document.</t>
+        <t> A remote access client conforming to both specifications will store QCD tokens, as well
+          as the Session Resumption ticket, if provided by the gateway. A remote access gateway 
+          conforming to both specifications will generate a QCD token for the client. When the 
+          gateway reboots, the client will discover this in either of two ways:<list style="numbers">
+          <t> The client does regular liveness checks, or else the time for some other IKE exchange
+            has come. Since the gateway is still down, the IKE exchange times out after several 
+            minutes. In this case QCD does not help.</t>
+          <t> Either the primary gateway or a backup gateway (see <xref target="backupgw"/>) 
+            is ready and sends a QCD token to the client. In that case the client will quickly
+            re-establish the IPsec tunnel, either with the rebooted primary gateway or the backup
+            gateway as described in this document.
+            </t></list></t>
+          <t> The full combined protocol looks like this:</t>
+          <figure><artwork><![CDATA[
+     Initiator                Responder
+     -----------              -----------
+    HDR, SAi1, KEi, Ni  -->
+
+                        <--    HDR, SAr1, KEr, Nr, [CERTREQ]
+
+    HDR, SK {IDi, [CERT,] 
+    [CERTREQ,] [IDr,]
+    AUTH, N(QCD_TOKEN)
+    SAi2, TSi, TSr, 
+    N(TICKET_REQUEST)}  -->
+                        <--    HDR, SK {IDr, [CERT,] AUTH, 
+                               N(QCD_TOKEN), SAr2, TSi, TSr, 
+                               N(TICKET_LT_OPAQUE) } 
+
+             ---- Reboot -----
+
+    HDR, {}             -->
+                        <--  HDR, N(QCD_TOKEN)
+                        
+    HDR, [N(COOKIE),]
+    Ni, N(TICKET_OPAQUE)
+    [,N+]               -->
+                        <--  HDR, Nr [,N+]
+                            
+          ]]></artwork></figure>
+      </section>
+    <section anchor="operation" title="Operational Considerations">
+      <section anchor="operation_who" title="Who should implement this specification">
+        <t> Throughout this document, we have referred to reboot time alternatingly as the time that 
+          the implementation crashes and the time when it is ready to process IPsec packets and IKE 
+          exchanges. Depending on the hardware and software platforms and the cause of the reboot, 
+          rebooting may take anywhere from a few seconds to several minutes. If the implementation
+          is down for a long time, the benefit of this protocol extension is reduced. For this reason
+          critical systems should implement backup gateways as described in 
+          <xref target="backupgw"/>.</t>
+        <t> Implementing the "token maker" side of QCD makes sense for IKE implementation where protected
+          connections originate from the peer, such as inter-domain VPNs and remote access gateways.
+          Implementing the "token taker" side of QCD makes sense for IKE implementations where protected
+          connections originate, such as inter-domain VPNs and remote access clients.</t>
+        <t> To clarify the requirements: <list style="symbols"> 
+          <t> A remote-access client MUST be a token taker and MAY be a token maker.</t>
+          <t> A remote-access gateway MAY be a token taker and MUST be a token maker.</t>
+          <t> An inter-domain VPN gateway MUST be both token maker and token taker.</t></list></t>
+        <t> In order to limit the effects of DoS attacks, a token taker SHOULD limit the rate
+          of QCD_TOKENs verified from a particular source. </t>
+        <t> If excessive amounts of IKE requests protected with unknown IKE SPIs arrive at a token
+          maker, the IKE module SHOULD revert to the behavior described in section 2.21 of 
+          <xref target="IKEv2bis"/> and either send an INVALID_IKE_SPI notification, or ignore it 
+          entirely.</t>
+      </section>
+      <section anchor="operation_esp" title="Response to unknown child SPI">
+        <t> After a reboot, it is more likely that an implementation receives IPsec packets than 
+          IKE packets. In that case, the rebooted implementation will send an INVALID_SPI
+          notification, triggering a liveness check.  The token will only be sent in a response to
+          the liveness check, thus requiring an extra round-trip.</t>
+        <t> To avoid this, an implementation that has access to enough non-volatile storage MAY 
+          store a mapping of child SPIs to owning IKE SPIs, or to generated tokens. If such a 
+          mapping is available and persistent across reboots, the rebooted implementation SHOULD 
+          respond to the IPsec packet with an INVALID_SPI notification, along with the appropriate 
+          QCD_Token notifications. A token taker SHOULD verify the QCD token that arrives with an 
+          INVALID_SPI notification the same as if it arrived with the IKE SPIs of the parent IKE 
+          SA.</t>
+        <t> However, a persistent storage module might not be updated in a timely manner, and 
+          could be populated with tokens relating to IKE SPIs that have already been rekeyed. A 
+          token taker MUST NOT take an invalid QCD Token sent along with an INVALID_SPI 
+          notification as evidence that the peer is either malfunctioning or attacking, but it 
+          SHOULD limit the rate at which such notifications are processed.</t>
+      </section>
+      <section anchor="operation_with_ip" title="Using Tokens that Depend on IP Addresses">
+        <t> This section describes the rationale for token generation methods such as the one 
+          described in <xref target="tg2"/>. Note that this section merely provides a possible
+          rationale, and does not specify or recommend any kind of configuration.</t>
+        <t> Some configurations of security gateway use a load-sharing cluster of hosts, all 
+          sharing the same IP addresses, where the SAs (IKE and child) are not synchronized between 
+          the cluster members. In such a configuration, a single member does not know about all the 
+          IKE SAs that are active for the configuration. A load balancer (usually a networking 
+          switch) sends IKE and IPsec packets to the several members based on source IP address.</t>
+        <t> In such a configuration, an attacker can send a forged protected IKE packet with the
+          IKE SPIs of an existing IKE SA, but from a different IP address. This packet will likely
+          be processed by a different cluster member from the one that owns the IKE SA. Since no 
+          IKE SA state is stored on this member, it will send a QCD token to the attacker. If the
+          QCD token does not depend on IP address, this token can immediately be used to tell the
+          token taker to tear down the IKE SA using an unprotected QCD_TOKEN notification.</t>
+        <t> To thwart this possible attack, such configurations should use a method that considers
+          the taker&apos;s IP address, such as the method described in <xref target="tg2"/>.</t>
+      </section>
+    </section>
+      <section anchor="security" title="Security Considerations">
+      <section anchor="sec_handling" title="QCD Token Generation and Handling">
+        <t> Tokens MUST be hard to guess. This is critical, because if an attacker can guess the 
+          token associated with an IKE SA, she can tear down the IKE SA and associated tunnels at
+          will. When the token is delivered in the IKE_AUTH exchange, it is encrypted. When it is
+          sent again in an unprotected notification, it is not, but that is the last time this
+          token is ever used.</t>
+        <t> An aggregation of some tokens generated by one maker together with the related IKE SPIs
+          MUST NOT give an attacker the ability to guess other tokens. Specifically, if one taker 
+          does not properly secure the QCD tokens and an attacker gains access to them, this
+          attacker MUST NOT be able to guess other tokens generated by the same maker. This is the
+          reason that the QCD_SECRET in <xref target="tg1"/> needs to be sufficiently long.</t>
+        <t> The token taker MUST store the token in a secure manner. No attacker should be able to
+          gain access to a stored token.</t>
+        <t> The QCD_SECRET MUST be protected from access by other parties. Anyone gaining
+          access to this value will be able to delete all the IKE SAs for this token maker.</t>
+        <t> The QCD token is sent by the rebooted peer in an unprotected message. A message like 
+          that is subject to modification, deletion and replay by an attacker. However, these 
+          attacks will not compromise the security of either side. Modification is meaningless
+          because a modified token is simply an invalid token. Deletion will only cause the 
+          protocol not to work, resulting in a delay in tunnel re-establishment as described in
+          <xref target="SCR"/>. Replay is also meaningless, because the IKE SA has been deleted
+          after the first transmission.</t>
+      </section>
+      <section anchor="sec_trans" title="QCD Token Transmission">
+        <t> A token maker MUST NOT send a QCD token in an unprotected message for an existing IKE
+          SA. This implies that a conforming QCD token maker MUST be able to tell whether a 
+          particular pair of IKE SPIs represent a valid IKE SA.</t>
+        <t> This requirement is obvious and easy in the case of a single gateway. However, some 
+          implementations use a load balancer to divide the load between several physical gateways.
+          It MUST NOT be possible even in such a configuration to trick one gateway into sending 
+          a QCD token for an IKE SA which is valid on another gateway.</t>
+        <t> This document does not specify how a load sharing sharing configuration of IPsec 
+          gateways would work, but in order to support this specification, all members MUST be able
+          to tell whether a particular IKE SA is active anywhere in the cluster. One way to do it
+          is to synchronize a list of active IKE SPIs among all the cluster members.</t>
+      </section>
+      <section anchor="sec_enum" title="QCD Token Enumeration">
+        <t> An attacker may try to attack QCD if the generation algorithm described in 
+          <xref target="tg1"/> is used. The attacker will send several fake IKE requests to the
+          gateway under attack, receiving and recording the QCD Tokens in the responses. This will
+          allow the attacker to create a dictionary of IKE SPIs to QCD Tokens, which can later be
+          used to tear down any IKE SA.</t>
+        <t> Three factors mitigate this threat:<list style="symbols">
+          <t> The space of all possible IKE SPI pairs is huge: 2^128, so making such a dictionary
+            is impractical. Even if we assume that one implementation always generates predictable 
+            IKE SPIs, the space is still at least 2^64 entries, so making the dictionary is 
+            extremely hard.</t>
+          <t> Throttling the amount of QCD_TOKEN notifications sent out, as discussed in 
+            <xref target="operation_who"/>, especially when not soon after a crash will limit the 
+            attacker&apos;s ability to construct a dictionary.</t>
+          <t> The methods in <xref target="tg1"/> and <xref target="tg2"/> allow for a periodic 
+            change of the QCD_SECRET. Any such change invalidates the entire dictionary.</t></list></t>
+      </section>
+      </section>
+      <section anchor="iana" title="IANA Considerations">
+        <t> IANA is requested to assign a notify message type from the status types range
+          (16406-40959) of the "IKEv2 Notify Message Types" registry with name 
+          "QUICK_CRASH_DETECTION".</t>
+      </section>      
+      <section anchor="ack" title="Acknowledgements">
+        <t> We would like to thank Hannes Tschofenig and Yaron Sheffer for their comments about
+          Session Resumption.</t>
+        <t> Frederic D&apos;etienne and Pratima Sethi contributed the ideas in 
+          <xref target="operation_with_ip"/> and <xref target="tg2"/>.</t>
+        <t> Others who have contrinuted valuable comments are, in alphabetical order, Lakshminath 
+          Dondeti, Scott C Moonen and Dave Wierbowski.</t>
+      </section>
+      <section anchor="history" title="Change Log">
+        <t> This section lists all changes in this document</t>
+        <t> NOTE TO RFC EDITOR : Please remove this section in the final RFC</t>
+        <section anchor="history06" title="Changes from draft-nir-ike-qcd-07">
+          <t><list style="symbols">
+            <t> First WG version.</t>
+            <t> Addressed Scott C Moonen&apos;s concern about collisions of QCD tokens.</t>
+            <t> Updated references to point to IKEv2bis instead of RFC 4306 and 4718. Also 
+              converted draft reference for resumption to RFC 5723.</t>
+            <t> Added Dave Wiebrowski as author, and removed Pratima and Frederic.</t>
+          </list></t>
+        </section>
+        <section anchor="history05" title="Changes from draft-nir-ike-qcd-03 and -04">
+          <t>Mostly editorial changes and cleaning up.</t>
+        </section>
+        <section anchor="history04" title="Changes from draft-nir-ike-qcd-02">
+          <t><list style="symbols">
+            <t> Described QCD token enumeration, following a question by Lakshminath Dondeti.</t>
+            <t> Added the ability to replace the QCD token for an existing IKE SA.</t>
+            <t> Added tokens dependant on peer IP address and their interaction with MOBIKE.</t>
+          </list></t>
+        </section>
+        <section anchor="history03" title="Changes from draft-nir-ike-qcd-01">
+          <t><list style="symbols">
+            <t> Removed stateless method.</t>
+            <t> Added discussion of rekeying and resumption.</t>
+            <t> Added discussion of non-synchronized load-balanced clusters of gateways in the 
+              security considerations.</t>
+            <t> Other wording fixes.</t>
+          </list></t>
+        </section>
+        <section anchor="history02" title="Changes from draft-nir-ike-qcd-00">
+          <t><list style="symbols">
+            <t> Merged proposal with draft-detienne-ikev2-recovery</t>
+            <t> Changed the protocol so that the rebooted peer generates the token. This has the
+              effect, that the need for persistent storage is eliminated.</t>
+            <t> Added discussion of birth certificates.</t> 
+          </list></t>
+        </section>
+        <section anchor="history01" title="Changes from draft-nir-qcr-00">
+          <t><list style="symbols">
+            <t> Changed name to reflect that this relates to IKE. Also changed from quick crash 
+              recovery to quick crash detection to avoid confusion with IFARE.</t>
+            <t> Added more operational considerations. </t>
+            <t> Added interaction with IFARE.</t>
+            <t> Added discussion of backup gateways.</t>
+          </list></t>
+        </section>
+      </section>
+  </middle>
+  <!-- ====================================================================== -->
+  <back>
+    <references title="Normative References"> 
+      <reference anchor='RFC2119'>
+        <front>
+          <title abbrev='RFC Key Words'>Key words for use in RFCs to Indicate Requirement Levels</title>
+          <author initials='S.' surname='Bradner' fullname='Scott Bradner'>
+            <organization>Harvard University</organization>
+            <address>
+              <postal>
+                <street>1350 Mass. Ave.</street>
+                <street>Cambridge</street>
+                <street>MA 02138</street>
+              </postal>
+              <phone>- +1 617 495 3864</phone>
+              <email>sob@harvard.edu</email>
+            </address>
+          </author>
+          <date year='1997' month='March' />
+          <area>General</area>
+          <keyword>keyword</keyword>
+        </front>
+        <seriesInfo name='BCP' value='14' />
+        <seriesInfo name='RFC' value='2119' />
+        <format type='TXT' octets='4723' target='ftp://ftp.isi.edu/in-notes/rfc2119.txt' />
+        <format type='HTML' octets='16553' target='http://xml.resource.org/public/rfc/html/rfc2119.html' />
+        <format type='XML' octets='5703' target='http://xml.resource.org/public/rfc/xml/rfc2119.xml' />
+      </reference>
+      <reference anchor='IKEv2bis'>
+        <front>
+          <title>Internet Key Exchange Protocol: IKEv2</title>
+          <author initials='C' surname='Kaufman' fullname='Charlie Kaufman'>
+            <organization>Microsoft</organization>
+          </author>
+          <author initials='P' surname='Hoffman' fullname='Paul Hoffman'>
+            <organization>VPN Consortium</organization>
+          </author>
+          <author initials='Y' surname='Nir' fullname='Yoav Nir'>
+            <organization>Check Point</organization>
+          </author>
+          <author initials='P' surname='Eronen' fullname='Pasi Eronen'>
+            <organization>Nokia</organization>
+          </author>
+          <date month='May' day='17' year='2010' />
+        </front>
+        <seriesInfo name='Internet-Draft' value='draft-ietf-ipsecme-ikev2bis-11' />
+        <format type='TXT' target='http://www.ietf.org/internet-drafts/draft-ietf-ipsecme-ikev2bis-11.txt' />
+        <format type='HTML' target='http://tools.ietf.org/html/draft-ietf-ipsecme-ikev2bis' />
+      </reference>
+      <reference anchor='RFC4555'>
+        <front>
+          <title>IKEv2 Mobility and Multihoming Protocol (MOBIKE)</title>
+          <author initials='P.' surname='Eronen' fullname='P. Eronen'>
+            <organization>Nokia</organization></author>
+          <date year='2006' month='June' />
+        </front>
+        <seriesInfo name='RFC' value='4555' />
+        <format type='TXT' target='http://www.ietf.org/rfc/rfc4555.txt' />
+        <format type='HTML' target='http://xml.resource.org/public/rfc/html/rfc4555.html' />
+        <format type='XML' target='http://xml.resource.org/public/rfc/xml/rfc4555.xml' />
+      </reference>
+    </references>
+    <references title="Informative References"> 
+      <reference anchor='RFC5723'>
+        <front>
+          <title>IKEv2 Session Resumption</title>
+          <author initials='Y.' surname='Sheffer' fullname='Y. Sheffer'>
+            <organization>Check Point</organization></author>
+          <author initials='H.' surname='Tschofenig' fullname='H. Tschofenig'>
+            <organization>Nokia Siemens Networks</organization></author>
+          <date year='2010' month='January' />
+        </front>
+        <seriesInfo name='RFC' value='5723' />
+        <format type='TXT' target='http://www.ietf.org/rfc/rfc5723.txt' />
+        <format type='HTML' target='http://xml.resource.org/public/rfc/html/rfc5723.html' />
+        <format type='XML' target='http://xml.resource.org/public/rfc/xml/rfc5723.xml' />
+       </reference>
+       <reference anchor='recovery'>
+        <front>
+          <title>Safe IKE Recovery</title>
+          <author initials='F.' surname='Detienne' fullname='Frederic Detienne'>
+            <organization>Cisco</organization></author>
+          <author initials='P.' surname='Sethi' fullname='Pratima Sethi'>
+            <organization>Cisco</organization></author>
+          <author initials='Y.' surname='Nir' fullname='Yoav Nir'>
+            <organization>Check Point</organization></author>
+          <date year='2010' month='January' />
+        </front>
+        <seriesInfo name='Internet-Draft' value='draft-detienne-ikev2-recovery' />
+        <format type='TXT'
+          target='http://tools.ietf.org/id/draft-detienne-ikev2-recovery' />
+        <format type='HTML'
+          target='http://tools.ietf.org/html/draft-detienne-ikev2-recovery' />
+       </reference>
+       <reference anchor='cluster'>
+        <front>
+          <title>IPsec Cluster Problem Statement</title>
+          <author initials='Y.' surname='Nir' fullname='Yoav Nir' role="editor">
+            <organization>Check Point</organization></author>
+          <date year='2010' month='July' />
+        </front>
+        <seriesInfo name='Internet-Draft' value='draft-ietf-ipsecme-ipsec-ha' />
+        <format type='TXT'
+          target='http://tools.ietf.org/id/draft-ietf-ipsecme-ipsec-ha' />
+        <format type='HTML'
+          target='http://tools.ietf.org/html/draft-ietf-ipsecme-ipsec-ha' />
+       </reference>
+    </references>
+    <!-- ====================================================================== -->
+  </back>
+</rfc>

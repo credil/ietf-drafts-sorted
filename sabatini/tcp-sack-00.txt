@@ -1,0 +1,600 @@
+
+
+
+
+
+
+Network Working Group                                        A. Sabatini
+Internet-Draft                                Broker Communications Inc.
+Intended Status: Standards Track                                       .
+Expires: September 1, 2012                             February 28, 2012
+
+       Highly Efficient Selective Acknowledgement (SACK) for TCP
+                       draft-sabatini-tcp-sack-00
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79. Internet-Drafts are working
+   documents of the Internet Engineering Task Force (IETF), its areas,
+   and its working groups. Note that other groups may also distribute
+   working documents as Internet-Drafts.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time. It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   The list of current Internet-Drafts can be accessed at
+   http://www.ietf.org/1id-abstracts.html
+
+   The list of Internet-Draft Shadow Directories can be accessed at
+   http://www.ietf.org/shadow.html
+
+   This Internet-Draft will expire on September 1, 2012.
+
+   Comments are solicited and should be addressed to the author at
+   draft-sack@tsabatini.com.
+
+Copyright Notice
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors. All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document. Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document. Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+Abstract
+
+
+
+Sabatini, Anthony       Expires September 1, 2012               [Page 1]
+
+
+
+
+
+Internet Draft        High Efficiency SACK for TCP     February 28, 2012
+
+
+   This memo expands on the Selective Acknowledgement Protocol described
+   in RFC2018 to improve its performance and efficiency while reducing
+   the delay involved in recovering lost segments.  This leads to very
+   reliable and efficient communications regardless of transit delay or
+   high levels of lost segments due to noise or congestion.  It
+   introduces a fundamentally new way of looking at Selective
+   Acknowledgement and uses this concept to improve the performance of
+   the RFC2018 protocol.  This memo proposes an implementation of the
+   improved SACK and discusses its performance and related issues.
+
+Acknowledgements
+
+   Much of the text in this document is taken directly from RFC2018 "TCP
+   Selective Acknowledgement Options" by M. Mathis, J. Mahdavi, S.floyd
+   and A. Romanow and RFC1072 "TCP Extensions for Long-Delay Paths" by
+   B. Braden and V. Jacobson.
+
+1.  Introduction
+
+   This revision to the SACK protocol has its roots in a similar, HDLC
+   based protocol I designed and implemented for secure financial
+   transactions.  That protocol, being designed for use on a worldwide
+   basis, was born out of the need for a protocol that would handle any
+   communications environment no matter how noisy or how much delay
+   (including multiple satellite hops) was in the path.  In later years
+   its properties were found valuable in congestion situations where
+   packets were dropped.
+
+   Multiple packet losses from a window of data can have a catastrophic
+   effect on TCP throughput. TCP [Postel81] uses a cumulative
+   acknowledgment scheme in which received segments that are not at the
+   left edge of the receive window are not acknowledged.  This forces
+   the sender to either wait a roundtrip time to find out about each
+   lost packet, or to unnecessarily retransmit segments which have been
+   correctly received [Fall95].  With the cumulative acknowledgment
+   scheme, multiple dropped segments generally cause TCP to lose its
+   ACK-based clock, reducing overall throughput.
+
+   Selective Acknowledgment (SACK) is a strategy which corrects this
+   behavior in the face of multiple dropped segments.  With selective
+   acknowledgments, the data receiver can inform the sender about all
+   segments that have arrived successfully, so the sender need
+   retransmit only the segments that have actually been lost.
+
+   I propose modifications to the SACK options as proposed in RFC2018.
+   Specifically, I add a transmit state to each transmitted message and
+   return that transmit state when each acknowledgement is sent.  By
+   using the returned transmit state I can tell what messages have been
+
+
+
+Sabatini, Anthony       Expires September 1, 2012               [Page 2]
+
+
+
+
+
+Internet Draft        High Efficiency SACK for TCP     February 28, 2012
+
+
+   transmitted after the information in the acknowledgement and thus
+   rebuild the state of the receiver at the transmitter.  I also propose
+   changes to the way SACK blocks are reported to insure that the
+   oldest, and thus the most critical, are transmitted expeditiously.
+   Additionally since the space to store acknowledgements in IPV4 is
+   limited and may not be able to accommodate all of the acknowledgement
+   pairs, I propose a method of sending the complete receiver state by
+   sending multiple acknowledgements.
+
+   The RFC2018 selective acknowledgment extension uses two TCP options.
+   The first is an enabling option, "SACK-permitted", which may be sent
+   in a SYN segment to indicate that the SACK option can be used once
+   the connection is established.  This option is extended to both
+   indicate that this newer version of the protocol is being used and to
+   establish an initial value for transmit state.  The other is the SACK
+   option itself, which may be sent over an established connection once
+   permission has been given by SACK-permitted.  This has also been
+   extended to add both the transmit state implicit in the message and
+   the transmit state that was received at the far end (now called
+   "Received State").
+
+   The SACK option is to be included in a segment sent from a TCP that
+   is receiving data to the TCP that is sending that data; we will refer
+   to these TCP's as the data receiver and the data sender,
+   respectively.  We will consider a particular simplex data flow; any
+   data flowing in the reverse direction over the same connection can be
+   treated independently.
+
+2.  Underlying concepts
+
+   In order for a sender to know how to optimally transmit messages to a
+   receiver the sender must recreate the state of the receiver as of the
+   last acknowledgement received (which segments have been recieved and
+   acknowledged, which segments have not) and then "age" or modify that
+   state by updating it based upon the messages transmitted since the
+   state implicit in the acknowledgement was current.  In order to do
+   this the sender must maintain a transmission order buffer which lists
+   the segment ranges of each message as it is sent.  We called the
+   index into the transmission order buffer "Send state" and transmitted
+   this state variable with each message.  The receiver, after correctly
+   receiving the message, saves this value and returns it (now called
+   "receive state") and the list of selectively acknowledged segments
+   with each acknowledgement.  When the sender receives this information
+   it is then capable of constructing a list of missing segments by
+   taking its unacknowledged segment range list and modifying it on the
+   basis of the received selective acknowledgements and then removing
+   from that list all segments that have been transmitted since the
+   message which caused the acknowledgement which is all segments sent
+
+
+
+Sabatini, Anthony       Expires September 1, 2012               [Page 3]
+
+
+
+
+
+Internet Draft        High Efficiency SACK for TCP     February 28, 2012
+
+
+   with indexes between the current "send state" and the "receive state"
+   in the acknowledgement message.
+
+   To accommodate the issue of receiving segments out of order at the
+   receiver, or those packets delayed by alternate routing, the reciever
+   does not instantly update the received state value (which could
+   trigger a false retransmission) but rather puts it on a timer queue
+   for a length of time appropriate to the delay randomness in the
+   arrival path (typically 40 to 200 ms based on media, speed and
+   distance), which when the timer entry expires, causes the update of
+   the recieved state value.   If the recieved state value when returned
+   to the sender and processed shows blocks that remain unacknowledged
+   after this time out they are assumed to be lost and they are queued
+   for retransmission.
+
+   Thus by transmitting the complete acknowledgement information (SACK
+   blocks) from the receiver along with an indicator to the sender as to
+   its state current at the time of the acknowledgement the sender can
+   accurately recreate the current status of the receiver assuming all
+   "in flight" messages were received and thus only send the
+   unacknowledged messages starting with the oldest along with any new
+   messages whose retransmission is requested.
+
+3.  Sack-Permitted Option
+
+   This six-byte option may be sent in a SYN by a TCP that has been
+   extended to receive (and presumably process) the Improved SACK
+   option.
+
+   The presence of the additional four bytes differentiates the Improved
+   SACK from the earlier protocol.  Although Receive Status serves no
+   function and is MUST be coded as 0 currently, it is left to further
+   study whether it can be utilized in link reconnection after failure.
+
+   This option MUST NOT be transmitted on non-SYN segments in the
+   current protocol, it is left to future study as to its use for
+   transmitting long sequences of acknowledgements in one frame.
+
+
+       TCP Sack-Permitted Option:
+
+       Kind: 4
+
+                         +--------+--------+
+                         | Kind=4 |Length=6|
+       +--------+--------+--------+--------+
+       | Send State      | Receive State   |
+       +--------+--------+--------+--------+
+
+
+
+Sabatini, Anthony       Expires September 1, 2012               [Page 4]
+
+
+
+
+
+Internet Draft        High Efficiency SACK for TCP     February 28, 2012
+
+
+4.  Sack Option Format
+
+   The SACK option is to be used to convey extended acknowledgment
+   information from the receiver to the sender over an established TCP
+   connection.
+
+       TCP SACK Option:
+
+       Kind: 5
+
+       Length: Variable
+
+                         +--------+--------+
+                         | Kind=5 | Length |
+       +--------+--------+--------+--------+
+       | Send State      | Receive State   |
+       +--------+--------+--------+--------+
+       |      Left Edge of 1st Block       |
+       +--------+--------+--------+--------+
+       |      Right Edge of 1st Block      |
+       +--------+--------+--------+--------+
+       |                                   |
+       /            . . .                  /
+       |                                   |
+       +--------+--------+--------+--------+
+       |      Left Edge of nth Block       |
+       +--------+--------+--------+--------+
+       |      Right Edge of nth Block      |
+       +--------+--------+--------+--------+
+
+   The SACK option is to be sent by a data receiver to inform the data
+   sender of non-contiguous blocks of data that have been received and
+   queued.  The data receiver awaits the receipt of data (perhaps by
+   means of retransmissions) to fill the gaps in sequence space between
+   received blocks.  When missing segments are received, the data
+   receiver acknowledges the data normally by advancing the left window
+   edge in the Acknowledgement Number Field of the TCP header.  The SACK
+   option does not change the meaning of the Acknowledgement Number
+   field.
+
+   This option contains a list of some of the blocks of contiguous
+   sequence space occupied by data that has been received and queued
+   within the window.
+
+   Each contiguous block of data queued at the data receiver is defined
+   in the SACK option by two 32-bit unsigned integers in network byte
+   order:
+
+
+
+
+Sabatini, Anthony       Expires September 1, 2012               [Page 5]
+
+
+
+
+
+Internet Draft        High Efficiency SACK for TCP     February 28, 2012
+
+
+   *    Left Edge of Block
+
+        This is the first sequence number of this block.
+
+   *    Right Edge of Block
+
+        This is the sequence number immediately following the last
+        sequence number of this block.
+
+   Each block represents received bytes of data that are contiguous and
+   isolated; that is, the bytes just below the block, (Left Edge of
+   Block - 1), and just above the block, (Right Edge of Block), have not
+   been received.
+
+   A SACK option that specifies n blocks will have a length of 8*n+6
+   bytes, so the 40 bytes available for TCP options can specify a
+   maximum of 4 blocks.  It is suggested that the Improved SACK will
+   provide the timestamp information used for RTTM [Jacobson92].
+
+5.  Generating Sack Options: Data Receiver Behavior
+
+   If the data receiver has received a SACK-Permitted option on the SYN
+   for this connection, the data receiver MAY elect to generate SACK
+   options as described below.  If the data receiver generates SACK
+   options under any circumstance, it MUST generate them under all
+   permitted circumstances.  If the data receiver has not received a
+   SACK-Permitted option for a given connection, it MUST NOT send SACK
+   options on that connection.
+
+   If sent at all, SACK options MUST be included in all ACKs which do
+   not ACK the highest sequence number in the data receiver's queue.  In
+   this situation the network has lost or mis-ordered data, such that
+   the receiver holds non-contiguous data in its queue.  RFC 1122,
+   Section 4.2.2.21, discusses the reasons for the receiver to send ACKs
+   in response to additional segments received in this state.  The
+   receiver MUST send an ACK for every valid segment that arrives
+   containing new data, and each of these "duplicate" ACKs SHOULD bear a
+   SACK option.
+
+   The purpose of the SACK blocks is to recreate the status of the
+   receiver at the transmitter.  To that end the most important
+   information is (1) new or changed blocks, (2) the second transmission
+   of new or changed blocks, (3) a complete enumeration of all received
+   blocks starting from the oldest first.  Since the SACK option field
+   may not have enough space for all blocks outstanding the receiver
+   will continue to issue acknowledgements until all blocks are
+   transmitted.  In order to implement the SACK option a flag must be
+   kept with each block indicating whether it has been sent a second
+
+
+
+Sabatini, Anthony       Expires September 1, 2012               [Page 6]
+
+
+
+
+
+Internet Draft        High Efficiency SACK for TCP     February 28, 2012
+
+
+   time.
+
+
+   If the data receiver chooses to send a SACK option, the following
+   rules apply:
+
+      * The data receiver first fills in "Send State" in the option from
+      the current value of its "Send State".  The data receiver then
+      fills in "Receive State" from the "Send State" of the SACK option
+      of the last TCP packet received that has cleared the delay queue.
+
+      * The first SACK block (i.e., the one immediately following the
+      kind and length fields in the option) MUST specify the contiguous
+      block of data containing the segment which triggered this ACK,
+      unless that segment advanced the Acknowledgment Number field in
+      the header.  This assures that the ACK with the SACK option
+      reflects the most recent change in the data receiver's buffer
+      queue.
+
+      * The data receiver SHOULD include as many distinct SACK blocks as
+      possible in the SACK option.  Note that the maximum available
+      option space may not be sufficient to report all blocks present in
+      the receiver's queue.
+
+      * The second SACK block SHOULD be filled out by repeating the most
+      recently reported SACK block (based on first SACK blocks in
+      previous SACK options) that are not subsets of a SACK block
+      already included in the SACK option being constructed and if it
+      has not previously been retransmitted.  This assures that in
+      normal operation, any segment remaining part of a non-contiguous
+      block of data held by the data receiver is reported in at least
+      two successive SACK options, even for large-window TCP
+      implementations [RFC1323]).
+
+      * Subsequent SACK blocks SHOULD be filled with other outstanding
+      SACK blocks on the list, cycling from the earliest to the latest
+      and then starting again with the earliest.  Whenever the the list
+      changes sufficient acknowledgements must be sent to insure that
+      all SACK blocks are transmitted.
+
+      * Upon any change to the recieved state value, if the reciever is
+      not currently transmiting data or ACK packets, the reciever will
+      initiate sending sufficient data or ACK packets to completely
+      transmit its complete SACK block list based on the rules above.
+
+      * A timer is maintained that is one quarter of the expected round
+      trip delay (typically 250 mS).  This timer is set when the last
+      acknowledgement is transmitted by the receiver.  At the expiration
+
+
+
+Sabatini, Anthony       Expires September 1, 2012               [Page 7]
+
+
+
+
+
+Internet Draft        High Efficiency SACK for TCP     February 28, 2012
+
+
+      of this timer if there are still segments that have not been
+      retransmitted the receiver again sends sufficient acknowledgements
+      to completely transmit all current SACK blocks.
+
+
+6.  Interpreting the Sack Option and Retransmission Strategy: Data
+   Sender Behavior
+
+   When receiving an ACK containing a SACK option, the data sender MUST
+   record the selective acknowledgment for future reference.  The data
+   sender is assumed to have a retransmission queue that contains the
+   segments that have been transmitted but not yet acknowledged, in
+   sequence-number order.  If the data sender performs re-packetization
+   before retransmission, the block boundaries in a SACK option that it
+   receives may not fall on boundaries of segments in the retransmission
+   queue; however, this does not pose a serious difficulty for the
+   sender.
+
+   One possible implementation of the sender's behavior is as follows.
+   Upon receiving an acknowledgement the sender first eliminates all
+   saved SACK blocks from the list which have now been acknowledged by
+   the TCP header.  The sender then adds the SACK blocks from the
+   current acknowledgement into SACK block list, eliminating any that
+   have been combined.  The sender then constructs a list of
+   unacknowledged blocks by creating a block for each gap in sequence.
+   The sender then takes the received state from the message and uses
+   the list of blocks that have been transmitted since that state was
+   generated to delete members on the unacknowledged list.  The sender
+   finally sets the updated unacknowledged list as the list of blocks to
+   be sent, oldest first.
+
+   After a retransmit timeout the data sender SHOULD delete all saved
+   SACK blocks, since under normal circumstances the acknowledgements
+   from the other end should have prevented the timeout.  The data
+   sender MUST start the retransmit with the segment at the left edge of
+   the window after a retransmit timeout.  A segment will not be
+   dequeued and its buffer freed until the left window edge is advanced
+   over it.
+
+6.1  Congestion Control Issues
+
+   This document does not attempt to specify in detail the congestion
+   control algorithms for implementations of TCP with SACK.  However,
+   the congestion control algorithms present in the de facto standard
+   TCP implementations MUST be preserved [Stevens94].  This algorithim
+   eliminates much unnecessary retransmission so is likely to lessen
+   overall congestion.
+
+
+
+
+Sabatini, Anthony       Expires September 1, 2012               [Page 8]
+
+
+
+
+
+Internet Draft        High Efficiency SACK for TCP     February 28, 2012
+
+
+   The use of time-outs as a fall-back mechanism for detecting dropped
+   packets is unchanged by the SACK option.  Because in normal operation
+   acknowledgements will prevent retransmit timeout, when a retransmit
+   timeout occurs the data sender MUST ignore prior SACK information in
+   determining which data to retransmit.
+
+   Future research into congestion control algorithms may take advantage
+   of the additional information provided by SACK.  One such area for
+   future research concerns modifications to TCP for a wireless or
+   satellite environment where packet loss is not necessarily an
+   indication of congestion.
+
+7.  Efficiency and Worst Case Behavior
+
+   Although this high efficiency improved SACK option sends more and
+   larger SACK blocks and more acknowledgements than the previous
+   version, with an active bi-directional link additional
+   acknowledgements are often associated with data transmission and thus
+   not a penalty.  If the SACK option needs to be used due to segment
+   loss then the improved efficiency afforded with this protocol more
+   than justifies the additional SACK blocks.
+
+   The deployment of other TCP options may reduce the number of
+   available SACK blocks to 2 or even to 1.  This will reduce the
+   redundancy of SACK delivery in the presence of lost ACKs.  Even so,
+   the exposure of TCP SACK in regard to the unnecessary retransmission
+   of packets is strictly less than the exposure of current
+   implementations of TCP.  The worst-case conditions necessary for the
+   sender to needlessly retransmit data is discussed in more detail in a
+   separate document [Floyd96].
+
+   Older TCP implementations which do not have the SACK option will not
+   be unfairly disadvantaged when competing against SACK-capable TCPs.
+   This issue is discussed in more detail in [Floyd96].
+
+8.  Timestamping
+
+   One pleasant benefit of having a token which is returned by the far
+   end on a determineistic basis is the easy calculation of round trip
+   delay.  We can save a time stamp along with the segment information
+   in our transmission order array.  This allows us to calculate round
+   trip delay when we receive our "Receive State" value and use it to
+   access the timestamp.  Since more than one received message might
+   have the same "Receive State" value we zero the timestamp after use
+   to indicate that the value should not be used again.  Note that if an
+   acknowledgement is lost we will calculate a longer delay than is
+   accurate therefore we must smooth the returned values, typically
+   returning the smallest out of the last N where N is typically four.
+
+
+
+Sabatini, Anthony       Expires September 1, 2012               [Page 9]
+
+
+
+
+
+Internet Draft        High Efficiency SACK for TCP     February 28, 2012
+
+
+9.  Data Receiver Reneging
+
+   Since the Sender is recreating the state of the Receiver, the data
+   Receiver MUST NOT discard data in its queue once that data has been
+   reported in a SACK option.  The Receiver is responsible for
+   allocating enough buffers so that the missing segments within the
+   window may be properly received and processed.
+
+10.  Security Considerations
+
+   This document neither strengthens nor weakens TCP's current security
+   properties.
+
+11. References
+
+   [Jacobson88}, Jacobson, V. and R. Braden, "TCP Extensions for Long-
+   Delay Paths", RFC 1072, October 1988.
+
+   [Jacobson92] Jacobson, V., Braden, R., and D. Borman, "TCP Extensions
+   for High Performance", RFC 1323, May 1992.
+
+   [Postel81]  Postel, J., "Transmission Control Protocol - DARPA
+   Internet Program Protocol Specification", RFC 793, DARPA, September
+   1981.
+
+Author's Address
+
+      Anthony Sabatini
+      Broker Communications Inc.
+      200 West 20th Street
+      Suite 1216
+      New York, NY 10011
+      Email: draft-sack@tsabatini.com
+
+      The author is currently a master's degree candidate at -
+
+      Hofstra University
+      Hempstead, N.Y.
+
+      His adviser is Dr. Xiang Fu
+
+
+
+
+
+
+
+
+
+
+
+Sabatini, Anthony       Expires September 1, 2012              [Page 10]
+
+

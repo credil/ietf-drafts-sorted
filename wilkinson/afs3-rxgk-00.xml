@@ -1,0 +1,611 @@
+<?xml version='1.0'?>
+<!DOCTYPE rfc SYSTEM 'rfc2629.dtd' [
+<!ENTITY PREAUTH SYSTEM "http://xml.resource.org/public/rfc/bibxml3/reference.I-D.draft-ietf-krb-wg-preauth-framework-15.xml">
+<!ENTITY RFC2119 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.2119.xml">
+<!ENTITY RFC2743 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.2743.xml">
+<!ENTITY RFC3961 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.3961.xml">
+<!ENTITY RFC4401 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.4401.xml">
+]>
+<?rfc toc='yes'?>
+<?rfc symrefs='yes'?>
+<?rfc compact='yes'?>
+<?rfc subcompact='no'?>
+
+<rfc category='info' ipr='trust200902' docName="draft-wilkinson-afs3-rxgk-00"
+     submissionType="independent">
+  <front>
+  <title>rxgk: GSSAPI based security class for RX</title>
+  <author surname="Wilkinson" fullname="Simon Wilkinson">
+    <organization abbrev="YFS">Your File System Inc</organization>
+    <address>
+      <email>simon@sxw.org.uk</email>
+    </address>
+  </author>
+  <date month="January" year="2010"/>
+
+  <abstract>
+    <t>rxgk is a security class for the RX RPC protocol. It uses the GSSAPI
+       framework to provide authentication, confidentiality and integrity
+       protection. This document provides a general description of rxgk. A
+       further document will provide details of integration with specific
+       RX applications. </t>
+  </abstract>
+</front>
+<middle>
+  <section anchor="intro" title="Introduction">
+  
+     <t>rxgk is a <xref target="RFC2743">GSSAPI</xref> based security class
+     for the rx protocol. It provides
+     authentication, confidentiality and integrity protection for rx RPC calls,
+     using a security context established using any GSSAPI mechanism with 
+     <xref target="RFC4401">PRF</xref> support.</t>
+ 
+  <t>Architecturally, rxgk is split into two parts. The rxgk rx security
+     class provides strong encryption using previously negotiated ciphers and
+     keys. It builds on the Kerberos crypto framework for its encryption 
+     requirements, but is authentication mechanism independent - the class
+     itself does not require the use of either Kerberos, or GSSAPI. The
+     security class simply uses a previously negotiated encryption type, and
+     master key. The master key is never directly used, but instead a per
+     connection key is derived for each new secure connection that is
+     established.</t>
+  
+  <t>The second portion of rxgk is a service which permits the negotiation of
+     an encryption algorithm, and the establishment of a master key. This is
+     done via a separate RPC exchange with a server, prior to the setup of
+     any rxgk connections. The exchange establishes an rxgk token, and a
+     master key shared between client and server. This exchange is protected
+     within a GSSAPI security context.</t>
+
+    <section title="Requirements Language">
+        <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+        "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+        document are to be interpreted as described in <xref
+        target="RFC2119">RFC 2119</xref>.</t>
+    </section>
+  </section>
+
+  <section anchor="enctype" title="Encryption framework">
+
+   <t>Bulk data encryption within rxgk is performed using the encryption
+      framework defined by <xref target="RFC3961">RFC3961</xref>. Any
+      algorithm which is defined using this framework and supported by 
+      both client and server may be used.
+   </t>
+
+    <section anchor="usage" title="Key usage values">
+    <t>In order to avoid using the same key for multiple tasks, key 
+       derivation is employed. The following key usage values are used by 
+       rxgk, their functions are as defined later in this document. </t>
+<artwork>
+const RXGK_CLIENT_ENC_PACKET		= 1026;
+const RXGK_CLIENT_MIC_PACKET		= 1027;
+const RXGK_SERVER_ENC_PACKET		= 1028;
+const RXGK_SERVER_MIC_PACKET		= 1029;
+const RXGK_CLIENT_ENC_RESPONSE		= 1030;
+const RXGK_CLIENT_COMBINE_ORIG		= 1032;
+const RXGK_SERVER_COMBINE_NEW		= 1034;
+const RXGK_SERVER_ENC_TICKET		= 1036;
+</artwork>
+    </section>
+  </section>
+
+  <section title="Security Levels">
+    <t>rxgk supports the negotiation of a range of different security levels.
+       These, along with the protocol constant that represents them during
+       key negotiation, are:</t>
+     <list style="hanging" hangIndent="6">
+       <t hangText="Authentication only"> (0) Provides only connection 
+	 authentication, without either integrity or confidentiality 
+	 protection. This mode of operation provides higher throughput, but
+	 is vulnerable to man in the middle attacks. This corresponds
+ 	 to the traditional 'clear' security level</t>
+       <t hangText="Integrity"> (1) Provides integrity protection only. 
+	  Data is protected from modification by an attacker, but not against 
+	  eavesdropping. This corresponds to the tranditional 'auth' level.</t>
+       <t hangText="Encryption"> (2) Provides both integrity and 
+	  confidentiality protection, corresponding to 'crypt'</t>
+       <t hangText="Bind"> (3) Connection security is provided by channel
+	  bindings with another layer. This mode of operation is experimental,
+	  and this value is reserved for future expansion.</t>
+     </list>
+     The authentication only, or clear, security level provides faster
+     throughput, at the expense of connection security. 
+  </section>
+
+  <section anchor="tokens" title="Token Format">
+
+  <t>An rxgk token is an opaque identifier which is specific to an particular
+     application's implementation of rxgk. The token is completely opaque to
+     the client, which just transmits it from server to server. The token must 
+     permit the receiving server to identify the corresponding user and session
+     key for the incoming connection - whether that be by encrypting the
+     information within the token, or making the token a large random
+     identifier which keys a lookup hash table on the server.</t>
+
+  <t>The token MUST NOT expose the session key on the wire. It MUST be
+     sufficiently random that an attacker cannot predict suitable token values
+     by observing other connections. An attacker MUST NOT be able to forge
+     tokens which convey a particular session key or identity.</t>
+  </section>
+
+
+  <section title="Key negotiation">
+
+    <t>rxgk uses an independent RX RPC service for key negotiation. The 
+       location of this service is application dependent. Within a given
+       application protocol, a client must be able to locate the key
+       negotiation service, and that service must be able to create tokens
+       which can be read by the application server. The simplest deployment
+       has the service running on every server, on the same transport
+       endpoints, but using a separate, dedicated, rx service id.</t>
+
+    <t>The key negotiation RPC is defined by the following XDR</t>
+
+<artwork>
+    typedef afs_int32 RXGK_Enctypes&lt;&gt;;
+
+    struct RXGK_StartParams { 
+        RXGK_Enctypes enctypes;
+        afs_int32 levels&lt;&gt;;
+        afs_int32 lifetime;
+        afs_int32 bytelife;
+        opaque client_nonce&lt;&gt;;
+    };
+
+    struct RXGK_ClientInfo {
+        afs_int32 errorcode;
+        afs_int32 flags;
+        afs_int32 enctype;
+        afs_int32 level;
+        afs_int32 lifetime;
+        afs_int32 bytelife;
+        afs_int64 expiration;
+        opaque mic&lt;&gt;;
+        RXGK_Ticket_Crypt ticket;
+        opaque server_nonce&lt;&gt;;
+    };
+
+    package RXGK_
+
+    GSSNegotiate(IN RXGK_StartParams *client_start,
+                 IN RXGK_Token *input_token_buffer,
+                 IN RXGK_Token *opaque_in,
+                 OUT RXGK_Token *output_token_buffer,
+                 OUT RXGK_Token *opaque_out,
+                 OUT afs_uint32 *gss_status,
+                 OUT RXGK_Token *rxgk_info) = 1;
+
+</artwork>
+
+    <t>The client populates RXGK_StartParams with lists of its prefered
+       options. These should be ordered from best to worst, with the 
+       clients favoured option occuring first within the list. The 
+       parameters are: </t>
+    <list style="hanging" hangIndent="6">
+      <t hangText="enctypes:">List of encryption types from the 
+	 Kerberos Encryption Type Number registry created in RFC3961 and 
+	 maintained by IANA. This list indicates the encryption types that
+ 	 the client is prepared to support.</t>
+      <t hangText="levels:">List of supported rxgk transport encryption
+	 levels.</t>
+      <t hangText="lifetime:">The maximum lifetime of the negotiated key,
+	 in seconds.</t>
+      <t hangText="bytelife:">The maximum amount of data that the 
+	 negotiated key should encrypt before being discared, expressed as
+	 log 2 of the number of bytes. A 
+ 	 value of 0 indicates that there is no limit on the number of
+	 bytes that may be transmitted. The byte lifetime is advisory - a
+	 connection that is over its byte lifetime should be permitted to
+	 continue, but clients should attempt to establish a new context
+ 	 at their earliest convenience.</t>
+      <t hangText="clientnonce:">A client generated string of random bytes,
+	 to be used as input to the key generation.</t>
+    </list>
+
+    <t>The client then calls gss_init_sec_context() to obtain an output token
+       to send to the server. The GSS service name is application dependent.</t>
+
+    <t>The client then calls RXGK_GSSNegotiate, as defined above. This takes
+       the following parameters</t>
+
+    <list style="hanging" hangIndent="6">
+      <t hangText="clientparms">The client params structure detailed above.
+        This should remain constant across the negotiation</t>
+      <t hangText="input_token_buffer">The token produced by a call to
+	gss_init_sec_context</t>
+      <t hangText="opaque_in">An opaque token, which was returned by the 
+	server following a previous call to GSSNegotiate in this negotiation. 
+	If this is the first call, this should be NULL.</t>
+      <t hangText="output_token_buffer">The token output by the server's call
+	to gss_accept_sec_context</t>
+      <t hangText="opaque_out">An opaque token, which the server may use to
+	preserve state information between multiple calls in the same context
+	negotiate. The client should use this value as opaque_in in its next
+	call to GSSNegotiate.</t>
+      <t hangText="gss_status">The major status code output by the server's
+	call to gss_accept_sec_context</t>
+      <t hangText="rxgk_info">If gss_status == GSS_S_COMPLETE this contains an
+	encrypted block containing the server's response to the client. See
+	below.</t>
+    </list>
+
+    <t>Upon receiving the server's response, the client checks the 
+       contents of gss_status. If this is GSS_S_CONTINUE_NEEDED, the client
+       should call gss_init_sec_context again with the token provided by the
+       server in output_token_buffer, followed by a further call to 
+       GSSNegotiate, including the server's previous opaque_out as this call's
+       opaque_in</t>
+
+    <t>This process continues until the either the server, or client,
+       encounters an error, or the server returns GSS_S_COMPLETE in gss_status.
+       </t>
+
+    <t>Upon completion, rxgk_info contains the XDR representation of a 
+       RXGK_ClientInfo structure, encrypted using gss_wrap() with
+       confidentiality protection. The client should decrypt this structure
+       using gss_unwrap - ClientInfo contains the following server populated
+       fields</t>
+
+    <list style="hanging" hangIndent="6">
+      <t hangText="errorcode">A policy (rather than connection establishment) 
+        error code. If non-zero, an error has occured, the resulting key
+	negotiation has failed, and the rest of the values in this structure
+	are undefined.</t>
+      <t hangText="flags"></t>
+      <t hangText="enctype">The encryption type selected by the server.
+	This will be one of the types listed by the client in its StartParams
+	structure</t>
+      <t hangText="level">The rxgk security level selected by the server.</t>
+      <t hangText="lifetime">The connection lifetime, in seconds, as determined
+	by the server (this must be less than or equal to the lifetime proposed
+	by the client)</t>
+      <t hangText="bytelife">The maximum amount of data (in log 2 bytes) that
+	may be transfered using this key. This must be less than or equal to
+	the bytelife proposed by the client</t>
+      <t hangText="expiration">The time, in seconds since the Unix epoch, at
+	which this token expires</t>
+      <t hangText="mic">The result of calling gss_get_mic over the XDR encoded
+	representation of the StartParams request received by the server.</t>
+      <t hangText="token">An rxgk token. This is an opaque blob, as detailed
+	earlier</t>
+      <t hangText="server_nonce">The nonce used by the server to create the K0
+	used within the rxgk token</t>
+     </list>
+
+     <t>Upon receiving the server's response, the client must verify that the
+        mic contained within it matches the MIC of the XDR representation of
+	the StartParams structure it sent to the server (this prevents a man
+	in the middle from performing a downgrade attack). It should also 
+	verify that the server's selected connection properties match those 
+	it proposed.</t>
+
+     <t>The client may then compute K0, by taking the nonce it sent to the
+        server (client_nonce), and the one it has just received (server_nonce),
+        combining them together, and passsing them to gss_psuedo_random, with
+        the GSS_C_PRF_KEY_FULL option</t>
+
+     <artwork>
+	gss_pseudo_random(gssapi_context, 
+			  GSS_C_PRF_KEY_FULL, 
+			  client_nonce || server_nonce, 
+			  K, 
+			  *K0);
+     </artwork>
+     <t>|| is the concatenation operation</t>
+
+     <t>K, the desired output length, is the key generation seed length as
+        specified in the RFC3961 profile of the negotiated enctype</t>
+  </section>
+
+  <section anchor="combine" title="The combine tokens operation">
+    <section title="Overview">
+      <t>A client may elect to combine multiple rxgk tokens in its possession
+	 into a single token. This allows an rx connection to be secured using
+	 a combination of multiple, individually established identities, which
+	 provides additional security for a number of application protocols.
+      </t>
+
+      <t>Token combination is performed using the CombineTokens RPC call. The
+	 client has two keys - K0 and K1, and two tokens, T0 and T1. It locally
+	 combines the two keys using a defined combination alogrithm to produce
+	 Kn. It then calls the CombineTokens RPC with T0 and T1, to receive a
+	 new token, Tn, which has embeded within it Kn, as computed by the
+	 server.</t>
+    </section>
+    <section title="Key combination algorithm">
+      <t>Assume that the tokens being combined are T0 and T1, with initial keys
+	 K0 and K1. The new initial key for the combined token, Kn is computed
+	 using the KRB-FX-CF2 operation, described in section 6.1 of 
+	 <xref target="I-D.ietf-krb-wg-preauth-framework">draft-ietf-krb-wg-preauth-framework-14</xref>. The constants 
+	 pepper1 and pepper2 required by this operation are defined as the 
+	 ASCII strings "AFS" and "rxgk" respectively.
+      </t>
+    </section>
+    <section title="RPC definition">
+      <t>The combine keys RPC is defined as</t>
+      <artwork>
+    CombineTokens(IN opaque token0,
+                  IN opaque token1,
+                  OUT opaque new_token) = 2;
+      </artwork>
+    </section>
+    <section title="Server operation">
+      <t>The server receives both token0 and token1 from the RPC call, and 
+         decrypts these tokens using its private key. Providing this decryption
+	 is successful, it now has copies of the initial key (K0) from both
+	 tokens. It then performs the key combination algorithm detailed above
+	 to obtain a new key, Kn. The server constructs a new token, where each
+	 of the numerical fields are set to the minimum of the values of each
+	 of the original tokens, and the list of identities is the union of 
+	 those in the original tokens. This new token contains the derived key,
+	 Kn. The new token is encrypted with the server's private key, as 
+	 normal, and returned to the client.
+      </t>
+    </section>
+    <section title="Client operation">
+      <t>As detailed within the overview, the client calls the CombineTokens 
+         RPC using two tokens, T0 and T1 within its posession. It then receives
+ 	 a new token, Tn from this call. The client can only make use of Tn to
+	 establish an rxgk protected connection if it can derive Kn, which it 
+	 can only do if it already knows K0 and K1.
+      </t>
+    </section>
+  </section>
+
+  <section anchor="class" title="The rxgk security class">
+	  <section title="Overview">
+
+     <t>When a new connection using rxgk is created by the client, it stores the
+        current timestamp (as start_time for the rest of this discussion), and 
+      then uses this, along with other connection information, to derive a 
+      transport key from the current user's master key.</t>
+
+   <t>This key is then used to protect the first message the client sends
+   to the server. The server follows the standard RX security
+   establishment protocol, and responds to the client with a challenge.
+   rxgk challenges simply contain some versioning information and a
+   random nonce selected by the server.</t>
+
+      <t>Upon receiving this challenge, the client uses the transport key to
+	 encrypt an authenticator, which contains the server's nonce, and some
+	 other connection information. The client sends this authenticator, 
+         together with start_time and the current user's rxgk token, back 
+	 to the server.</t> 
+
+      <t>The server decrypts the rxgk token to determine the master key in use,
+         uses this to derive the transport key, which it in turn uses to 
+         decrypt the authenticator, and thus validate the connection.</t>
+    </section>
+
+    <section title="Rekeying">
+      <t>As part of connection negotiation, the server and client agree upon
+	 a number of advisory lifetimes (both time, and data, based) for
+	 connection keys. Each connection has a key number, which starts at
+	 0. When a connection exceeds one of its lifetimes, either side may
+	 elect to increment the key number. When the other endpoint sees
+	 a key number increment, it should reset all of its connection
+	 counters. Endpoints should accept packets encrypted with either
+	 the current, previous, or next key number, to allow for resends
+	 around the rekeying process.
+      </t>
+      <t>The key version number is contained within the 16 bit spare field
+	 of the RX header (used by previous security layers as a checksum
+	 field), and expressed as an unsigned value in network byte order.
+	 If rekeying would cause this value to wrap, then the endpoint
+	 perform the rekey must terminate the connection.
+      </t>
+    </section>
+
+    <section title="Key derivation">
+
+      <t>In order to avoid the sharing of keys between multiple connections,
+         each connection has its own transport key, TK, which is derived
+	 from the master key, K0. Derivation is performed using the PRF+ 
+	 function defined in RFC4402, combined with the random-to-key function
+	 of K0's encryption type, as defined in RFC3961. The PRF input data
+	 is the concantenation of the rx epoch, connection ID, start_time and
+	 key number, all in network byte order. This gives:
+     </t>
+
+<artwork>
+  TK = random-to-key(PRF+(K0, L,
+	                  epoch || cid || start_time || key_number))
+</artwork>
+      <t>L is the key generation seed length as specified in the RFC3961
+	 profile</t>
+      <t>Note that start_time is selected by the client when it receives the
+	 server's challenge, and shared with the server as part of its 
+	 response. Thus both sides of the negotiation are guaranteed to use
+	 the same value for start_time.
+      </t>
+    </section>
+
+    <section title="The Challenge">
+ 
+      <t>The rxgk challenge is an XDR encoded structure with the following
+         signature:</t>
+
+<artwork>
+    struct RXGK_Challenge {
+        afs_int32 version;
+        opaque nonce[20];
+    };
+</artwork>
+
+      <list style="hanging" hangIndent="6">
+        <t hangText="version:">The rxgk version number</t>
+        <t hangText="nonce:">20 octets of random data</t>
+      </list>
+
+      <t>A client receiving a challenge containing an unknown version number
+         MUST reject that challenge.</t>
+    </section>
+ 
+    <section title="The Response">
+
+      <t>The rxgk response is an XDR encoded structure, with the following 
+       signature:</t>
+
+<artwork>
+    struct RXGK_Response {
+        afs_int32 version;
+        afs_int64 start_time;
+        opaque token&lt;&gt;
+        opaque authenticator&lt;&gt;
+    };
+</artwork>
+
+      <list style="hanging" hangIndent="6">
+        <t hangText="version:">the rxgk version number</t>
+        <t hangText="start_time:">the number of seconds since the Unix epoch 
+          (1970-1-1 00:00:00Z)</t>
+        <t hangText="authenticator:">the XDR encoded representation of 
+          RXGK_Authenticator, encrypted with the transport key, and key usage
+          RXGK_CLIENT_ENC_RESPONSE.</t>
+      </list>
+      <section title="The Authenticator">
+
+<artwork>
+    struct RXGK_Authenticator {
+        opaque nonce[20];
+	opaque appdata&lt;&gt;
+        afs_uint32 epoch;
+	afs_uint32 cid;
+	afs_int32 maxcalls;
+	afs_int32 call_numbers&lt;&gt;;
+    };
+</artwork>
+
+        <list style="hanging" hangIndent="6">
+	  <t hangText="nonce:">a copy of the nonce from the challenge</t>
+	  <t hangText="appdata:">an application specific opaque blob</t>
+          <t hangText="epoch:">the rx connection epoch</t>
+	  <t hangText="cid:">the rx connection ID</t>
+	  <t hangText="maxcalls:">the highest rx call number in use</t>
+          <t hangText="call_numbers:">the set of current rx call numbers</t>
+        </list>
+     </section>
+   </section>
+
+   <section title="Checking the Reponse">
+
+     <t>To check the validity of an rxgk response, the authenticator should
+        be decrypted, the nonce compared with that sent in the challenge, and
+        the connection ID and epoch compared with that of the current
+        connection. Failure of any of these steps MUST result in the failure
+        of the security context.
+     </t>
+   </section>
+
+   <section title="Packet handling">
+
+     <t>The way in which the rxgk security class handles packets depends upon 
+	the requested security level. As noted earlier, 3 levels are currently
+	defined - authentication only, integrity protection and encryption</t>
+
+<section title="Encryption">
+
+     <t>Using the encryption security level provides both integrity and 
+	confidentiality protection.</t> 
+
+     <t>The existing payload is prefixed with a psuedo header, to produce 
+	the following data for encryption.</t>
+
+<artwork>
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                             epoch                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                              cid                                |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                          call number                            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                            sequence                             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                         security index                          |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+| Data ...                                                        |
++-+-+-+-+-+-
+
+</artwork>
+
+     <t>This plaintext is encrypted using an RFC3961 style encrypt() 
+	function, with the connection's transport key, using key usage 
+        RXGK_CLIENT_ENC_PACKET for messages from client to server, and
+        RXGK_SERVER_ENC_PACKET for messages from server to client, and the
+        encrypted block transmitted to the peer.
+     </t>
+
+   </section>
+   <section title="Integrity protection">
+   
+     <t>The rxgk_auth security level prepends the packet with the same data
+	block as crypt (as detailed above), and then calls the RFC3961 
+	get_mic operation over the result, using key usage
+	RXGK_CLIENT_MIC_PACKET for messages from client to server, and 
+	RXGK_SERVER_MIC_PACKET for messages from server to client.</t>
+
+     <t>The peer is sent the output from the MIC operation, followed by the
+        original payload (excluding the additional header which was added for
+        the MIC step).</t>
+
+     <t>Upon receiving a protected packet, the receiver should consult the 
+        RFC3961 profile for the encryption algorithm in use to determine how
+	many bytes of checksum are contained within the packet. Having split
+	the data into checksum and payload using this information, the 
+	checksum should be verified using the encryption profile's
+	verify_mic() operation with the appropriate key derivation.</t>
+
+     <t>Note that the checksum field within the rx packet header itself is not
+        used, as it is too small to hold a collision proof checksum value.</t>
+   </section>
+
+   <section title="Authentication only">
+     <t>When running at the rxgk_clear level, no manipulation of the payload is
+        performed by the security class.</t>
+   </section>
+   </section>
+   </section>
+    <section anchor="IANA" title="IANA Considerations">
+      <t>This memo includes no request to IANA.</t>
+   </section>   
+   <section anchor="security" title="Security Considerations">
+     <section title="Abort Packets">
+       <t>RX Abort packets are not protected by the security layer. Therefore
+	  caution should be exercised when relying on their results. In
+	  particular, clients MUST NOT use an error from GSSNegotiate or
+	  CombineTokens to determine whether to downgrade to another 
+	  security class</t>
+     </section>
+   </section>
+   </middle>
+
+   <back>
+   <references title="Normative References">
+	   &RFC2119;
+	   &RFC2743;
+	   &RFC3961;
+	   &RFC4401;
+	   &PREAUTH;
+   </references>
+
+   <section title="Acknowledgements">
+     <t>rxgk was originally developed over a number of AFS Hackathons. The
+	editor of this document has assembled the protocol description from
+	a number of notes taken at these meetings, and from a partial
+	implementation in the Arla AFS client.</t> 
+
+     <t>Thanks to 
+	Derrick Brashear, Jeffrey Hutzelman, Love Hornquist Astrand and 
+        Chaskiel Grundman for their original design work, and comments on this
+	document, and apologies for any omissions or misconceptions in my 
+	archaelogical work.</t>
+
+     <t>Marcus Watts and Jeffrey Altman provided invaluable feedback on an
+	earlier version of this document at the 2009 Edinburgh AFS Hackathon.
+     </t>
+   </section>
+</back>
+</rfc>
+

@@ -1,0 +1,634 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+
+<?rfc iprnotified="no" ?>
+<?rfc symrefs="yes" ?>
+<?rfc sortrefs="yes" ?>
+<?rfc toc="yes" ?>
+<?rfc compact="no"?>
+<?rfc subcompact="yes"?>
+
+<rfc ipr="trust200902" docName="draft-myklebust-nfsv4-pnfs-backend-01">
+	<front>
+		<title abbrev="pNFS back end protocol extensions">
+			Network File System (NFS) version 4 pNFS back end protocol extensions
+		</title>
+		<author initials="T." surname="Myklebust"
+			fullname="Trond Myklebust">
+			<organization>
+				NetApp
+			</organization>
+			<address>
+				<postal>
+					<street>3215 Bellflower Ct</street>
+					<city>Ann Arbor</city>
+					<region>MI</region>
+					<code>48103</code>
+					<country>USA</country>
+				</postal>
+				<phone>+1-734-662-6608</phone>
+				<email>Trond.Myklebust@netapp.com</email>
+			</address>
+		</author>
+		<author initials="Y.P." surname="Allu"
+			fullname="Yamini Allu">
+			<organization>
+
+			</organization>
+			<address>
+				<postal>
+					<street>2421 Mission College Blvd</street>
+					<city>Santa Clara</city>
+					<region>CA</region>
+					<code>95054</code>
+					<country>USA</country>
+				</postal>
+				<phone>+1-631-662-3422</phone>
+				<email>yamini.allu@gmail.com</email>
+			</address>
+		</author>
+		<date month="October" year="2010" />
+		<area>Transport</area>
+		<workgroup>NFSv4</workgroup>
+		<keyword>RFC</keyword>
+		<keyword>Request for Comments</keyword>
+		<keyword>NFSv4</keyword>
+		<keyword>Network File System</keyword>
+		<keyword>pNFS back end protocol</keyword>
+		<abstract>
+			<t>
+				This document describes an extension to
+				the NFSv4.1 draft protocol to allow NFS
+				clients to act as pNFS data servers
+				towards other NFS clients.
+			</t>
+			<t>
+				The intention is to reduce the load on the
+				actual data servers by allowing some
+				trusted clients to share the contents of
+				their data caches with other clients.
+			</t>
+		</abstract>
+		<note title="Keywords">
+			<t>
+				The key words "MUST", "MUST NOT", "REQUIRED", "SHALL",
+				"SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY",
+				and "OPTIONAL" in this document are to be interpreted as
+				described in <xref target="RFC2119"/>.
+			</t>
+		</note>
+	</front>
+	<middle>
+		<section title="Introduction">
+			<t>
+				The object of this proposal is to allow further
+				scale out of NFS traffic by allowing NFS clients
+				to share the contents of their file data caches
+				with other NFS clients.
+			</t>
+			<t>
+				The model assumes a server workload in which a number of
+				read-only files are commonly accessed by more than
+				one client at a time. A typical use case would be
+				one in which the exported filesystem contains a set
+				of libraries. e.g. a UNIX /lib partition, a set
+				of CAD/CAM objects, or a collection of php modules
+				and other static webserver data.
+				On such systems, a common problem occurs when booting
+				up the cluster when possibly all clients need to access
+				the same library data at roughly the same time. The
+				server bandwidth gets eaten up through serving up the
+				same data over and over again.
+			</t>
+			<t>
+				It is not obvious that use of the pNFS scale out mode is
+				sufficient to avoid this kind of congestion. The
+				fundamental problem is that NFS clients are all accessing
+				the same data, which are striped over the same data servers.
+				The effect may therefore simply be to move the bottleneck
+				from the metadata server over onto the data servers.
+			</t>
+			<t>
+				Current methods of reducing the impact of this congestion
+				typically require the user to dedicate extra resources for
+				the boot process. They include preloading the data on the
+				client in local permanent caches (a.k.a. cachefs),
+				replication of the shared data across several NFS servers
+				and setting up NFS proxy servers.
+			</t>
+			<t>
+				Another solution, which does not require the use of
+				dedicated resources is the peer-to-peer model
+				in which the first few clients to read the data from
+				the server are allowed to share the contents of their
+				cache with the next waves. This RFC attempts to enable
+				such a model by allowing clients which have already
+				cached data to act as pNFS data servers toward their
+				peers. It does so by defining a control protocol
+				in the sense defined in Section 12.2.6 of
+				<xref target="draft-ietf-nfsv4-minorversion1-29"/>
+				to enable the data server to enforce layouts, and
+				negotiate authentication and authorization
+				information with the server.
+			</t>
+		</section>
+		<section title="Description of the proposed data sharing model">
+			<section title="NFS client acting as a pure pNFS client">
+				<t>
+					The proposal implies no protocol changes for NFSv4.1
+					clients that wish only to act as pNFS clients, in
+					order to access the cached data from other clients.
+					These clients will request file layouts from the meta
+					data server using the LAYOUTGET operation in the
+					usual fashion. Should the server return
+					NFS4ERR_LAYOUTUNAVAILABLE, then the client proceeds
+					to read from the file through the metadata server
+					in the usual manner. Otherwise, the client interprets
+					the returned file layout in the manner specified by
+					Section 13 of
+					<xref target="draft-ietf-nfsv4-minorversion1-29"/>
+					(NFSv4.1 as a Storage Protocol in pNFS: the File Layout
+					Type).
+				</t>
+			</section>
+			<section title="Meta data server responsibilities">
+				<t>
+					The metadata server has the usual responsibilities
+					as dictated by Section 13 of
+					<xref target="draft-ietf-nfsv4-minorversion1-29"/>.
+					It maintains the list of available data servers for
+					each file, and manages the layout requests from
+					pNFS clients, responds to PROXY_OPEN requests from
+					data servers, and ensures that PROXY_OPEN stateids
+					are revoked when the corresponding layout is
+					revoked.
+				</t>
+			</section>
+			<section title="NFS client acting as a pNFS data server">
+				<t>
+					A client that wishes to act as a data server is required
+					to notify the metadata server of that intention using the
+					REGISTER_DS operation. Depending on the circumstances,
+					the client may opt to register as a data server for all
+					cached files, for just a single filesystem, for a collection
+					of filesystems, for a collection of specific files, or for
+					just a single file.
+				</t>
+				<t>
+					As stated in the introduction, the design assumes that the
+					sharing of cached data between NFS clients will reduce the
+					amount of NFS traffic to the permanent storage medium.
+					It therefore only makes sense to invoke this model in the
+					case when the server knows that the client that is acting
+					as a data server is caching the file data aggressively.
+					In order to verify that this is the case, we require
+					that the metadata server can only issue layouts for
+					data servers that hold a read delegation for the file
+					in question.
+				</t>
+				<t>
+					Conversely, a client that is registered to act as a data
+					server, and that receives a READ request for a file for
+					which it does not hold a delegation, MUST reject that
+					request with the error NFS4ERR_PNFS_NO_LAYOUT.
+				</t>
+				<t>
+					When the data server receives a READ request from a client
+					with a stateid or a data server filehandle that it does not
+					recognise, it attempts to validate that request using the
+					PROXY_OPEN call. This operation will convert the data server
+					filehandle as provided by the layout into a real filehandle,
+					that the data server can use to access the file on the
+					metadata server. In order to make it easy for the data
+					server to identify the file, the real filehandle SHOULD match
+					the filehandle that was returned to the client when it
+					received the read delegation.
+				</t>
+				<t>
+					The PROXY_OPEN call also checks the access rights that were
+					granted by the layout and the READ stateid for validity. If
+					the pNFS client in question does not hold a layout for this
+					file, the PROXY_OPEN request from the data server will return
+					NFS4ERR_PNFS_NO_LAYOUT. In this case, the data server should
+					not attempt to service the READ request, but should pass the
+					error on to the pNFS client.
+				</t>
+				<t>
+					If file access was verified by PROXY_OPEN, the data server
+					can then attempt to service the READ request from its cache.
+					Should it fail to find the data in its cache, the data server
+					should attempt to retrieve it from the parent server.
+				</t>
+				<t>
+					When layouts are returned to the metadata server, the data
+					server is made responsible for fencing off any further READ
+					requests. To do so, the metadata server sends a
+					CB_PROXY_REVOKE callback to the data server (or servers) that
+					are referenced by that layout.
+					Upon receiving the CB_PROXY_REVOKE callback, the data server
+					should match the filehandle and stateid arguments to the data
+					filehandle that was previously used as an argument to the
+					PROXY_OPEN request, and the stateid that was returned by
+					that request. Should the client attempt to reuse the same
+					data filehandle and stateid in a future READ request, then
+					the data server SHOULD revalidate the client's access using
+					another PROXY_OPEN rpc call to the metadata server.
+				</t>
+				<t>
+					An NFS client can at all times revoke its offer to act
+					as a data server by using the UNREGISTER_DS operation.
+					This operation takes a single stateid, as returned by the
+					original REGISTER_DS request. When the metadata server
+					receives such a request, it must immediately revoke all
+					layouts that reference that particular data server. It
+					does not need to send a CB_PROXY_REVOKE notification to
+					the data server that it is unregistering, however it MUST
+					notify any other data servers that are referenced by the same
+					layout.
+				</t>
+			</section>
+		</section>
+		<section title="Security considerations">
+			<t>
+				As per Section 13.1 in
+				<xref target="draft-ietf-nfsv4-minorversion1-29"/>, it is
+				expected that metadata servers will need to encode server
+				routing information in the data server filehandles. To enable
+				this, the REGISTER_DS request includes a 64-bit cookie argument
+				that the metadata server is required to store. It is then
+				required to encode that 64-bit cookie in the first 64-bits of
+				the data server filehandle.
+			</t>
+			<t>
+				All operations from the data server to the metadata
+				server, including any operations required to refill
+				the file cache in order to satisfy a READ request by
+				the pNFS client should be authenticated using a
+				principal of the form "nfsd/hostname@REALM". It is,
+				however expected that this requirement will be obsoleted,
+				should the proposal for RPCSEC_GSSv3
+				<xref target="draft-williams-rpcsecgssv3"/> be approved. In
+				this case, the data server may instead choose to create a
+				process credential that asserts the credentials of the pNFS
+				client.
+			</t>
+		</section>
+		<section title="IANA Considerations">
+			<t>
+				This document has no actions for IANA.
+			</t>
+		</section>
+		<section title="State expiration and recovery considerations">
+			<t>
+				Should the pNFS client's session expire on the metadata
+				server, then the latter is required to recall all layouts
+				from the data servers using the CB_PROXY_REVOKE callback.
+				Upon re-establishing the session, the pNFS client then
+				proceeds to follow the usual state recovery routine,
+				including layout recovery.
+			</t>
+			<t>
+				Should the pNFS client's session expire on the data
+				server then it is required to recover that session
+				before it can issue a new READ request. In that case,
+				the data server MUST assume that all existing layouts
+				have been revoked. Should the pNFS client attempt
+				to assert a layout then it MUST be validated using
+				a PROXY_OPEN call.
+			</t>
+			<t>
+				Should the data server's session expire on the metadata
+				server, then the metadata server MUST revoke all layouts
+				that reference that data server. It should also consider
+				as invalid any REGISTER_DS requests that the data server
+				had issued. After recovering its session, the data server
+				MAY reissue the REGISTER_DS requests.
+			</t>
+			<t>
+				Finally, if the metadata server crashes, then the data server
+				SHOULD assert all REGISTER_DS requests as part of the
+				recovery process. Once that is done, it must also assume
+				that all layouts have been revoked, and that any attempt
+				to reuse them MUST be revalidated using a PROXY_OPEN
+				request.
+				Otherwise, both it and the pNFS client perform the normal
+				NFS client recovery process.
+			</t>
+		</section>
+		<section title="Structured Data Types">
+			<section title="proxy_identifier4">
+				<figure><artwork>
+  union proxy_identifier4 switch (uint32_t flavor) {
+  case RPCSEC_GSS:
+        principal_arg           pid_principal;
+  case AUTH_SYS:
+        struct authsys_parms    pid_authsys;
+  default:
+        void;
+  };
+				 </artwork></figure>
+				 <t>
+					 The proxy_identifier4 data type is used
+					 to identify the user on behalf of which
+					 the data server is issuing a PROXY_OPEN.
+				 </t>
+			</section>
+		</section>
+		<section title="New client operations">
+			<section title="REGISTER_DS - Offer to act as a data server">
+				<section title="ARGUMENTS">
+					<figure><artwork>
+  const NFS4_MDS_IDENTIFIER_SIZE       = 8;
+
+  enum register_ds_type4 {
+        REGISTER_DS_ALL                 = 0,
+        REGISTER_DS_FILESYSTEM          = 1,
+        REGISTER_DS_ADD_FILESYSTEM      = 2
+        REGISTER_DS_FILE                = 3
+        REGISTER_DS_ADD_FILE            = 4
+  };
+
+  typedef opaque mds_identifier4[NFS4_MDS_IDENTIFIER_SIZE];
+
+  union register_ds (register_ds_type4 ds_type) {
+  case REGISTER_DS_ALL:
+        mds_identifier4 rea_mds_identifier;
+  case REGISTER_DS_FILESYSTEM:
+        /* CURRENT_FH: file on filesystem being re-exported */
+        mds_identifier4 rea_mds_identifier;
+  case REGISTER_DS_ADD_FILESYSTEM:
+        /* CURRENT_FH: file on filesystem being re-exported */
+        stateid4        rea_dataserver_stateid;
+  case REGISTER_DS_FILE:
+        /* CURRENT_FH: file being re-exported */
+        mds_identifier4 rea_mds_identifier;
+  case REGISTER_DS_ADD_FILE:
+        /* CURRENT_FH: file being re-exported */
+        stateid4        rea_dataserver_stateid;
+  };
+
+  struct REGISTER_DS4args {
+        register_ds     rea_dsinfo;
+  };
+					</artwork></figure>
+				</section>
+				<section title="RESULTS">
+					<figure><artwork>
+  union REGISTER_DS4res (nfsstat4 status) {
+  case NFS4_OK:
+        stateid4        res_dataserver_stateid;
+  default:
+        void;
+  };
+					</artwork></figure>
+				</section>
+				<section title="DESCRIPTION">
+					<t>
+						The REGISTER_DS operation allows an NFS client to
+						signal to the metadata server its ability to act
+						as a data server towards other NFS clients.
+						Note that the MDS MUST not ever issue a layout
+						for a file for which the client does not hold
+						a read delegation.
+					</t>
+					<t>
+						The client can register an intention to export
+						all files for which it holds a read delegation,
+						using the argument REGISTER_DS_ALL.
+					</t>
+					<t>
+						It is also anticipated that some NFS setups may
+						have the ability to set a caching and/or re-exporting
+						policy. For such setups, it is possible to set more
+						fine-grained data server policies:
+						<list> <t>
+								REGISTER_DS_FILESYSTEM allows the client to specify
+								that it wants to be a data server for a specific
+								filesystem only.
+								</t> <t>
+								REGISTER_DS_ADD_FILESYSTEM allows the client to
+								specify that it wants to add a filesystem to
+								the data server represented by the stateid
+								'rea_dataserver_stateid'.
+								</t> <t>
+								REGISTER_DS_FILE allows the client to specify
+								that it wants to serve a particular file only.
+								</t> <t>
+								REGISTER_DS_ADD_FILE allows the client to
+								specify that it wants to add a file to the
+								data server represented by the stateid
+								'rea_dataserver_stateid'.
+							</t>
+						</list>
+					</t>
+					<t>
+						The client should also supply a unique 64-bit identifier in the
+						argument rea_mds_identifier. This identifier should be put as
+						the first 8 bytes of any data server filehandle, and may be
+						used by the data server to identify the MDS to which the
+						filehandle belongs.
+					</t>
+					<t>
+						On success, the server returns the stateid 'res_dataserver_stateid'
+						which acts to identify the data server in future REGISTER_DS
+						calls, and in UNREGISTER_DS calls.
+					</t>
+					<t>
+						The client may in fact hold several data server
+						stateids, and use them to manage the overall
+						policy.
+					</t>
+				</section>
+			</section>
+			<section title="UNREGISTER_DS - Revoke offer to act as a data server">
+				<section title="ARGUMENTS">
+					<figure><artwork>
+  struct UNREGISTER_DS4args {
+        stateid4        una_dataserver_stateid;
+  };
+					</artwork></figure>
+				</section>
+				<section title="RESULTS">
+					<figure><artwork>
+  struct UNREGISTER_DS4res {
+        nfsstat4        status;
+  };
+					</artwork></figure>
+				</section>
+				<section title="DESCRIPTION">
+					<t>
+						When the MDS receives an UNREGISTER_DS operation then it
+						must immediately invalidate all state associated with
+						the data server stateid 'una_dataserver_stateid'.
+					</t>
+					<t>
+						It MUST therefore revoke all layouts that refer to the
+						data server that is represented by una_dataserver_stateid.
+					</t>
+					<t>
+						After revoking the layouts, the MDS MUST no longer issue
+						layouts for these files and filesystems using the data
+						server represented by una_dataserver_stateid.
+					</t>
+				</section>
+			</section>
+			<section title="PROXY_OPEN - Check proxy access rights to a file">
+				<t>
+					This takes a data server filehandle, the read
+					stateid, and a proxy user identifier, and
+					returns the true filehandle on success.
+				</t>
+				<section title="ARGUMENTS">
+					<figure><artwork>
+  struct PROXY_OPEN4args {
+        /* CURRENT_FH: "data server filehandle" */
+        proxy_identifier4       popa_user_id;
+        stateid4                popa_read_stateid;
+  };
+					</artwork></figure>
+				</section>
+				<section title="RESULTS">
+					<figure><artwork>
+  union PROXY_OPEN4res switch (nfsstat4 status) {
+        case NFS4_OK:
+                /* CURRENTFH: true filehandle */
+                stateid4        popr_proxy_stateid;
+        default:
+                void;
+  };
+					</artwork></figure>
+				</section>
+				<section title="DESCRIPTION">
+					<t>
+						The PROXY_OPEN function authenticates
+						the READ request by the pNFS client. If the
+						data filehandle is valid, and the
+						user identified by the popa_user_id
+						is authorised to access the file, then
+						the metadata server returns the true
+						filehandle (as returned by LOOKUP and/or
+						OPEN) of the file.
+					</t>
+					<t>
+						If the pNFS client does not currently hold
+						a layout for this file, then the PROXY_OPEN
+						request should fail with the error
+						NFS4ERR_PNFS_NO_LAYOUT.
+					</t>
+					<t>
+						If the data server filehandle argument cannot
+						be translated into a valid metadata server
+						filehandle, then the errors NFS4ERR_STALE,
+						NFS4ERR_BADHANDLE, or NFS4ERR_FHEXPIRED should
+						be returned, as appropriate.
+					</t>
+					<t>
+						If the stateid argument does not correspond to a valid
+						open stateid, delegation stateid, or lock stateid, for
+						the file that is being attempted READ, then the metadata
+						server should return the appropriate error.
+					</t>
+					<t>
+						In case of success, the metadata server returns a stateid
+						"popr_proxy_stateid" that is used by the CB_PROXY_REVOKE
+						callback to identify which layout is being revoked.
+					</t>
+				</section>
+			</section>
+		</section>
+		<section title="New callback operations">
+			<section title="CB_PROXY_REVOKE - revoke proxy access rights to a file">
+				<t>
+					This takes a data server filehandle, and a
+					proxy open stateid, and revokes them.
+				</t>
+				<section title="ARGUMENTS">
+					<figure><artwork>
+  struct CB_PROXY_REVOKE4args {
+        nfs_fh4         pra_object;
+        stateid4        pra_proxy_stateid;
+  };
+					</artwork></figure>
+				</section>
+				<section title="RESULTS">
+					<figure><artwork>
+  struct CB_PROXY_REVOKE4res{
+        nfsstat4        prr_status;
+  };
+					</artwork></figure>
+				</section>
+				<section title="DESCRIPTION">
+					<t>
+						pra_object is the data server filehandle
+						for the file, whereas pra_proxy_stateid is the
+						stateid that was returned by the PROXY_OPEN
+						operation.
+					</t>
+					<t>
+						Upon receiving this callback, the data server
+						MUST invalidate all state associated with the
+						stateid pra_proxy_stateid, and return NFS4_OK.
+					</t>
+					<t>
+						If the filehandle was not found, the client MUST
+						return NFS4ERR_BADHANDLE. If the stateid was
+						not found, it MUST return NFS4ERR_BAD_STATEID.
+					</t>
+				</section>
+			</section>
+		</section>
+	</middle>
+	<back>
+		<references>
+			<reference anchor="RFC2119">
+				<front>
+					<title>
+						Key words for use in RFCs to Indicate Requirement Levels
+					</title>
+					<author initials="S." surname="Bradner" fullname="S. Bradner">
+						<organization abbrev="Harvard University">
+							Harvard University
+						</organization>
+					</author>
+				</front>
+				<seriesInfo name="RFC" value="2119" />
+			</reference>
+			<reference anchor="draft-ietf-nfsv4-minorversion1-29">
+				<front>
+					<title>
+						NFS Version 4 Minor Version 1
+					</title>
+					<author initials="S." surname="Shepler" fullname="S. Shepler">
+						<organization abbrev="Speedstor">
+							Speedstor
+						</organization>
+					</author>
+					<author initials="M." surname="Eisler" fullname="M. Eisler">
+						<organization abbrev="NetApp">
+							NetApp
+						</organization>
+					</author>
+					<author initials="D." surname="Noveck" fullname="D. Noveck">
+						<organization abbrev="NetApp">
+							NetApp
+						</organization>
+					</author>
+				</front>
+				<seriesInfo name="draft-ietf-nfsv4-minorversion1" value="29"/>
+			</reference>
+			<reference anchor="draft-williams-rpcsecgssv3">
+				<front>
+					<title>
+						Remote Procedure Call (RPC) Security Version 3
+					</title>
+					<author initials="N." surname="Williams" fullname="N. Williams">
+						<organization abbrev="Sun">
+							Sun
+						</organization>
+					</author>
+				</front>
+				<seriesInfo name="draft-williams-rpcsecgssv3" value="00"/>
+			</reference>
+		</references>
+	</back>
+</rfc>

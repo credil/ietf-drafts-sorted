@@ -1,0 +1,896 @@
+
+
+
+Internet Engineering Task Force                            P. Montessoro
+Internet-Draft                                             R. Bernardini
+Expires: December 24, 2012                                         UniUD
+                                                           June 22, 2012
+
+
+              REBOOK: a Network Resource Booking Algorithm
+                       draft-montessoro-rebook-00
+
+Abstract
+
+   This document describes REBOOK, a resource reservation algorithm for
+   deterministic and fast dynamic resource allocation and release.
+   Based on a stateful approach, it handles faults and network errors,
+   and recovers from route changes and unexpected flows shutdown.  The
+   distributed scheme used to store flows information have guaranteed
+   constant complexity.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on December 24, 2012.
+
+Copyright Notice
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012              [Page 1]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+   described in the Simplified BSD License.
+
+   This document may contain material from IETF Documents or IETF
+   Contributions published or made publicly available before November
+   10, 2008.  The person(s) controlling the copyright in some of this
+   material may not have granted the IETF Trust the right to allow
+   modifications of such material outside the IETF Standards Process.
+   Without obtaining an adequate license from the person(s) controlling
+   the copyright in such materials, this document may not be modified
+   outside the IETF Standards Process, and derivative works of it may
+   not be created outside the IETF Standards Process, except to format
+   it for publication as an RFC or to translate it into languages other
+   than English.
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  REBOOK Description . . . . . . . . . . . . . . . . . . . . . .  6
+     2.1.  Message transport and format . . . . . . . . . . . . . . .  6
+     2.2.  Node behaviour . . . . . . . . . . . . . . . . . . . . . .  7
+       2.2.1.  Start-up . . . . . . . . . . . . . . . . . . . . . . .  7
+       2.2.2.  Keep-Alive . . . . . . . . . . . . . . . . . . . . . .  8
+       2.2.3.  Data transmission  . . . . . . . . . . . . . . . . . .  9
+       2.2.4.  Reservation update . . . . . . . . . . . . . . . . . .  9
+       2.2.5.  Path change  . . . . . . . . . . . . . . . . . . . . .  9
+       2.2.6.  Shutdown . . . . . . . . . . . . . . . . . . . . . . . 10
+     2.3.  Commands . . . . . . . . . . . . . . . . . . . . . . . . . 10
+     2.4.  Router behaviour . . . . . . . . . . . . . . . . . . . . . 11
+       2.4.1.  On reception of a RESV request . . . . . . . . . . . . 11
+       2.4.2.  On reception of a data packet with the reference
+               field  . . . . . . . . . . . . . . . . . . . . . . . . 12
+       2.4.3.  On reception of a KPALV request  . . . . . . . . . . . 12
+       2.4.4.  On reception of a UP_RESV request  . . . . . . . . . . 13
+       2.4.5.  On reception of a RL_RESV request  . . . . . . . . . . 13
+       2.4.6.  Checking packet validity . . . . . . . . . . . . . . . 13
+   3.  Using the IP Router Alert field  . . . . . . . . . . . . . . . 14
+   4.  Session Timeout  . . . . . . . . . . . . . . . . . . . . . . . 14
+   5.  What is a resource?  . . . . . . . . . . . . . . . . . . . . . 15
+   6.  Security consideration . . . . . . . . . . . . . . . . . . . . 15
+   7.  IANA considerations  . . . . . . . . . . . . . . . . . . . . . 15
+   8.  References . . . . . . . . . . . . . . . . . . . . . . . . . . 15
+     8.1.  References . . . . . . . . . . . . . . . . . . . . . . . . 15
+     8.2.  Informative References . . . . . . . . . . . . . . . . . . 16
+
+
+
+
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012              [Page 2]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+1.  Introduction
+
+   A large number of applications prefer UDP as a transport protocol.
+   Among others, teleconferencing, streaming applications, real-time
+   communications, and networked multiplayer games; more generally,
+   applications whose information value and perceived quality strictly
+   relies on network delay, and also multi-cast services.  Dynamics of
+   network load can impact negatively on multimedia applications;
+   however, UDP doesn't offer any native congestion control mechanism
+   and therefore it cannot guarantee Quality of Service (QoS).  In
+   addition, congestion is often caused by these applications' high
+   bandwidth requirements.
+
+   On the other side, TCP provides a congestion control mechanism based
+   on message loss only, without any explicit knowledge about the
+   traffic load in intermediate network nodes along the communication
+   path.  Therefore, both UDP and TCP sources need to be enhanced with a
+   congestion control algorithm not only aimed at reducing loss rate and
+   improving bandwidth utilization, but also at improving fairness
+   towards competing connections while satisfying related QoS
+   requirements.  UDP flows should become TCP-friendly whereas UDP and
+   TCP flows should both become aware of network load in order to adjust
+   their transmission rate before losing packets.
+
+   In the last years, several methods have been introduced for QoS
+   control mechanisms, mainly based on adapting the sender's
+   transmission rate in accordance with the network congestion state
+   (see Sect. 2), but typically with such approaches no QoS guarantees
+   can be made effectively.  The proposed algorithm, that we call
+   REBOOK, allows a control protocol to prevent congestion by reserving
+   enough resources for supporting a dynamically changing QoS level in
+   advance, therefore it would be the most straightforward approach to
+   manage the problem.
+
+   It must be outlined that REBOOK is not dependent on TCP/IP protocols,
+   as it can be used in any other packet switching network.  Obviously,
+   in the following the Internet and the TCP/IP protocol suite will be
+   used as reference environment for its description.
+
+   REBOOK requires a hosting protocol to carry the algorithm's messages.
+   They can be handled by a dedicated signalling protocol, like RSVP
+   [RFC2205] or a new ad hoc protocol, or it can be embedded in a data
+   transport protocol, like TCP using the options field.
+
+   REBOOK is designed to handle virtually every transport-layer
+   connection or application-layer flows, not necessarily in real-time
+   or QoS only.  In principle, except for very short flows the network
+   may benefit from the preventive declaration (and the consequent
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012              [Page 3]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+   resource booking) of the amount of traffic that each connection is
+   going to generate: if the application knows the amount of granted
+   resources in advance, it can modulate the data transmission rate to
+   prevent packet loss.
+
+   REBOOK implementation will bring to a sender-oriented protocol,
+   unlike RSVP which is receiver oriented.  The node initiating a
+   connection is responsible for resource reservation request, based on
+   the amount and type of data to be transmitted, application
+   constraints and, possibly, SLA (Service Level Agreement) parameters.
+   While the connection is active the amount of granted resources may be
+   reduced to allow the activation of new flows in an almost-congested
+   network or may be increased if switching nodes become less loaded.
+   These events are acknowledged by the sender that will consequently
+   adapt its transmission rate.  RSVP is receiver-oriented mainly
+   because it is designed to support single-cast and multi-cast flows as
+   well.
+
+   REBOOK does not rely on any special network feature: it works even if
+   only part of the network is REBOOK-aware as the resource reservation
+   is effective even if part of a flow traverses unaware routers.  There
+   are no special requirements to routing, which can be asymmetrical
+   (transmitting and receiving flows can follow different paths),
+   except, obviously, its stability: in normal conditions data packets
+   and control messages must follow the same route for the duration of
+   the connection.  Anyhow, if unexpected events occur, REBOOK
+   identifies route changes and recovers from errors and faults in the
+   network.
+
+   REBOOK does not rely on special hardware in routers either.  Its
+   status storage scheme allows direct access to table entries without
+   any hardware look-up feature, simply using conventional memory
+   architecture.  This makes its implementation faster and cheaper than
+   today's typical solutions provided by hardware hashing.  Finally,
+   REBOOK does not require any improvement in the switching fabric.  No
+   additional memory for queues and buffers nor different packet
+   handling.  On the contrary, the router architecture will drive the
+   resource granting phase, depending on available resources left after
+   previous reservations.
+
+   It is worth observing that REBOOK is not another virtual circuit
+   technique; it is an add-on to conventional routers to improve
+   performance and features.  For example, it does not require any
+   interaction with the routing protocols; it can work along routes
+   traversing several Autonomous Systems and routers using different
+   routing protocols; it does not require to be supported by all the
+   routers along the path nor for the supporting routers to be
+   contiguous; it does need neither hierarchy nor partitioning.  In
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012              [Page 4]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+   respect of existing virtual circuit techniques, the novelty consists
+   in making each router autonomous in handling its REBOOK data
+   structures and the effects that routing dynamics have on them,
+   without any routing-aware signalling protocol.  All these features
+   overcome most of the difficulties that limit a wide deployment of
+   MPLS or ATM, for example.  Moreover, in case of routing instability
+   or faults, REBOOK can fail in enhancing router performance, but
+   packets are still forwarded in a best-effort, lookup-driven mode.
+
+   REBOOK is scalable since its computational cost is constant,
+   regardless of the number of active flows, yielding a solution to per-
+   flow resource reservation and packet handling, without the need of
+   aggregations.  Moreover, it is intrinsically secure since each router
+   uses only the information generated in a previous phase by itself,
+   allowing any form of fast and secure symmetrical cryptography without
+   the need of a key exchange.
+
+   REBOOK is based on a distributed linked data structure in the sense
+   that it makes use of pointers to memory locations or indexes to table
+   entries containing information stored in the routers that are very
+   likely to be accessed in the future.  Unlike conventional linked data
+   structures, pointers are not stored within the router they address,
+   but in the end nodes, in the packets, and in adjacent routers.  When
+   a packet is received by a router, the pointer to the table entry to
+   be used for its processing is found in the packet itself and look-up
+   procedures are avoided.  To keep the pointers consistent in a dynamic
+   environment, where route changes may send packets to routers
+   different than the ones the pointers refer to, a specific integrity
+   check is adopted.  It makes REBOOK completely autonomous in
+   identifying faults, errors and route changes.  The overhead
+   introduced by this integrity check is a critical issue.  Thanks to
+   careful design of the distributed linked data structure, experimental
+   data demonstrate that this overhead is overcome by the speedup
+   provided by the look-up-free access to table entries.
+
+   REBOOK is a soft state algorithm.  Reservations no longer refreshed
+   by keep-alive messages (due to errors, route changes or end node
+   faults) are removed by a low priority table cleanup task active in
+   the routers.  This is the only part of the algorithm whose cost is
+   linear in the number of active flows, instead of constant.  However,
+   the experimental results in [rebook] report 100 ms CPU time to handle
+   a 10,000,000 flows RR table, and in current implementation this
+   procedure is activated every 15 s.  Thanks to this procedure and to
+   the consistency check, REBOOK messages are not required to be
+   acknowledged.
+
+   Summarizing, the main features of REBOOK are
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012              [Page 5]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+   Soft state:  Reservations not refreshed by keep-alive messages are
+      automatically removed.
+
+   Scalability:  The computational cost for routing and connection
+      handling is constant with the number of active flows.  The only
+      cost that grows linearly with the number of active flows is the
+      removal of expired session, but experimental data shows that this
+      is negligible.
+
+   Consistency checks:  Routers can easily check (in constant time) if
+      the received packet is actually a valid REBOOK-related packet.
+      This makes it possible for routers to identify faults, errors and
+      route changes.
+
+   Safety:  Each router uses only the information generated in a
+      previous phase by itself, this makes it possible to use efficient
+      cryptographic protection techniques.
+
+2.  REBOOK Description
+
+   In a REBOOK setup there is a _source node_ that wants to reserve
+   resources to send data to a _target node_ with a guaranteed quality
+   of service.  Before beginning the streaming, the source node reserves
+   the required resources by sending REBOOK requests to the target node.
+   The intermediate REBOOK-capable routers will analyze the REBOOK
+   requests and assign resources to the newly opened connection.  This
+   section describes the details of the interaction between the source
+   node, the target node and the intermediate routers.
+
+2.1.  Message transport and format
+
+   It is worth emphasizing that REBOOK is not a protocol, but an
+   algorithm for resource reservations that can be "embedded" in many
+   different protocol.  Because of this, we do not specify format for
+   REBOOK requests or how they are transmitted over the network, leaving
+   the choice of those details to the application employing REBOOK.
+   This is similar to what it is done in other protocols like TFRC (TCP-
+   Friendly Rate Control [RFC5348]) that requests that the source node
+   will send some data (e.g., estimated RTT, timestamps, ...) to the
+   receiver and that the receiver will send back some feedback data
+   (e.g., loss probability), but it leaves open how those data are
+   embedded in the protocol employing TFRC.
+
+   About the way REBOOK requests are transported, we can observe that
+   there are two possible approaches
+
+   o  Via a specific protocol, "parallel" to the one used to stream the
+      data.
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012              [Page 6]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+   o  Piggy-backed to the data stream.
+
+   Both solutions are reasonable and the choice will be a matter of
+   convenience of the specific application.
+
+2.2.  Node behaviour
+
+   In this section we describe an overview of the behavior of the
+   different REBOOK nodes (source, target and routers).
+
+2.2.1.  Start-up
+
+   o  Suppose that a source node needs to stream data to the target
+      using a guaranteed QoS.  The node decides to reserve the required
+      resources using REBOOK.  Toward such a goal, the node sends a
+      REBOOK RESV request (see Section 2.3) to the target node.
+
+   o  The packet with the RESV request travels over the network, passing
+      through several routers.  If a router is REBOOK-capable, it
+      reserves the requested resources (if available) and update its
+      internal tables by adding an entry for the new stream(see
+      Section 2.4 for details).  If not enough resources are available,
+      the router can decide to reserve less than the required resource
+      amount and write this information in the request.
+
+   o  In order to be able to recover later the information about the
+      registered stream, the router appends to the RESV packet a
+      _reference_ to the new entry.
+
+         Although the "reference" written by the router can be thought
+         as the memory address of the entry associated with the stream,
+         it is worth emphasizing that a reference is used only by the
+         router that wrote it, so that, to the other nodes the reference
+         appears as an opaque string of bits.  This implies that the
+         reference is not constrained to be an actual address and that
+         the router can give it any meaning without compromising
+         interoperability.  For example, the reference could be an
+         _index_ to the table, possibly extended with some CRC and
+         encrypted to check for packet validity and improve security
+         (see Section 2.4.6).
+
+   o  The RESV request arrives to the target.  The RESV packet now
+      contains the amount of resources reserved along the path and the
+      list of table references added by the intermediate REBOOK-capable.
+      The target sends back to the source the received packet with a
+      RESV_ACK request (see Section 2.3).  Now the source knows the
+      amount of reserved resources and the reference list.
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012              [Page 7]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+2.2.2.  Keep-Alive
+
+   Periodically, starting right after receiving the RESV_ACK, the source
+   sends keep-alive KPALV requests to the target node.  The KPALV
+   request carries the following data
+
+   o  The amount of reserved resources
+
+   o  The list of table references inserted by the routers
+
+   When a router receives a KPALV message, first it checks if it is a
+   valid KPALV request relative to an already opened stream.  If the
+   check is positive
+
+   1.  It updates the amount of reserved resources.
+
+          In order to understand why this is necessary, consider the
+          following case: source S wants to send data to target T;
+          suppose that the canonical required bandwidth is 3 Mbit/s, but
+          that transmission can still be done with good enough quality
+          as soon as the bandwidth is at least 512 kbit/s (for example,
+          the source could encode the data at a lower quality).  Suppose
+          also that between S and T there are two routers A and B, the
+          latter with only 1 Mbit/s available.  When A processes the
+          RESV request, it has enough resources and decide to reserve 3
+          Mbit/s to S; however, since B has not enough bandwidth it
+          reserves only 1 Mbit/s to S. Note that A is wasting 2 Mbit/s,
+          since S will never be able to use more than 1 Mbit/s, but A
+          reserved 3 Mbit/s to S. However, since the KPALV packet sent
+          by S will contain the amount of reserved resources, A can see
+          that only 1 Mbit/s will be used by S and will update
+          accordingly its tables.
+
+   2.  It stores in the table entry associated with the stream the
+       reference written by the next router.  See Section 2.4 for
+       details about how this value is used.
+
+   KPALV messages are expected to be received at regular intervals.  If
+   KPALV packets are not received for a time exceeding a threshold
+   (possibly depending on the path RTT), the router will suppose the
+   session expired and will release the reserved resources.
+
+   Finally, observe that the target usually ignores the KPALV packets,
+   unless there is a change in the reservation.  See Section 2.2.4 for
+   details.
+
+
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012              [Page 8]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+2.2.3.  Data transmission
+
+   In the simplest implementation of REBOOK, no special handling is
+   required for data packets.  The routers will access to the routing
+   tables in the usual way.
+
+   However, in order to speed-up the access to the table, avoiding the
+   look-up procedure, the source can include in every transmitted data
+   packet the reference value inserted by the first router.  (See
+   Section 2.4 for details about how this value is used.)  Since this
+   value must be used by the routers, the router must know (i) that the
+   packet belongs to a REBOOK stream and (ii) where the reference is
+   stored.  A possible solution, employing the IP Router Alert field
+   [RFC2113] is described in Section 3.
+
+2.2.4.  Reservation update
+
+   In some cases it could be necessary to update the resource reserved.
+   For example, in a video streaming application the user could decide
+   to receive a better quality (but more expensive) version of the
+   video, so the source needs to reserve more resources.  Another case
+   where it is necessary to update the reservation is when some routers
+   in the path are not REBOOK capable, so that their service is of best-
+   effort type.  If congestion at the non-REBOOK router happens, the
+   source detects it by using known congestion control procedures
+   (e.g.,TFRC [RFC5348]) and it can decide to update the reserved
+   bandwidth.  Finally, a third case is when a router receives a request
+   that cannot satisfy and it can decide to reduce the amount of
+   resources assigned to another node in order to satisfy the new
+   request.
+
+   In all those cases, the reservation can be changed by using a KPALV
+   request with the new reservation.  If the source wants to reduce the
+   allocated resources, it just generates the request with the new
+   allocation value; if an intermediate router wants to reduce the
+   reserved bandwidth, it will wait for the first KPALV packet to arrive
+   and it will update the reservation value in it.
+
+   When the target receives a KPALV packet with different resource
+   values, it sends to the source a PRL_ACK (see Section 2.3) with the
+   new values.
+
+   Finally, if the source desires to increase the reserved resources, it
+   can use the request UP_RESV (see Section 2.3).
+
+2.2.5.  Path change
+
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012              [Page 9]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+2.2.6.  Shutdown
+
+   When the transmission is concluded, the source can release the
+   reserved resources by sending a RL_RESV request.  This will cause the
+   intermediate routers to release the allocated resources.
+
+2.3.  Commands
+
+   RESV  Sent at the beginning of a session.  When it leaves the source
+      it contains the amount of required resources (R_req) and the
+      minimum admissible amount of resources (R_min) and the current
+      amount of reserved resources (R_curr), initialized to R_req.  The
+      request is modified by intermediate routers as follows
+
+      *  If the router cannot allocate R_curr resources, it writes in
+         R_curr the reserved amount of resources.
+
+      *  The router creates a new entry in its tables for the new stream
+         and append to the RESV request a "reference" to the new entry.
+
+   RESV_ACK  Sent by the target to the source when the target receives
+      the RESV requests.  Its payload stores the value of R_curr in the
+      received RESV request and the list of router references.
+
+   KPALV  Keep-alive request sent by the source to the target.  They
+      carry the values of R_min, R_req and R_curr, together with the
+      router references.  They are used, beside for keeping the
+      connection "hot" to that the routers release the resources, for
+      updating the resource reservation.  They are ignored by the target
+      node, unless the resource reservation has been changed.
+
+   PRL_ACK  Sent by the target to the source when a KPALV with changed
+      reservation is received.  Its payload stores the value of R_curr
+      in the received RESV request and the list of router references.
+
+   UP_RESV  Sent by the source to increase the amount of reserved
+      resources.  It is handled like a RESV request, with the difference
+      that the stream entry in the router tables must by already
+      present.
+
+   RL_RESV  Sent by the source at the end of the session.  The routers
+      will release the allocated resources and will remove the stream
+      entry from their tables.
+
+
+
+
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012             [Page 10]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+2.4.  Router behaviour
+
+   In this section we describe the expected behavior of a REBOOK-capable
+   router, with reference to a specific implementation.  It is clear
+   that the implementation details are mostly a private matter of the
+   router and that they can be changed as long as the router behavior
+   "seen" by the rest of the network does not change.
+
+   In the reference implementation chosen here the router uses two
+   tables
+
+   o  The usual _routing table_ mapping destinations to router ports
+
+   o  A _stream table_ addressed via the reference that the router
+      writes in the RESV packet.  Each entry of the table contains
+      information relative to the specific stream and it is expected to
+      contain at least
+
+      *  The current values of R_min, R_req and R_curr
+
+      *  The reference of the next router
+
+      *  The session expiration time T_exp.  If no KPALV packets are
+         received before T_exp, the session is considered expired and
+         the allocated resources released
+
+      *  A reference to the routing table pointing to the entry
+         associated with the target address.
+
+2.4.1.  On reception of a RESV request
+
+   When the router receives a RESV request
+
+   o  It creates a new entry in the stream table for the new stream.
+      Let REF be the reference to the new entry.  It look-ups the
+      routing information required for the stream and set the routing
+      table reference in the stream table entry accordingly.
+
+   o  It checks the amount of resources that it can allocate to the
+      stream and update the stream table accordingly.  If the allocated
+      resources are less the R_curr value in the RESV request, update
+      the RESV value to the actual amount of allocated resources.
+
+   o  It appends to the RESV request the value of REF and forward the
+      updated request to the next hop.
+
+
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012             [Page 11]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+2.4.2.  On reception of a data packet with the reference field
+
+   As explained in Section 2.2.3, the source can optionally include in
+   the data packet the reference belonging to the first router.  In this
+   case, when the router receives a packet that is marked as a REBOOK
+   packet
+
+   o  It checks for the packet validity.  This is done both for security
+      and for detecting events like route changes and faults.  The check
+      can be done in constant time by checking the REBOOK reference in
+      the packet, see Section 2.4.6 for details.  If the check is
+      positive, continue, otherwise the REBOOK reference is invalidated
+      and the packet is handled as a normal one.
+
+   o  By using the router reference field embedded in the packet, it
+      accesses the entry in the stream table.
+
+   o  It copies the router reference stored in the table in the
+      corresponding data packet field.  Note that in this way the next
+      REBOOK-capable router will find in the RRef field the reference
+      value that it wrote in the RESV packet during the setup phase.
+
+   o  It finds the corresponding entry in the routing table and forward
+      the packet toward the right output port.
+
+   o  Finally, note that the access to the table at constant cost allows
+      to implement new features, e.g., accounting and security controls.
+
+   Note that the operations above require a constant time, independent
+   on the number of entries in the stream table.
+
+2.4.3.  On reception of a KPALV request
+
+   When the router receives a KPALV
+
+   o  It checks for the packet validity.  This is done both for security
+      and for detecting events like route changes and faults.  The check
+      can be done in constant time by checking the REBOOK reference in
+      the packet, see Section 2.4.6 for details.  If the check is
+      positive, continue, otherwise discard the packet (GIUSTO?)
+
+   o  It finds the corresponding entries in the stream table.
+
+   o  It updates the expiring time T_exp of the session
+
+   o  If the value of R_curr in the KPALV request is lower than the
+      corresponding value stored in the table, it updates the table (and
+      release the corresponding resources too)
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012             [Page 12]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+   o  If the router lowered the resources assigned to the stream because
+      of some resource re-assignation, it update the R_curr value in the
+      KPALV request
+
+   o  The (possibly updated) KPALV request is forwarded to the next hop
+
+2.4.4.  On reception of a UP_RESV request
+
+   The behavior is similar to the case of reception of a RESV request,
+   with the difference that the stream must already have an entry in the
+   stream table
+
+2.4.5.  On reception of a RL_RESV request
+
+   When the router receives a RL_RESV
+
+   o  It checks its validity (see Section 2.4.6).  If the check is
+      positive, continue, otherwise discard the packet (GIUSTO?)
+
+   o  It deletes the entry associated to the stream from the stream
+      table and releases the associated resources.
+
+2.4.6.  Checking packet validity
+
+   For safety reasons, a router must check if the received REBOOK packet
+   is a valid one.  The check can be done by exploiting some
+   redundancies in the REBOOK structure
+
+   o  When a router receives for the first time a RESV request, it opens
+      a new entry in the stream table and initialize it with the data
+      stored in the request, including the FlowID, that is, the (source
+      address, target address) pair, where each address is, of course, a
+      (host address, port) pair.  When a data packet or a REBOOK request
+      is received, the router can check that the FlowID of the received
+      request matches the FlowID stored in the stream table.
+
+   o  If the router use only B <32 bits of the 32 bits of the reference,
+      it can use the remaining 32-B bits for the validity check.  A
+      possible approach is to fill the unused 32-B bits with parity bits
+      and encrypting the result.  The check for reference validity is
+      immediate and it is very difficult to forge a valid reference.
+      Note that since the reference value is an opaque 32-bit string for
+      the other nodes, this type of checks can be implemented privately
+      by the router without problems of interoperability.
+
+   o  Another low-cost validity check supposes that the free entries in
+      the stream table are organized in a linked list.  In this case the
+      router initializes the empty stream table by joining its entries
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012             [Page 13]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+      in random order, making unpredictable the order the entries will
+      be used by the router.  Moreover, in order to avoid a fast reuse
+      of the same entry, released entries can be inserted at the end of
+      the free list, while allocated entries can be extracted from the
+      head.
+      In order to check the validity of the REBOOK packet, the router
+      can verify that the referenced entry is really used.
+
+3.  Using the IP Router Alert field
+
+   A possible solution to embed REBOOK information inside data packet is
+   to exploit the IP Router Alert field.  This will require the
+   allocation of a suitable code-point in the IANA maintained registry.
+   A REBOOK value in the IP Router Alert field will signal to the router
+   that the 32-bit reference value has been stored between the next
+   level protocol header and the data payload.
+
+4.  Session Timeout
+
+   As already explained, because of the soft state nature of REBOOK,
+   sessions that are not refreshed by keep-alive messages are considered
+   expired and their resources released.  An important issue is the
+   choice of the timeout interval: if it is too short, the source will
+   send many keep-alive packets, increasing the overhead; if it is too
+   long, the resources associated with a crashed session (i.e., a
+   session where the source crashed) can remain unavailable for a long
+   time (until the session expires), reducing the efficiency of the
+   router.  Note that it is important that the source knows the session
+   timeout, in order to choose the keep-alive frequency.
+
+   Some possible solutions about the choice of the session timeout are
+   the following
+
+   Fixed  The timeout value could be fixed by the protocol.  This is
+      maybe the simplest solution and it has the advantage of a low
+      overhead, but maybe is too rigid.
+
+   RTT based  The timeout could be fixed to a multiple of the round trip
+      time (RTT) between the source and the target.  The source would
+      send keep-alive packet with a frequency that depends on the RTT
+      and the expiration time should be long enough to keep in account
+      the probability that a keep-alive packet gets lost.  This overhead
+      of this solution is low.  It is important that the difference
+      between the RTT estimated by the router and the RTT estimated by
+      the source is small.
+
+
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012             [Page 14]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+   Timeout as a resource  With this approach the timeout is considered a
+      resource that can be negotiated by using the REBOOK mechanism (see
+      Section 5).  Therefore, the source will send its timeout request
+      in the RESV packet and the routers will change the timeout value
+      in the RESV request according to their needs.  Moreover, timeout
+      can be changed dynamically during the session by the usual REBOOK
+      procedure.  The drawback of this approach is that it introduces
+      overhead in the RESV and KPALV packets.  Note that with this
+      approach, the session timeout is the smallest among the timeouts
+      chosen by the routers.
+
+5.  What is a resource?
+
+   In this document we talked generically about "resources" to be
+   reserved, without describing in details what a resource is.
+   Typically one can expect bandwidth to be a negotiable resource, but
+   other types of resources are possible.  For example, the source could
+   want to improve the latency by assigning to the stream a higher
+   priority, so that the router will store the packets in a high-
+   priority queue.  Another example of possible resource is the session
+   timeout (see Section 4).  Depending on the application using REBOOK,
+   it could prove useful to keep the set of resources extensible, maybe
+   by using a Type-Length-Value format, so that routers that do not
+   recognize some resources can skip them.
+
+6.  Security consideration
+
+   To be written
+
+7.  IANA considerations
+
+   To be written
+
+8.  References
+
+8.1.  References
+
+   [RFC2113]  Katz, D., "IP Router Alert Option", RFC 2113,
+              February 1997.
+
+   [RFC2205]  Braden, B., Zhang, L., Berson, S., Herzog, S., and S.
+              Jamin, "Resource ReSerVation Protocol (RSVP) -- Version 1
+              Functional Specification", RFC 2205, September 1997.
+
+   [RFC5348]  Floyd, S., Handley, M., Padhye, J., and J. Widmer, "TCP
+              Friendly Rate Control (TFRC): Protocol Specification",
+              RFC 5348, September 2008.
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012             [Page 15]
+
+Internet-Draft                   REBOOK                        June 2012
+
+
+8.2.  Informative References
+
+   [rebook]   Montessoro, P. and D. Daniele, "REBOOK: A Deterministic,
+              Robust and Scalable Resource Booking Algorithm", J Netw
+              Syst Manage DOI 10.1007/s10922-010-9167-8, may 2010.
+
+Authors' Addresses
+
+   Pierluca Montessoro
+   University of Udine
+   Via delle Scienze 208
+   Udine  33100
+   Italy
+
+   Phone: +39-0432-55-8286
+   EMail: montessoro@uniud.it
+
+
+   Riccardo Bernardini
+   University of Udine
+   Via delle Scienze 208
+   Udine  33100
+   Italy
+
+   Phone: +39-0432-55-8271
+   EMail: riccardo.bernardini@uniud.it
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Montessoro & Bernardini  Expires December 24, 2012             [Page 16]
+

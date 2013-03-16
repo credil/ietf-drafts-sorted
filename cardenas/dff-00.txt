@@ -1,0 +1,729 @@
+
+
+
+Internet Engineering Task Force                              A. Cardenas
+Internet-Draft                                      Fujitsu Laboratories
+Intended status: Informational                               S. Cespedes
+Expires: September 9, 2011                        University of Waterloo
+                                                                 T. Iwao
+                                                         Fujitsu Limited
+                                                           March 8, 2011
+
+
+             Depth-First Forwarding in Unreliable Networks
+                         draft-cardenas-dff-00
+
+Abstract
+
+   Routing protocols are generally composed of two independent phases,
+   the control plane and the data forwarding plane.  The control plane
+   is responsible for route discovery and maintenance.  The data
+   forwarding plane performs a table lookup operation to set the packet
+   on the right path.  In unreliable networks, the routing process
+   incurs a large control overhead when is constantly repairing routes,
+   detecting loops, and finding alternate paths due to frequent link
+   failures.
+
+   This document describes the Depth-First Forwarding (DFF) protocol; a
+   data forwarding mechanism that can be used to minimize the burden and
+   control overhead of a control plane used in unreliable networks.  DFF
+   offers reliability and low control overhead by supporting in the data
+   plane loop detection, updates to the routing tables, and rerouting of
+   data packets through alternate paths.  DFF can be integrated with
+   different types of control plane mechanisms and can be used in mesh-
+   under and route-over specifications.  In this draft, we describe a
+   sample DFF implementation as a 6LoWPAN mesh-under data forwarding
+   protocol.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+
+
+Cardenas, et al.        Expires September 9, 2011               [Page 1]
+
+Internet-Draft                     DFF                        March 2011
+
+
+   This Internet-Draft will expire on September 9, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2011 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Cardenas, et al.        Expires September 9, 2011               [Page 2]
+
+Internet-Draft                     DFF                        March 2011
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  4
+     1.1.  Requirements notation  . . . . . . . . . . . . . . . . . .  4
+     1.2.  Terminology  . . . . . . . . . . . . . . . . . . . . . . .  4
+   2.  Protocol Overview  . . . . . . . . . . . . . . . . . . . . . .  5
+   3.  Hop-by-Hop Implementation Options  . . . . . . . . . . . . . .  5
+   4.  Depth-First Forwarding Operation . . . . . . . . . . . . . . .  6
+   5.  Message Formats  . . . . . . . . . . . . . . . . . . . . . . .  8
+   6.  Data Structures  . . . . . . . . . . . . . . . . . . . . . . .  9
+   7.  Acknowledgements . . . . . . . . . . . . . . . . . . . . . . . 10
+   8.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 10
+   9.  Security Considerations  . . . . . . . . . . . . . . . . . . . 10
+   10. Appendix A: Example Implementation of a Control Plane for
+       DFF  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 11
+   11. Appendix B: Implementing DFF without requesting new
+       dispatch bytes . . . . . . . . . . . . . . . . . . . . . . . . 11
+   12. Normative References . . . . . . . . . . . . . . . . . . . . . 12
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 12
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Cardenas, et al.        Expires September 9, 2011               [Page 3]
+
+Internet-Draft                     DFF                        March 2011
+
+
+1.  Introduction
+
+   Networks with dynamic links present a challenge for typical routing
+   protocols because the reliability of links may be different at the
+   time when the route was discovered, and at the time when data is
+   forwarded.
+
+   In these unreliable networks, the control overhead for detecting
+   routing errors and for fixing paths happens often, so it is important
+   to avoid expensive control plane mechanisms that might overreact in
+   the presense of instability.  Because a lightweight control plane
+   mechanism cannot guarantee the construction and maintenance of error-
+   free routes, a data forwarding protocol designed for these conditions
+   should be able to detect errors and find backup paths to survive link
+   failures.
+
+   This document describes Depth-First Forwarding (DFF), a data
+   forwarding mechanism that can detect loops, update the routing
+   tables, and reroute data packets via alternate paths.  DFF is
+   compatible with light-weight control plane mechanisms supporting
+   routing tables that maintain more than one possible next hop for each
+   final destination.
+
+1.1.  Requirements notation
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in [RFC2119].
+
+1.2.  Terminology
+
+   Readers are expected to be familiar with all the terms and concepts
+   that are discussed in "Transmission of IPv6 Packets over IEEE
+   802.15.4 Networks" [RFC4944].
+
+   Other terms used:
+
+   Final Destination: This is the final destination of the data packet
+   within the mesh network.
+
+   Local destination: The local destination of the data packet refers to
+   the next-hop neighbor to which the packet is forwarded on its way to
+   the final destination.
+
+   Originator: This is the source node that created the 6lowpan data
+   packet.
+
+
+
+
+
+Cardenas, et al.        Expires September 9, 2011               [Page 4]
+
+Internet-Draft                     DFF                        March 2011
+
+
+2.  Protocol Overview
+
+   DFF is a data forwarding strategy responsible for loop detection,
+   choosing alternate next hops, and updating the cost metrics in the
+   routing tables to reflect information gathered by forwarding data
+   packets.
+
+   DFF is intended to work in a network where nodes maintain proactively
+   a routing table with multiple candidate next hops for each final
+   destination.  An example of a control plane satisfying these
+   conditions is described in the Appendix.
+
+   DFF provides an advantage in networks where the reliability of links
+   changes rapidly.  It assumes that the control plane mechanism cannot
+   guarantee up to date routing tables, nor the absence of loops.
+   Therefore, whenever a data packet is forwarded, DFF can keep a data
+   packet identifier to detect loops, update routing tables if a loop is
+   detected, and use alternate paths to reroute the packet around the
+   failed path.
+
+   DFF achieves this functionality by implementing a distributed depth-
+   first search over the network graph as defined by the routing table.
+   If the routing tables are up to date, the search will only involve
+   the default route.  However, if the routing table is not up to date
+   and forwarding of a data packet results in a loop, or if the link
+   layer fails to successfully transmit the packet to the next hop, the
+   data packet is then sent to an alternate next hop neighbor.  A
+   distributed depth-first search mechanism is implemented in order to
+   keep track of the nodes that have participated in the forwarding of
+   the data packet.
+
+   Although DFF can be used without a control plane by performing a
+   blind (i.e., without a routing table) depth-first search of the
+   network, this configuration will incurr in increased latency because
+   data packets are forwarded by intermediate nodes to a random next-hop
+   neighbor.  Therefore, it is recommended to implement DFF in
+   combination with a proactive control plane protocol, in order to
+   efficiently guide the depth-first search by using information stored
+   in the routing tables.
+
+
+3.  Hop-by-Hop Implementation Options
+
+   While DFF can be used in a route-over or mesh-under protocol, this
+   document provides a sample implementation of a mesh-under forwarding
+   solution for 6LoWPAN networks; therefore, all addresses referenced in
+   this document are either 16-bit short or EUI-64 link layer addresses.
+
+
+
+
+Cardenas, et al.        Expires September 9, 2011               [Page 5]
+
+Internet-Draft                     DFF                        March 2011
+
+
+   DFF requires the use of hop-by-hop options, and this document
+   describes how these hop-by-hop options can be implemented by
+   allocating a new dispatch byte from the reserved values for mesh
+   forwarding in [RFC4944].
+
+   To avoid the request of a new dispatch byte, the appendix describes a
+   way to implement DFF by overloading the fragmentation header in
+   [RFC4944].  This implementation has the advantage of using headers
+   already defined by the standard; however, the implementation by
+   overloading the fragmentation header only allows rerouting a packet
+   on loop detection and not when a link fails.  The reason behind this
+   loss of functionality is that rerouting when a link fails requires
+   the use of a duplicate flag in the header of the packet.  This is a
+   hop-by-hop option that can be dynamically updated by intermediate
+   nodes, and the fragmentation header of [RFC4944] cannot be changed by
+   intermediate nodes.
+
+   Similarly, a route over implementation of DFF would need to obtain
+   new fields in the hop-by-hop options of IPv6 packets.
+
+
+4.  Depth-First Forwarding Operation
+
+   The operation procedure described in this section relies on the
+   existence of a routing table in every node.  This table SHOULD be
+   filled by a proactive control plane that stores multiple candidate
+   next hops for final destinations.  An example of a proactive distance
+   vector control plane that could be integrated to DFF is provided in
+   the Appendix.
+
+   In order for an Originator to send packets based on depth-first
+   forwarding, it encapsulates the data packet using the standard mesh
+   header defined in [RFC4944] and the DFF mesh header (Figure 1).  The
+   DFF mesh header is employed to detect loops and reroute packets in
+   the forwarding path.  The Originator then checks the routing table to
+   select the next hop with the lowest cost to reach the destination.
+   Before forwarding the packet, an entry is created in the loop
+   detection table (Figure 2), where information such as the
+   Originator's address, data packet identifier, previous hop (it points
+   to the node itself when the node is the Originator of packet), and
+   the selected next hop are stored.
+
+   Upon reception of a data packet at an intermediate node (which might
+   be the Originator if there is a loop in the path), the node checks if
+   an entry with the same (Originator,DID) exists in the loop detection
+   table.  If there is no such entry, intermediate nodes SHOULD create a
+   new entry in a similar way to that described for the originator of
+   the data packet; however, in the Previous hop field, they store the
+
+
+
+Cardenas, et al.        Expires September 9, 2011               [Page 6]
+
+Internet-Draft                     DFF                        March 2011
+
+
+   address of the router from which the packet was received.  After the
+   entry has been created in the loop detection table, the node forwards
+   the packet to the selected candidate next hop.
+
+   For those cases in which an entry already exists in the loop
+   detection table, the node checks which one was the last attemped
+   node, and poisons the routing table entry that uses that particular
+   node to reach the destination.  By poisoning failed paths, DFF
+   updates the routing table based on the results from the data plane.
+   Then, in order to reroute the data packet, the node selects a new
+   next hop among the list of candidates stored in the routing table.
+   The selected node MUST not be registered as a previous attempt in the
+   list of attempted neighbours in the loop detection table.  I also
+   MUST be a different node from that registered in the Previous Hop
+   field.  In this way, DFF effectively makes data forwarding with loops
+   a depth-first search guided by the routing table stored in each node.
+
+   If the node has attempted all the candidate next hops, then the
+   packet is returned to Previous Hop. If the Previous hop address is
+   the same address of the current node, that means the node is the
+   originator of the packet.  If in addition, the node has already
+   attempted all next-hop options, this means that routing has failed;
+   therefore, the originator must drop the packet and delete the entry
+   in the loop table.
+
+   In addition to rerouting packets when a loop is detected, nodes
+   reroute packets when the link layer fails to receive ACK from the
+   neighbor they sent the data packet to.  As soon as the link layer
+   gives up on the transmission, DFF proceeds to reroute the packet
+   through a different candidate.  In this case, nodes set a duplicate
+   detection flag in the DFF mesh header, identifying whether or not the
+   packet is a potential duplicate.  Duplicate packets can appear in the
+   network when the link layer reports a failed transmission due to a
+   failed reception of ACKs from the recipient of the packet.  This
+   situation may appear on links that are lossy only in one direction.
+
+   Duplicate packets do not alter the depth-first search logic: if a
+   packet with a duplicate flag is received by a node who has already
+   sent a packet with the same (Originator,DID) to Next Hop n (Last Next
+   Hop attempted), it assumes that this resulted in a loop, and the node
+   then attempts to reroute the packet to Next Hop n+1 (if available),
+   or to send it back to Previous Hop if no other candidate next hop are
+   available.  This, however, may be a false loop detection, therefore
+   the node does not poison entries in the routing table whenever the
+   forwarded packet has the duplicate flag activated.
+
+   For packets encapsulated according to [RFC4944] that do not include a
+   DFF mesh header, the DFF node processes them with a simple forwarding
+
+
+
+Cardenas, et al.        Expires September 9, 2011               [Page 7]
+
+Internet-Draft                     DFF                        March 2011
+
+
+   mechanism that selects the next hop with the lowest cost to reach the
+   final destination.  In this case, the node does node create any
+   entries in the loop detection table, and it does not attempt to
+   reroute such packets through alternate paths.  This forwarding option
+   allows for the coexistence of DFF nodes with nodes that do not follow
+   the message formats defined in this document (Figure 1).  A 6lowpan
+   mesh header [RFC4944] is still required for the operation of this
+   basic forwarding mechanism.
+
+
+5.  Message Formats
+
+   This document assumes that multi-hop forwarding occurs in the
+   adaptation layer following the message format of [RFC4944].
+   [RFC4944] indicates that hop-by-hop processing headers with
+   additional mesh routing capabilities may be expressed by defining
+   additional headers that precede fragmentation or addressing headers.
+   Hence, all data packets to be forwarded using DFF MUST be preceded by
+   the standard mesh (L2) addressing header defined in [RFC4944], and
+   MAY be preceded by a header that identifies the data forwarding
+   mechanism (in this case DFF).
+
+   After these two headers, other LoWPAN headers such as hop-by-hop
+   options, header compression or fragmentation can also be included
+   before the actual payload.  (Figure 1) shows the mesh headers of a
+   data frame to be forwarded with DFF.
+
+                          1                   2                   3
+      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                   Mesh type and header
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |0 1|Mesh Forw|Flags|         DID             |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+                 Figure 1: Mesh Header for DFF data frames
+
+   Field definitions are as follows:
+
+   Mesh type and header:  The mesh (L2) addressing header and its
+      associated dispatch byte as defined in [RFC4944].
+
+   Mesh Forw:  is a 6-bit identifier that allows for the use of
+      different mesh forwarding mechanisms.  As specified in [RFC4944],
+      additional mesh forwarding mechanisms should use the reserved
+      dispatch byte values following LOWPAN_BCO; therefore, 01 SHOULD
+      precede Mesh Forw.  A possible value to use as a mesh forwarding
+      identifier based on the reserved ranges defined in [RFC4944] is
+
+
+
+Cardenas, et al.        Expires September 9, 2011               [Page 8]
+
+Internet-Draft                     DFF                        March 2011
+
+
+      010001.  In this case the dispatch byte would be 01010001.
+
+   Flags:  Bits in this field are used by DFF to set control flags. 0xx
+      means that this current packet is not a duplicate, and 1xx is used
+      to identify a potential duplicate.  The last two bits are reserved
+      to define possible new options for data forwarding.
+
+   DID:   This is Data Frame Identifier.  It is a sequence number
+      generated by the Originator.  The originator address concatenated
+      with the DID sequence number form an identifier of previously seen
+      data packets.
+
+
+6.  Data Structures
+
+   The loop detection option is based on the idea of storing the DID and
+   originator-ID of a data packet, so that if a packet containing the
+   same DID identifier and originator is received, DFF detects it as a
+   loop.
+
+   After the loop is detected, DFF follows a distributed depth-first
+   search for the destination through the candidate next hops kept in
+   the routing table.  In order to do a Depth-First search, nodes need
+   to keep a list of their children (i.e., the candidate next hops that
+   have been used to forward the packet), and the previous hop (the node
+   who sent the data packet for the first time to the current router).
+
+   A Loop Detection Table (Figure 2) needs to be kept by the nodes to
+   support the loop detection functionality.  The candidate next hop
+   field does not need to be pre-stored, it can be filled dynamically as
+   soon as the node attempts to send the packet to a next-hop neighbor.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Cardenas, et al.        Expires September 9, 2011               [Page 9]
+
+Internet-Draft                     DFF                        March 2011
+
+
+    +---------+-------------------------------------------------------+
+    |Parameter| Description                                           |
+    +---------+-------------------------------------------------------+
+    |(O,DID)  | Source Address concatenated with a sequential         |
+    |         | number. Used to identify previously seen data packets |
+    +---------+-------------------------------------------------------+
+    |Previous | Address of the router who sent the data packet for the|
+    |Hop      | first time to the current router. If forwarding fails,|
+    |         | return data packet to this router                     |
+    +---------+-------------------------------------------------------+
+    |TTL      | Time to live for the current DID entry                |
+    +---------+-------------------------------------------------------+
+    |Next Hop | First neighbor selected to forward the packet         |
+    | 1       |                                                       |
+    +---------+-------------------------------------------------------+
+    | ...     | ...                                                   |
+    +---------+-------------------------------------------------------+
+    |Next hop | Neighbor selected the k-th time                       |
+    | K       |                                                       |
+    +---------+-------------------------------------------------------+
+
+
+            Figure 2: Basic Elements of a Loop Detection Table
+
+
+7.  Acknowledgements
+
+   Ganesh Venkatesh, and Geoff Mulligan provided useful discussions
+   which helped shape this document.
+
+
+8.  IANA Considerations
+
+   This memo includes the request of a new dispatch byte to identify DFF
+   headers.  In the Appendix there is an implementation that avoids the
+   use of new dispatch bytes.
+
+
+9.  Security Considerations
+
+   The security of a mesh forwarding protocol depends on the integrity,
+   authentication, and confidentiality of the messages.  The security
+   mechanisms for protecting the network can be provided by link-layer
+   technologies.  Further details are presented in the Security
+   Considerations section of [RFC4944].
+
+
+
+
+
+
+Cardenas, et al.        Expires September 9, 2011              [Page 10]
+
+Internet-Draft                     DFF                        March 2011
+
+
+10.  Appendix A: Example Implementation of a Control Plane for DFF
+
+   There are many route discovery protocols compatible with DFF.  The
+   final selection of which control plane to use depends on the
+   particular constraints and requirements of the network.  For example,
+   if nodes have tight memory constraints and the network is large,
+   managing the size of the routing table is important.  Therefore, a
+   control plane that builds a network with a routing table that grows
+   at a slower rate than the size of the network--e.g., via hierarchical
+   routing, or clustering--is important.  If minimizing the routing
+   stretch of the network is a priority, then the control plane needs to
+   keep larger routing tables.
+
+   The only condition for a control plane in order to leverage an
+   implementation of DFF is that, nodes should maintain a number of
+   alternate routes, which are being advertised by multiple neighbors
+   and which can be used immediately if the selected route were to fail,
+   or if a loop is detected through a previous route.
+
+   While a number of routing protocols satisfy the above constraint,
+   they tend to include extra overhead for preventing loops or dealing
+   with routing inconsistencies or failures.  One of the primary goals
+   of DFF is to avoid the use of these extra control messages.  This
+   appendix presents a basic control plane compatible with DFF.
+
+   TBD.
+
+
+11.  Appendix B: Implementing DFF without requesting new dispatch bytes
+
+   DFF can be implemented as a full standard conforming to [RFC4944]
+   without requesting any new dispatch bytes.  In this way, nodes
+   implementing DFF can interoperate with other nodes that only
+   implement headers defined in [RFC4944].
+
+   A possible way to avoid the DFF mesh header is by overloading the
+   datagram_tag and datagram_offset fields of the fragmentation header
+   defined in [RFC4944].
+
+   Because each source maintains a sequence number for the datagram_tag,
+   and the datagram_offset can be used to differentiate between
+   fragmented packets with the same value in datagram_tag, the DID value
+   required by DFF can be generated by the concatenation of the
+   datagram_tag and datagram_offset values of a fragmented data frame.
+
+   Nonetheless, an implementation of DFF that avoids the request of a
+   new dispatch byte will prevent the use of flags, and without the
+   existence of a duplicate flag, duplicate packets will not be
+
+
+
+Cardenas, et al.        Expires September 9, 2011              [Page 11]
+
+Internet-Draft                     DFF                        March 2011
+
+
+   detected.  Therefore, it is RECOMMENDED that nodes that implement DFF
+   by using the datagram_tag and datagram_offset fields for storing the
+   DID value, do not reroute on link-layer ACK failures, but only on
+   loop detections.  In this case, all previously seen (Originator,DID)
+   values can be assumed to correspond to loop detections, and the
+   routing table cost to reach the final destination via the last
+   attempted neighbor can be safely poisoned, without the risk of
+   poisoning valid routes taken by duplicate packets.
+
+   This implementation of DFF assumes the existence of fragmentation
+   headers within the LoWPAN encapsulation.  This works well if data
+   packets are fragmented, but if the entire payload datagram fits
+   within a single 802.15.4 frame, then [RFC4944] states that the LoWPAN
+   encapsulation should not contain a fragmentation header.  However,
+   the use of a fragmentation header for a packet that does not need to
+   be fragmented should, in principle, not affect the operation of nodes
+   implementing [RFC4944].  Therefore, even if a packet does not need to
+   be fragmented, the originator node can append the fragmentation
+   header so DFF nodes can use it for extracting the DID identifier.
+
+   The control plane used to populate the routing tables can also avoid
+   the need to request a new dispatch byte by encapsulating routing
+   updates in UDP packets.
+
+
+12.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC4944]  Montenegro, G., Kushalnagar, N., Hui, J., and D. Culler,
+              "Transmission of IPv6 Packets over IEEE 802.15.4
+              Networks", RFC 4944, September 2007.
+
+
+Authors' Addresses
+
+   Alvaro A. Cardenas
+   Fujitsu Laboratories
+   1240 E. Arques Avenue, M/S 345
+   Sunnyvale, CA  94085
+   US
+
+   Phone: +1 408 530-4516
+   Email: alvaro.cardenas-mora@us.fujitsu.com
+
+
+
+
+
+
+Cardenas, et al.        Expires September 9, 2011              [Page 12]
+
+Internet-Draft                     DFF                        March 2011
+
+
+   Sandra Cespedes
+   University of Waterloo
+   200 University Ave. W.
+   Waterloo, ON  N2L 3G1
+   Canada
+
+   Phone: +1 (519) 8884567 x37448
+   Email: slcesped@bbcr.uwaterloo.ca
+
+
+   Tadashige Iwao
+   Fujitsu Limited
+   Fujitsu Kyushu R and D Center, 2-1, Momochihama 2-chome, Sawara-ku.
+   Fukuoka,
+   JP
+
+   Phone: +81-92-821-8030
+   Email: smartnetpro-iwao_std@ml.css.fujitsu.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Cardenas, et al.        Expires September 9, 2011              [Page 13]
+
+

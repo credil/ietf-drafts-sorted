@@ -1,0 +1,1064 @@
+
+
+
+Network Working Group                                         L. Miniero
+Internet-Draft                                                  Meetecho
+Intended status: Standards Track                          August 7, 2012
+Expires: February 8, 2013
+
+
+                  HTTP Fallback for RTP Media Streams
+                 draft-miniero-rtcweb-http-fallback-00
+
+Abstract
+
+   Almost all VoIP endpoints, especially SIP and RTCWEB ones, make use
+   of RTP to tranport media frames in real-time and communicate with
+   each other.  Since RTP uses UDP, the presence of network elements
+   that filter UDP packets and/or only allow some protocols like SMTP or
+   HTTP to pass through would make such a communication very hard to
+   accomplish, if not impossible.
+
+   This draft describes a way to implement an HTTP Fallback for RTP
+   media streams, that is, a way to effectively encapsulate RTP packets
+   in HTTP messages in order to traverse proxies and firewalls.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on February 8, 2013.
+
+Copyright Notice
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+
+
+
+Miniero                 Expires February 8, 2013                [Page 1]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Conventions and Terminology  . . . . . . . . . . . . . . . . .  7
+   3.  Encapsulating RTP over HTTP  . . . . . . . . . . . . . . . . .  8
+     3.1.  Reserving and managing HTTP fallback channels  . . . . . .  9
+     3.2.  MIME Type  . . . . . . . . . . . . . . . . . . . . . . . . 10
+     3.3.  Packet header  . . . . . . . . . . . . . . . . . . . . . . 11
+     3.4.  Chunked mode . . . . . . . . . . . . . . . . . . . . . . . 11
+     3.5.  Non-chunked mode . . . . . . . . . . . . . . . . . . . . . 12
+   4.  Negotiation and relation to ICE  . . . . . . . . . . . . . . . 13
+     4.1.  HTTP fallback candidates . . . . . . . . . . . . . . . . . 13
+   5.  Security Considerations  . . . . . . . . . . . . . . . . . . . 14
+   6.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 15
+   7.  Acknowledgments  . . . . . . . . . . . . . . . . . . . . . . . 16
+   8.  References . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+     8.1.  Normative References . . . . . . . . . . . . . . . . . . . 17
+     8.2.  Informative References . . . . . . . . . . . . . . . . . . 18
+   Author's Address . . . . . . . . . . . . . . . . . . . . . . . . . 19
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013                [Page 2]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+1.  Introduction
+
+   NAT Traversal for RTP streams has long been a matter of discussion
+   and research within the IETF.  This lead through the years to the
+   development of several solutions to address the issue, including
+   specifications like the Session Traversal Utilities for NAT (STUN)
+   [RFC5389], the Traversal Using Relays around NAT (TURN) [RFC5766] and
+   Interactive Connectivity Establishment (ICE) [RFC5245].
+
+   The above mentioned specifications have so far managed to enable
+   real-time multimedia communication between heterogeneous endpoints
+   located behind NATs and firewalls.  They are not effective, though,
+   whenever any of the involved endpoints is behind a particularly
+   restrictive network component, e.g., a web proxy or firewall that
+   only allows HTTP traffic to pass through.
+
+   While not a frequent scenario, this situation can nevertheless happen
+   often enough to become a serious impedement to real-time
+   communications for users who happen to experience it.  This is
+   especially true when envisaging RTCWEB scenarios, where users make
+   only use of their browser to place calls to their peers: within uch a
+   framework, it is reasonable for a user to assume that such a call
+   should be made possible in every possible deployment scenario,
+   including the above-mentioned particularly restrictive one.  In fact,
+   this very use case is explicitly addressed in the RTCWEB Use-cases
+   and Requirements [I-D.ietf-rtcweb-use-cases-and-requirements] draft.
+
+   This problem is not new, and as a matter of fact is not limited to
+   Voice over IP alone.  Several different protocol implementations have
+   faced the need to traverse such components, and many different
+   approaches have been attempted and deployed to make it possible.
+   According to the nature of the proxy/firewall in place, some
+   implementations have succeeded in traversing such elements by just
+   using TCP connections on ports 80 or 443 to reach their peers.  This
+   approach is especially needed whenever proxies allow HTTPS traffic to
+   go through, since most proxies don't act as MITM elements for HTTPS
+   and as such allow traffic on the 443 port to go through untouched.
+   While trivial, this approach is indeed effective when the firewall
+   simply applies a filter that only allows connections using port 80/
+   443 to pass through.  This approach, though, inevitably fails
+   whenever the filtering compoment also inspects the incoming packets
+   (e.g., a web proxy), since the traffic would immediately be
+   recognized as not HTTP.
+
+   An effective way to cope with such a use case is to implement an HTTP
+   fallback for RTP media streams: that is, a way to effectively
+   encapsulate, when needed, RTP packets in HTTP messages.  Such an
+   approach would help those streams traverse restrictive network
+
+
+
+Miniero                 Expires February 8, 2013                [Page 3]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+   components like web proxies and firewalls that only allow HTTP
+   traffic to pass through, even those who directly manage all HTTP
+   messages going by.
+
+   Considering the asynchronous nature of RTP, proper approaches need of
+   course to be taken to allow a mapping of RTP packets on HTTP
+   messages, especially considering the request/response nature of the
+   HTTP protocol itself.  As mentioned above, similar problems have been
+   addressed in the past, and in fact several different solutions have
+   been proposed in the past to implement a bidirectional behaviour in
+   HTTP, as documented in [RFC6202] and [RFC6455].  Besides,
+   specification of a native server-push behaviour is currently under
+   work in the HTTPBIS Working Group.
+
+   Within the context of real-time multimedia communications and
+   considering a scenario that involves two peers, whatever the
+   signalling protocol and whichever the bidirectional HTTP technology
+   being exploited, an HTTP fallback mechanism may fall in basically
+   three different network topologies:
+
+   1.  A topology whereas only one of the involved peers needs HTTP
+       fallback for RTP.
+
+   2.  A topology whereas both the involved peers need HTTP fallback for
+       RTP, using two different intermediaries.
+
+   3.  A topology whereas both the involved peers need HTTP fallback for
+       RTP, using the same intermediary.
+
+   Figure 1 describes the first topology: in this scenario, only one of
+   the involved peers (namely Alice) needs an HTTP fallback for her
+   media streams (e.g., because she's in a hotel where the deployed WiFi
+   connectivity makes use of a proxy that only allows web and mail
+   connections to pass through), while Bob does not.  In this case, Bob
+   is using a publicly reachable address or has likely managed to
+   traverse its NAT using one of the existing solutions.  Bob may or may
+   not be aware of the fact that he's sending RTP packets to a gateway:
+   what's important is that Alice is, and that she's sending her RTP
+   media packets using HTTP messages, and receiving the RTP packets Bob
+   sends here through HTTP messages as well.
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013                [Page 4]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+                       +----------+
+                       | RTP/HTTP |
+             +---------+ Gateway  +-----------------------+
+             |  HTTP   |          |                        \  RTP
+             |         +----------+                         \
+             |                                               \
+             |                                               |
+         +---+---+                                       +---+---+
+         | Alice |                                       |  Bob  |
+         +-------+                                       +---+---+
+
+
+
+          Figure 1: Topology 1.: HTTP fallback for just one peer
+
+   A slightly more complex scenario is described in Figure 2: in this
+   scenario, both the involved peers (Alice and Bob) need an HTTP
+   fallback for their media streams, meaning that both are sending and
+   receiving RTP packets to and from each other using HTTP messages.
+   Each one, though, sends HTTP messages to its own gateway, e.g., the
+   gateway deployed by their network operator.  The two gateways, who
+   most likely are deployed on publicly reachable addresses, send each
+   other Alice's and Bob's RTP packets using RTP to minimize the delay
+   and jitter.
+
+                   +-----------+           +-----------+
+                   | RTP/HTTP  |    RTP    | RTP/HTTP  |
+         +---------+ Gateway 1 +-----------+ Gateway 2 +---------+
+         |  HTTP   |           |           |           |   HTTP  |
+         |         +-----------+           +-----------+         |
+         |                                                       |
+         |                                                       |
+     +---+---+                                              +---+---+
+     | Alice |                                              |  Bob  |
+     +-------+                                              +---+---+
+
+
+
+            Figure 2: Topology 2.: HTTP fallback for both peers
+
+   Figure 3 presents a more specific use case as the one described in
+   Figure 3: both the involved peers (Alice and Bob) need an HTTP
+   fallback for their media streams as before, but this time they happen
+   to send HTTP messages to the same gateway: in this use case, how the
+   gateway decides to bridge the two media streams is entirely
+   implementation specific.  It is very important, though, that all the
+   characteristics of the original streams are preserved: this means,
+   for instance, that the gateway must still make sure that STUN
+
+
+
+Miniero                 Expires February 8, 2013                [Page 5]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+   connectivity checks that may be in place keep on flowing and act
+   accorgingly.
+
+                                +-----------+
+                                | RTP/HTTP  |
+         +----------------------+ Gateway   +--------------------+
+         |  HTTP                | (shared)  |              HTTP  |
+         |                      +-----------+                    |
+         |                                                       |
+         |                                                       |
+     +---+---+                                              +---+---+
+     | Alice |                                              |  Bob  |
+     +-------+                                              +---+---+
+
+
+
+     Figure 3: Topology 3.: HTTP fallback for both peers, same gateway
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013                [Page 6]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+2.  Conventions and Terminology
+
+   In this document, BCP 14/RFC 2119 [RFC2119] defines the key words
+   "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD",
+   "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL".
+
+   TBD.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013                [Page 7]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+3.  Encapsulating RTP over HTTP
+
+   As anticipated in Section 1, several different approaches have
+   already been proposed in the past to accomplish a bidirectional
+   behaviour in HTTP.  Some kind of approach like that is absolutely
+   needed whenever HTTP is used to carry something different than just
+   requests to access resources, e.g., encapsulating an asynchronous and
+   bidirectional protocol.  RTP makes no exception.  That said, in order
+   to minimize as much as possible the overhead caused by HTTP
+   encapsulation and thus at least try and limit the delay that
+   inevitably such a solution always adds, this specification tries to
+   propose a lighter approach than the one proposed in literature.
+   Since RTP packets can be either sent or received by an endpoint, this
+   specification makes use of two different HTTP kind of messages to
+   accomplish both the functionality:
+
+   o  HTTP GET messages to allow endpoints to receive RTP packets from
+      the gateway.
+
+   o  HTTP POST messages to allow endpoints to send RTP packets to the
+      gateway.
+
+   This means that each RTP media channel can be mapped to one or more
+   HTTP connections, whereas all GET messages will be associated with
+   the incoming RTP media stream, while all POST messages will be
+   associated with the outgoing RTP media stream.  Why more messages
+   and/or connections may be involved and not one per request will be
+   made clearer in the next sections.
+
+   Figure 4 describes how such a mapping can be achieved.
+
+
+     +-------+                 [ HTTP GET message(s): <<=== RTP ===<< ]
+     | Alice |<<==== RTP ====>>[
+     +-------+                 [ HTTP POST message(s): >>=== RTP ===>> ]
+
+
+            Figure 4: Mapping an RTP stream to HTTP connections
+
+   The next subsections will address all that is required to implement
+   such a functionality, that is, how to request/reserve a mapping as
+   depicted above, which MIME Type to report in the HTTP messages after
+   that, the header to use in the payload to properly frame RTP packets,
+   and two different approaches (chunked and not-chunked) to actually
+   transport the packets on top of HTTP messages.
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013                [Page 8]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+3.1.  Reserving and managing HTTP fallback channels
+
+   Before HTTP fallback can be used, endpoints must of course reserve or
+   request access to one of the available channels to their reference
+   gateway.  The same happens, for instance, when creating an allocation
+   request in TURN.
+
+   An endpoint can request an HTTP fallback channel by issuing an HTTP
+   POST message to the /reserve node on the gateway: if successfull, the
+   gateway will return a json object containing a unique identifier to
+   address the channel, and the public address the gatewayed RTP stream
+   will send from and receive on.  This unique identifier will need to
+   be used by the endpoint as the node to send all HTTP messages related
+   to that specific RTP media stream to.
+
+   Figure 5 shows an example of a /reserve message:
+
+        POST /reserve HTTP/1.1
+        Host: www.example.com
+        Cache-Control: max-age=0
+        User-Agent: cicciozzo
+        Content-Type: application/x-www-form-urlencoded;charset=UTF-8
+        Content-Length: 6
+
+        blabla
+
+
+        HTTP/1.1 200 OK
+        Date: Mon, 06 Aug 2012 15:04:40 GMT
+        Server: pippozzo
+        Content-Type: application/json
+        Content-Length: 64
+
+        {
+             "id" : "a1b2c3d4e5f6"
+             "ip" : "203.0.113.2"
+             "port" : "5000"
+        }
+
+                  Figure 5: Example of a /reserve message
+
+   In this example, the endpoint successfully requests an HTTP fallback
+   channel to its gateway, and the channel identifier is 'a1b2c3d4e5f6':
+   this means that all HTTP messages will have to be sent to the
+   /a1b2c3d4e5f6 node relatively to the gateway address.  Besides, the
+   endpoint now knows that the gateway will be bound to the public
+   address 203.0.113.2:5000 when relaying RTP packets: as explained in a
+   later section, this information can be used to add ICE candidates to
+
+
+
+Miniero                 Expires February 8, 2013                [Page 9]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+   the endpoint's SDP.
+
+   Before this channel can be used, of course, the address of the RTP
+   peer must be specified, or otherwise the endpoint will be stuck with
+   an unattached HTTP fallback for its RTP media stream.  Such a mapping
+   can be specified sending a POST message to the /<uniqueid>/setpeer
+   node on the gateway: the POST message MUST contain a JSON payload
+   formatted as the response from the /reserve (id of the channel, ip
+   and port of the RTP peer).
+
+   [Editors note: this is obviously just a placeholder mostly: what
+   should be in the reserve, setpeer and other messages that may need to
+   be added (pause/resume/stop/??) and in the related response needs to
+   be specified, e.g., in terms of what we want the channel to do for us
+   and how, or even authorization, access control and the like.
+   Besides, some kind of callback should be envisaged to inform the
+   endpoint whenever the gateway gets rid of a reserved channel for any
+   reason.]
+
+   Once an HTTP fallback channel is ready, the endpoint can start using
+   it to send and/or receive RTP packets to and from its peer through
+   the gateway.  As anticipated, to send RTP packets the endpoint MUST
+   issue an HTTP POST to the /<uniqueid> node relatively to the gateway
+   address.  Whether the endpoint and the gateway will relay on a
+   chunked transfer encoding or not, the query string in each request
+   MUST contain a 'p' variable that addresses the sequence of HTTP POST
+   messages that have been sent: that is, the first POST message MUST be
+   sent to /<uniqueid>?p=1, the second, no matter how delayed (e.g., a
+   second chunked message) to /<uniqueid>/?p=2 and so on, to allow the
+   receiver to properly order the received payload.  It is important to
+   point out that this sequence value has nothing to do with the RTP
+   sequence number: in fact, while RTP already envisages a sequence
+   number that allows the peer to reorder packets accordingly, this
+   sequence number is of no use when a single RTP packet is fragmented
+   across different HTTP requests.  The same approach MUST be followed
+   by the endpoint when receiving packets by means of GET messages: the
+   first POST message MUST be sent to /<uniqueid>?p=1, the second to
+   /<uniqueid>/?p=2 and so on.
+
+3.2.  MIME Type
+
+   Whenever an HTTP message carries a payload, a proper MIME type needs
+   to be specified in the Content-Type header.
+
+   [Editors Note: what would be the best choice here? a new MIME type
+   might be the right choice, especially since it would allow network
+   administrators to still have control over the encapsulated flows:
+   this solution doesn't need to be sneaky! a new MIME type, though, may
+
+
+
+Miniero                 Expires February 8, 2013               [Page 10]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+   also cause messages to be dropped or refused by intermediaries that
+   can't figure a way to deal with it: in this case, an existing MIME
+   type may be considered for the purpose.]
+
+3.3.  Packet header
+
+   While RTP headers may have extensions stating how long the header
+   will be, they do not contain any information about how long the
+   overall packet is.  Considering the streaming nature of TCP, this
+   information needs to be made available when RTP packets are
+   transported on top of HTTP instead: in fact, packets may be
+   fragmented along the way before reaching their destination, and both
+   the gateway and the endpoint must be able to univocally and without
+   errors extract the original RTP packets as they were sent in the
+   first place.  This is especially true when the chunked mode is used
+   in HTTP messages: as it will be explained in the next sections, in
+   fact, chunked messages may be buffered and/or re-chunked by
+   intermediaries, thus fragmenting the original RTP packets along the
+   way.
+
+   As such, whenever an RTP packet is encapsulated in an HTTP message,
+   before being written to the connection it MUST be prefixed by an
+   eight octets header, containing the static signature RTPH and the
+   length in bytes of the whole RTP packet (header and payload) in hex
+   code.
+
+   Figure 6 presents an example of an RTP packet (in this case, a simple
+   GSM frame with no extension headers) encapsulated in HTTP: the four-
+   octets header RTPH002D tells the RTP packet that immediately follows
+   is exactly 45 bytes long.
+
+         RTPH 002D [ .. 45 bytes follow .. ]
+
+
+         Figure 6: Header of an encapsulated RTP-over-HTTP packet
+
+3.4.  Chunked mode
+
+   The Chunked Transfer Coding as defined in [RFC2616] allows for a
+   payload to be sent in chunks.  Such a Transfer mode is usually
+   exploited whenever the size of the payload is not known in advance.
+   This is especially useful in streaming, as it allows for a persistent
+   connection and continuous transfer of chunks without needing to issue
+   further HTTP requests, thus minimizing the overhead imposed by HTTP
+   message headers, besides the delay that issuing new HTTP messages may
+   add.
+
+   Whenever possible, such a transfer coding mode should be tried and be
+
+
+
+Miniero                 Expires February 8, 2013               [Page 11]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+   exploited by both the endpoint and the gateway.  This means that the
+   endpoint MUST set the 'Transfer-Encoding: chunked' and 'Expect: 100-
+   continue' headers in the first RTP-related request it sends, be it a
+   GET and POST messages.  In case all of the intermediaries up to the
+   gateway support chunking, the endpoint MUST send RTP packets as
+   chunks.  Any possible buffering/re-chunking that may occur along the
+   path MUST be taken care of by the receiver according to the header
+   specified in Section 3.3.
+
+3.5.  Non-chunked mode
+
+   Unfortunately, not always the Chunked Transfer Coding can be used to
+   send and receive HTTP messages.  Any of the intermediaries may only
+   be an HTTP 1.0 compliant endpoint, or may arbitrarily choose to
+   reject chunked messages for any reason.  If that's the case, the
+   endpoint MUST fallback to the default transfer mechanism, that is,
+   issuing different requests for different RTP packets, increasing the
+   'p' sequence value accordingly.  Both the endpoint and the gateway
+   MAY choose to aggregate more RTP packets in the same message: in that
+   case, though, each RTP packet MUST be properly prefixed by the header
+   defined in Section 3.3, in order to allow framing.  Besides, the
+   endpoint MAY want to issue more HTTP connections in parallel and send
+   messages on them in turns.
+
+   Even in this mode, the endpoint SHOULD try to open a persistent
+   connection and keeping it alive for as long as possible: in case a
+   connection is closed and the endpoint wants to keep on using it, it
+   MUST open a new connection and send a new request coherently with the
+   related RTP stream direction (e.g., a GET for the incoming stream)
+   and the current sequence value.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013               [Page 12]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+4.  Negotiation and relation to ICE
+
+   While the previous sections describe how RTP packets can be carried
+   on top of HTTP messages, they tell nothing about how support for any
+   of those features can be negotiated.  Such a negotiation within the
+   context of an offer/answer is absolutely relevant, and can be related
+   to the ICE mechanism.  In fact, an HTTP fallback can be basically
+   seen as an additional candidate for endpoints to report to their
+   peers.
+
+   While it is likely that HTTP fallback will only be used in extreme
+   circumstances, that is, scenarios where the gathering of non-local
+   ICE candidates failed (e.g., because o UDP filtering), endpoints may
+   choose to also report HTTP fallback candidates in their SDP along the
+   other existing ones.
+
+4.1.  HTTP fallback candidates
+
+   As explained in Section 3.1, reserving an HTTP fallback channel
+   provides the endpoint with the public address the gateway will use to
+   send and receive RTP packets on behalf of the endpoint itself.  As
+   such, this address can be added to the list of ICE candidates (if
+   any) already gathered by the endpoint.  This allows both HTTP
+   fallback-aware and -unaware endpoints to interact with the gateway in
+   order to indirectly communicate with the endpoint.
+
+   [Editors Note: especially for topology 3, and considering TURN relays
+   have something like this, it may have sense to also explicitly report
+   an HTTP fallback somehow: how could this be reported as a candidate?
+   a new protocol in the list? would this affect backward
+   compatibility?]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013               [Page 13]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+5.  Security Considerations
+
+   TBD.: many, probably, and even more likely not less than the ones
+   TURN already reports.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013               [Page 14]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+6.  IANA Considerations
+
+   TBD.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013               [Page 15]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+7.  Acknowledgments
+
+   The authors would like to thank...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013               [Page 16]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+8.  References
+
+8.1.  Normative References
+
+   [I-D.ietf-rtcweb-use-cases-and-requirements]
+              Holmberg, C., Hakansson, S., and G. Eriksson, "Web Real-
+              Time Communication Use-cases and Requirements",
+              draft-ietf-rtcweb-use-cases-and-requirements-09 (work in
+              progress), June 2012.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC2616]  Fielding, R., Gettys, J., Mogul, J., Frystyk, H.,
+              Masinter, L., Leach, P., and T. Berners-Lee, "Hypertext
+              Transfer Protocol -- HTTP/1.1", RFC 2616, June 1999.
+
+   [RFC2818]  Rescorla, E., "HTTP Over TLS", RFC 2818, May 2000.
+
+   [RFC3261]  Rosenberg, J., Schulzrinne, H., Camarillo, G., Johnston,
+              A., Peterson, J., Sparks, R., Handley, M., and E.
+              Schooler, "SIP: Session Initiation Protocol", RFC 3261,
+              June 2002.
+
+   [RFC3264]  Rosenberg, J. and H. Schulzrinne, "An Offer/Answer Model
+              with Session Description Protocol (SDP)", RFC 3264,
+              June 2002.
+
+   [RFC3550]  Schulzrinne, H., Casner, S., Frederick, R., and V.
+              Jacobson, "RTP: A Transport Protocol for Real-Time
+              Applications", STD 64, RFC 3550, July 2003.
+
+   [RFC5245]  Rosenberg, J., "Interactive Connectivity Establishment
+              (ICE): A Protocol for Network Address Translator (NAT)
+              Traversal for Offer/Answer Protocols", RFC 5245,
+              April 2010.
+
+   [RFC5389]  Rosenberg, J., Mahy, R., Matthews, P., and D. Wing,
+              "Session Traversal Utilities for NAT (STUN)", RFC 5389,
+              October 2008.
+
+   [RFC5766]  Mahy, R., Matthews, P., and J. Rosenberg, "Traversal Using
+              Relays around NAT (TURN): Relay Extensions to Session
+              Traversal Utilities for NAT (STUN)", RFC 5766, April 2010.
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013               [Page 17]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+8.2.  Informative References
+
+   [RFC6202]  Loreto, S., Saint-Andre, P., Salsano, S., and G. Wilkins,
+              "Known Issues and Best Practices for the Use of Long
+              Polling and Streaming in Bidirectional HTTP", RFC 6202,
+              April 2011.
+
+   [RFC6455]  Fette, I. and A. Melnikov, "The WebSocket Protocol",
+              RFC 6455, December 2011.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013               [Page 18]
+
+Internet-Draft            HTTP Fallback for RTP              August 2012
+
+
+Author's Address
+
+   Lorenzo Miniero
+   Meetecho
+   Via Carlo Poerio 89
+   Napoli  80100
+   Italy
+
+   Email: lorenzo@meetecho.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Miniero                 Expires February 8, 2013               [Page 19]
+

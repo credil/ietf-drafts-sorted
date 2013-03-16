@@ -1,0 +1,448 @@
+
+
+
+Network Working Group                                     A. Yourtchenko
+Internet-Draft                                                   D. Wing
+Intended status:  Standards Track                                  cisco
+Expires:  August 25, 2011                              February 21, 2011
+
+
+         Revealing hosts sharing an IP address using TCP option
+                    draft-wing-nat-reveal-option-01
+
+Abstract
+
+   When an IP address is shared among several subscribers, it is
+   impossible to determine which subscriber has initiated that TCP
+   connection.  This memo describes a technique to share the identity of
+   a subscriber that initiated a TCP connection with the TCP server.
+   The proposed method avoids altering the application-level payload and
+   works well with SSL-protected connections.  It uses a new TCP option
+   for this purpose.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on August 25, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2011 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+
+
+
+Yourtchenko & Wing       Expires August 25, 2011                [Page 1]
+
+Internet-Draft     Connection Identity via TCP option      February 2011
+
+
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . . . 3
+   2.  Notational Conventions  . . . . . . . . . . . . . . . . . . . . 4
+   3.  Description . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+     3.1.  Operation of Address Sharing Device   . . . . . . . . . . . 4
+     3.2.  Operation of the TCP Server . . . . . . . . . . . . . . . . 5
+   4.  Option format . . . . . . . . . . . . . . . . . . . . . . . . . 5
+   5.  Interaction with TCP SYN Cookies  . . . . . . . . . . . . . . . 5
+   6.  Security Considerations . . . . . . . . . . . . . . . . . . . . 6
+   7.  Acknowledgements  . . . . . . . . . . . . . . . . . . . . . . . 7
+   8.  IANA Considerations . . . . . . . . . . . . . . . . . . . . . . 7
+   9.  References  . . . . . . . . . . . . . . . . . . . . . . . . . . 7
+     9.1.  Normative References  . . . . . . . . . . . . . . . . . . . 7
+     9.2.  Informative References  . . . . . . . . . . . . . . . . . . 7
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . . . 7
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yourtchenko & Wing       Expires August 25, 2011                [Page 2]
+
+Internet-Draft     Connection Identity via TCP option      February 2011
+
+
+1.  Introduction
+
+   There are several scenarios where it is valuable to know the identity
+   of a TCP client, including geolocation, DoS blocking, and spam
+   blacklists.  Historically, this has been done by equating IPv4
+   address with 'identity'.  However, the identity of a TCP client is
+   obscured when an IP address is shared I-D.ietf-intarea-shared-
+   addressing-issues [I-D.ietf-intarea-shared-addressing-issues].  IP
+   address sharing is done by both network address and port translators
+   (NAPT) and by application-layer proxies (e.g., HTTP or FTP proxies).
+
+   The current state of the art requires the address sharing alter the
+   application-level payload and include the identity of the internal
+   host -- usually the internal host's private IP address (e.g.,
+   X-Forwarded-For).  This incurs several drawbacks,
+
+   o  adjustment of TCP sequence numbers and acknowledgement numbers for
+      the duration of the TCP session
+
+   o  risk of false-positive application matching (e.g., accidentally
+      inserting an HTTP header into a non-HTTP payload).
+
+   o  interference with application payload by increasing packet size
+      (e.g., MTU)
+
+   With SSL-protected applications (e.g., HTTP CONNECT, https) the
+   current state of the art requires breaking the end-to-end encrypted
+   connection.  This results in several undesirable consequences:
+
+   o  necessity for the translator to break the end-to-end encryption,
+      typically by installing an addional Certificate Authority on the
+      client's CA trust list
+
+   o  noticeable increase in the processing power required on the
+      address sharing device to decrypt and re-encrypt that application
+      payload
+
+   This specification avoids the problems described above, and defines
+   the method of communicating the TCP client's identity to the TCP
+   server with a new TCP option to signal the internal IP address.  and
+   is an alternative submission compared to [the nat-reveal].
+
+   Some services on the Internet will react to TCP SYNs from certain IP
+   addresses, such as by filtering them entirely.  This is because
+   completing a 3-way handshake consumes resources and some attacks are
+   intended to consume resources; once the attacking source is
+   identified,  its connections attempts are ignored.  The mechanism
+   proposed in this paper allows a TCP server to continue to drop those
+
+
+
+Yourtchenko & Wing       Expires August 25, 2011                [Page 3]
+
+Internet-Draft     Connection Identity via TCP option      February 2011
+
+
+   incoming TCP SYN messages, even if they are from a device behing a
+   carrier's NAT or behind an application proxy.  Likewise, some
+   services need to perform database lookups when the TCP SYN arrives or
+   immediately after the 3-way handshake completes (and before
+   application data arrives).  This mechanism described in this document
+   allows such mechanisms to continue to function at their current speed
+   and efficiency.
+
+   This extension is necessary because IP address sharing will allow
+   malicious users to connect to IPv4-capable servers.  Thus, until a
+   server is only accessible via IPv6 (and inaccessible via IPv4), IPv4
+   servers will suffer from the inability to identify individual TCP
+   clients as discussed in I-D.ietf-intarea-shared-addressing-issues
+   [I-D.ietf-intarea-shared-addressing-issues].
+
+
+2.  Notational Conventions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC2119 [RFC2119].
+
+
+3.  Description
+
+   This proposal defines one new TCP option, CX-ID, to contain the
+   client's identifier -- which might be their IPv4 address, VLAN ID,
+   VRF ID, subscriber ID, or first half of their IPv6 address.  The
+   address sharing device (NAT, application proxy) would add the TCP
+   option to the TCP SYN packet.  Up to 8 octets (64 bits) can be
+   expressed.  TCP options are treated outside of the TCP sequence
+   space, so no modifications of either sequence or acknowledgement
+   numbers are needed.
+
+3.1.  Operation of Address Sharing Device
+
+   The address sharing device inserts the CX-ID option onto the TCP SYN,
+   as depicted below.  If there is already an CX-ID option present, it
+   is over-written with the new value.
+
+
+
+
+
+
+
+
+
+
+
+
+Yourtchenko & Wing       Expires August 25, 2011                [Page 4]
+
+Internet-Draft     Connection Identity via TCP option      February 2011
+
+
+   TCP CLIENT    proxy, NAT64, NAT44            TCP SERVER
+   ----------    -------------------            ----------
+       |                 |                            |
+       |---TCP SYN------>|                            |
+       |                 |---TCP SYN, CX-ID=1.2.3.4-->|
+       |                 |<--TCP SYNACK---------------|
+       |<--TCP SYNACK----|                            |
+       |---TCP ACK------>|                            |
+       |                 |---TCP ACK----------------->|
+       |                 |                            |
+      ...               ...                          ...
+
+3.2.  Operation of the TCP Server
+
+   The TCP server identifies the client by combining the source IPv4
+   address in the IP header with the data in the CX-ID option.  This can
+   be implemented by modifying the TCP stack to record the CX-ID
+   information when the TCP SYN is received, and providing that
+   information to the application via an API.
+
+
+4.  Option format
+
+   With the CX-ID option, the client's 64-bit identifier is the TCP
+   option payload.  This can contain the TCP client's internal IPv4
+   address, or other identifier that reliably identifies that
+   subscriber's traffic, such as a combination of internal VLAN ID +
+   internal IPv4 address, or the IPv6 tunnel ID.
+
+
+           +--------+--------+---------...-------------+
+           |xxxxxxxx|00001010|   TCP client identifier |
+           +--------+--------+---------...-------------+
+            Kind=(to be IANA assigned)   Length=variable, up to 10
+
+   If this option is present, it communicates the internal identity of
+   the TCP which sends this segment.  This field MUST only be sent in
+   the initial connection request (i.e., in segments with the SYN
+   control bit set).
+
+
+5.  Interaction with TCP SYN Cookies
+
+   TCP SYN cookies are commonly deployed to mitigate TCP SYN attacks
+   RFC4987 [RFC4987].  The mechanism described in this document requires
+   the server store extra information which arrives on the TCP SYN,
+   which increases the TCP server's attack surface.
+
+
+
+
+Yourtchenko & Wing       Expires August 25, 2011                [Page 5]
+
+Internet-Draft     Connection Identity via TCP option      February 2011
+
+
+   To mitigate this, the authors have considered sending the CX-ID on
+   the first ACK packet, if the TCP server sends CX-ID in the SYNACK.
+
+
+   TCP CLIENT    proxy, NAT64, NAT44            TCP SERVER
+   ----------    -------------------            ----------
+       |                 |                            |
+       |---TCP SYN------>|                            |
+       |                 |---TCP SYN, Cx-ID=1.2.3.4-->|
+       |                 |<--TCP SYNACK, CX-ID=0------|
+       |<--TCP SYNACK----|                            |
+       |---TCP ACK------>|                            |
+       |                 |---TCP ACK, CX-ID=1.2.3.4-->|
+       |                 |                            |
+      ...               ...                          ...
+
+   Another idea is to use on option value with no payload (length=2), in
+   the SYN, to merely indicate "I can do CX", which is echoed by a
+   supporting server.  The internal identifier itself is then sent in
+   the first ACK:
+
+
+   TCP CLIENT    proxy, NAT64, NAT44            TCP SERVER
+   ----------    -------------------            ----------
+       |                 |                            |
+       |---TCP SYN------>|                            |
+       |                 |---TCP SYN, CX-ID, len=2----->|
+       |                 |<--TCP SYNACK, CX-ID, len=2--|
+       |<--TCP SYNACK----|                            |
+       |---TCP ACK------>|                            |
+       |                 |---TCP ACK, CX-ID=1.2.3.4-->|
+       |                 |                            |
+      ...               ...                          ...
+
+   This idea is still under evaluation.
+
+
+6.  Security Considerations
+
+   The connections that happen, today, without a NAPT necessarily reveal
+   the source address of the TCP client -- so this mechanism revealing
+   the identity of the client should not be a concern except for the
+   installations that attempt to use NAPT for "privacy" reasons.  At
+   such installations, their NAPT would not implement the TCP option
+   described in this document.
+
+   An attacker might might use this functionality to appear as if IP
+   address sharing is occuring, in the hopes that a naive server will
+
+
+
+Yourtchenko & Wing       Expires August 25, 2011                [Page 6]
+
+Internet-Draft     Connection Identity via TCP option      February 2011
+
+
+   allow additional attack traffic.  TCP servers and applications SHOULD
+   NOT assume the mere presence of the functionality described in this
+   paper indicates there are other (benign) users sharing the same IP
+   address.
+
+   The addition of this TCP option will break TCP-AO RFC5925 [RFC5925],
+   which provides integrity protection of the TCP SYN (including TCP
+   options).  However, TCP-AO is already known to not survive address
+   sharing (through a NAPT or through an application proxy).
+
+
+7.  Acknowledgements
+
+   Thanks to Anantha Ramaiah for the discussion.  Thanks to Senthil
+   Sivakumar for his review.
+
+
+8.  IANA Considerations
+
+   Assign a new TCP option number, CX-ID.
+
+
+9.  References
+
+9.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC5925]  Touch, J., Mankin, A., and R. Bonica, "The TCP
+              Authentication Option", RFC 5925, June 2010.
+
+9.2.  Informative References
+
+   [I-D.ietf-intarea-shared-addressing-issues]
+              Ford, M., Boucadair, M., Durand, A., Levis, P., and P.
+              Roberts, "Issues with IP Address Sharing",
+              draft-ietf-intarea-shared-addressing-issues-03 (work in
+              progress), February 2011.
+
+   [RFC4987]  Eddy, W., "TCP SYN Flooding Attacks and Common
+              Mitigations", RFC 4987, August 2007.
+
+
+
+
+
+
+
+
+
+Yourtchenko & Wing       Expires August 25, 2011                [Page 7]
+
+Internet-Draft     Connection Identity via TCP option      February 2011
+
+
+Authors' Addresses
+
+   Andrew Yourtchenko
+   cisco
+   6a de Kleetlaan
+   Diegem  1831
+   BE
+
+   Phone:  +32 2 704 5494
+   Email:  ayourtch@cisco.com
+
+
+   Dan Wing
+   cisco
+   170 West Tasman Drive
+   San Jose  CA 95134
+   USA
+
+   Email:  dwing@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yourtchenko & Wing       Expires August 25, 2011                [Page 8]
+

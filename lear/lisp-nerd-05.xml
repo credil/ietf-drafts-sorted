@@ -1,0 +1,1564 @@
+<?xml version="1.0"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd"[
+<!ENTITY W3C.REC-xml PUBLIC ''
+	 'http://xml.resource.org/public/rfc/bibxml4/reference.W3C.REC-xml11-20040204.xml'>
+<!ENTITY W3C.soap12-part1 PUBLIC ''
+	 'http://xml.resource.org/public/rfc/bibxml4/reference.W3C.REC-soap12-part1-20070427.xml'>
+<!ENTITY W3C.soap12-part2 PUBLIC ''
+	 'http://xml.resource.org/public/rfc/bibxml4/reference.W3C.REC-soap12-part2-20070427.xml'>
+]>
+<!-- change this to yes to create a table of contents -->
+<!-- change this to no to create a document with lots of whitespace -->
+<?rfc compact="yes" toc="yes" strict="yes" symrefs="no" ?>
+
+<rfc ipr="trust200902"
+     docName="draft-lear-lisp-nerd-05.txt"
+     category="exp">
+
+<front>
+<title abbrev="NERD LISP EID Mapping Transport">
+NERD: A Not-so-novel EID to RLOC Database
+</title>
+    <author fullname="Eliot Lear" initials="E." surname="Lear">
+      <organization>Cisco Systems GmbH</organization>
+      <address>
+        <postal>
+          <street>Glatt-com</street>
+          <city>Glattzentrum</city>
+          <code>CH-8301</code>
+          <region>ZH</region>
+          <country>Switzerland</country>
+        </postal>
+        <phone>+41 44 878 7525</phone>
+        <email>lear@cisco.com</email>
+      </address>
+    </author>
+<date  />
+
+<abstract>
+<t>
+LISP is a protocol to encapsulate IP packets in order to allow
+end sites to multihome without injecting routes from one end of the
+Internet to another.  This memo specifies a database and a method to
+transport the mapping of EIDs to RLOCs to routers in a reliable,
+scalable, and secure manner.  Our analysis concludes that transport of
+of all EID/RLOC mappings scales well to at least 10^8 entries.
+</t>
+</abstract>
+</front>
+
+<middle>
+<section title="Introduction">
+<t>
+<xref target="I-D.farinacci-lisp">Locator/ID Separation Protocol
+(LISP)</xref> separates an IP
+address used by a host and local routing system from the locators
+advertised by BGP participants on the Internet in general, and in the default
+free zone (DFZ) in particular.  It accomplishes this by establishing a
+mapping between globally unique endpoint identifiers (EIDs) and
+routing locators (RLOCs).  This
+reduces the amount of state change that occurs on routers within
+the default-free zone on the Internet, while enabling end sites to be
+multihomed.
+</t>
+<t>
+In some mapping distribution approaches to LISP the mapping is learned
+via data-triggered control messages between ingress tunnel routers
+(ITRs) and egress tunnel routers (ETRs) through
+an <xref target="I-D.fuller-lisp-alt">alternate routing
+    topology</xref>.  In other approaches of LISP, the mapping from EIDs
+to RLOCs is instead  learned through some
+other means. This memo addresses different approaches to the problem,
+and specifies a Not-so-novel EID RLOC Database (NERD) and methods to
+both receive the database and to receive updates.
+</t>
+<t>NERD is offered primarily as a way to avoid dropping packets, the
+  underlying assumption being that dropping packets is bad for
+  applications and end users.  Those who do not agree with this
+  underlying assumption may find that other approaches make more
+  sense.
+</t>
+<t>
+LISP and NERD are both currently experimental protocols.  The NERD
+database is specified in such a way that the methods used to
+distribute or retrieve it may vary over time.  Multiple databases are
+supported in order to allow for multiple data sources.  An effort has
+been made to divorce the database from access methods so that both can
+evolve independently through experimentation and operational
+validation.
+</t>
+<section title="Base Assumptions">
+<t>
+In order to specify a mapping it is important to understand how it
+will be used, and the nature of the data being mapped.  In the case of
+LISP, the following assumptions are pertinent:
+<vspace blankLines="1" />
+<list style="symbols">
+<t>The data contained within the mapping changes only on provisioning
+or configuration operations, and is not intended to change when a link
+either fails or is restored.  Some other mechanism such as the use of
+LISP Reachability Bits with mapping replies handles healing operations,
+particularly when a tail circuit within an service provider's
+aggregate goes down. NERD can be used as a verification method to
+ensure that whatever operational mapping changes an ITR receives
+are authorized.
+</t>
+<t>While weight and priority are defined, these are not hop-by-hop
+metrics.  Hence the information contained within the mapping does not
+change based on where one sits within the topology.
+</t>
+<t>A purpose of LISP being to reduce control plane overhead by
+reducing "rate X state" complexity, updates to the mapping will be
+  relatively rare.
+</t>
+<t>Because LISP and NERD are designed to ease interdomain routing, their use
+is intended within the inter-domain environment.  That is, LISP is
+best implemented at either the customer edge or provider edge, and
+there will be on the order of as many ITRs and EID Prefixes as
+there are connections to Internet Service Providers by end customers.
+</t>
+<t>As such, NERD cannot be the sole means to implement host
+mobility, although NERD may be in used in conjunction with other
+mechanisms.  For instance, it would be possible for a mobile node to
+receive a local address that is an EID and pass that to the
+correspondent node, who could also make use of an EID.  As such use of
+LISP in this case would be transparent, and no mapping entries are
+changed for mobility.
+</t>
+</list>
+<vspace blankLines="1" />
+</t>
+</section>
+
+<section title="What is NERD?">
+<t>
+NERD is a Not-so-novel EID to RLOC Database.  It
+consists of the following components:
+<vspace blankLines="1" />
+<list style="numbers">
+<t>a network database format;</t>
+<t>a change distribution format;</t>
+<t>a database retrieval/bootstrapping method;</t>
+<t>a change distribution method.</t>
+</list>
+<vspace blankLines="1" />
+The network database format is compressible.  However, at this time
+we specify no compression method.  NERD will make use of potentially
+several transport methods, but most notably <xref
+target="RFC2616">HTTP</xref>.  HTTP
+has restart and compression capabilities.  It is also widely
+deployed.
+</t>
+<t>
+There exist many methods to show differences between two versions of a
+database or a file, UNIX&apos;s &quot;diff&quot; being the classic
+example.  In this case, because the data is well structured
+and easily keyed, we can make use of a very simple format for version
+differences that simply provides a list of EID/RLOC mappings that have
+changed using the same record format as the database, and a list of
+EIDs that are to be removed.
+</t>
+			<t>
+        The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL
+        NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED",  "MAY", and
+        "OPTIONAL" in this document are to be interpreted as described in
+        <xref target="RFC2119">RFC 2119</xref>.
+			</t>
+</section>
+<section title="Glossary">
+<t>
+The reader is once again referred to <xref target="I-D.farinacci-lisp"
+/> for a general glossary of terms related to LISP.  The following terms
+are specific to this memo.
+</t>
+<t>
+<vspace blankLines="1" />
+<list style="hanging">
+<t hangText="Base Distribution URI:">
+An Absolute-URI as defined in Section 4.3 of <xref
+target="RFC3986"></xref> from which other references are relative.
+The base distribution URI is used to construct a URI to an EID/RLOC
+mapping database.  If more than one NERD is
+known then there will be one or more base distribution URIs associated
+with each (although each such base distribution URI may have the same
+value).
+</t><t></t>
+
+<t hangText="EID Database Authority:">
+The authority that will sign database files and updates.  It
+is the source of both.
+</t><t></t>
+<t hangText="The Authority:">
+Shorthand for the EID Database Authority.
+</t><t></t>
+<t hangText="NERD:">
+(N)ot-so-novel (E)ID to (R)LOC (D)atabase.
+</t><t></t>
+<t hangText="AFI">
+Address Family Identifier.
+</t><t></t>
+<t hangText="Pull Model:">
+An architecture where clients pull only the information they need at
+any given time, such as when a packet arrives for
+forwarding.</t><t></t>
+<t hangText="Push Model:">
+An architecture in which clients receive an entire dataset, containing
+data they may or may not require, such as mappings for EIDs that no
+host served is attempting to send to.
+</t><t></t>
+<t hangText="Hybrid Model:">
+An architecture in which some information is pushed toward the
+receiver from a source and some information is pulled by the
+receiver.
+</t>
+</list>
+<vspace blankLines="1" />
+</t>
+</section>
+</section>
+<section title="Theory of Operation">
+<t>
+Operational functions are split into two components: database updates
+and state exchange between ITR and ETR during a communication.
+</t>
+<section title="Database Updates">
+<t>
+What follows is a summary of how NERDs are generated and updated.
+Specifics can be found in <xref target="MECHANISM"/>. The general way
+in which NERD works is as follows:
+<vspace blankLines="1" />
+<list style="numbers">
+<t>A NERD is generated by an authority that allocates provider
+independent (PI) addresses (e.g., IANA or an RIR) which are used by
+sites as EIDs.  As part of this process
+the authority generates a digest for the database and signs it with a
+private key whose public key is part of an <xref
+target="CCITT.X509.1988">X.509 certificate.</xref>  That signature
+along with a copy of the authority's public key is included in the
+NERD.
+</t>
+<t>The NERD is distributed to a group of well known servers.
+</t>
+<t>ITRs retrieve an initial copy of the NERD
+via HTTP when they come into service.
+</t>
+<t>ITRs are preconfigured with a group of certificates whose private
+keys are used by database authorities to sign the NERD.  This list of
+certificates should be configurable by administrators.
+</t>
+<t>ITRs next verify both the validity of the public key and the
+signed digest.  If either fail validation, the ITR attempts to
+retrieve the NERD from a different source.  The process iterates until
+either a valid database is found or the list of sources is exhausted.
+</t>
+<t>Once a valid NERD is retrieved, the ITR installs it into both
+non-volatile and local memory.
+</t>
+<t>At some point the authority updates the NERD and increments the
+database version counter.  At the same time it generates a list of
+changes, which it also signs, as it does with the original database.
+</t>
+<t>Periodically ITRs will poll from their list of servers to determine
+if a new version of the database exists.  When a new version is found,
+an ITR will attempt to retrieve a change file, using its list of
+preconfigured servers.
+</t>
+<t>The ITR validates a change file just as it does the original
+database.  Assuming the change file passes validation, the ITR
+installs new entries, overwrites existing ones, and removes empty
+entries, based on the content of the change file.
+</t>
+</list>
+<vspace blankLines="1" />
+As time goes on it is quite possible that an ITR may probe a list of
+configured neighbors for a database or change file copy.  It is
+equally possible that neighbors might advertise to each other the
+version number of their database.  Such methods are not explored in
+depth in this memo, but are mentioned for future consideration.
+</t>
+</section>
+<section title="Communications between ITR and ETR">
+<t>
+<xref target="I-D.farinacci-lisp"></xref> describes the basic approach to
+  what happens when a packet arrives at an ITR, and what
+  communications between ITR and ETR take place.  NERD provides an
+  optimistic approach to establishing communications with an ETR that
+  is responsible for a given EID prefix.  State must be kept, however,
+  on an ITR to determine whether that ETR is in fact reachable.
+<!-- Added in response to Dino's email: -->
+  It is
+  expected that this is a common requirement across LISP mapping
+  systems, and will be handled in the core LISP architecture.
+
+<!-- Removed at Dino's request:
+When a packet for a destination reaches an ITR, a lookup is made to
+determine whether or not a database entry for the address, using
+  longest match first. If an entry does not exist, the packet is
+  processed without using LISP.  Otherwise, the packet is
+  encapsulated and forwarded.  At the same time, a state table entry
+  is created for the EID prefix.  This state table
+  entry is updated with update reachability bits found in returning
+  LISP packets for that EID prefix.   If after a period of 1 second there
+  is no positive indication that the ITR that was used is in fact
+  available, an alternate ITR SHOULD be considered.
+-->
+</t>
+</section>
+<section title="Who are database authorities?">
+<t>
+This memo does not specify who the database authority is.  That is
+because there are several possible operational models.  In each case
+the number of database authorities is meant to be small so that ITRs
+need only keep a small list of authorities, similar to the way a name
+server might cache a list of root servers.
+<vspace blankLines="1" />
+<list style="symbols">
+<t>A single database authority exists.  In this case all entries in
+the database are registered to a single entity, and that entity
+distributes the database.  Because the EID space is provider
+independent address space, there is no architectural requirement that
+address space be hierarchically distributed to anyone, as there is
+with provider-assigned address space.  Hence, there is a natural
+affinity between the IANA function and the database authority
+function.
+</t>
+<t>Each region runs a database authority.  In this case, provider
+independent address space is allocated to either Regional Internet
+Registries (RIRs) or to affiliates of such organizations of network
+operations guilds (NOGs).  The benefit of this approach is that there
+is no single organization that controls the database.  It allows
+one database authority to backup another.  One could envision as many
+as ten database authorities in this scenario.  One drawback to this
+  approach, however, is that any reference to a region imposes a
+  notion of locality, thus potentially diminishing the split between
+  locator and identifier.
+</t>
+<t>Each country runs a database authority.  This could occur should
+countries decide to regulate this function.  While limiting the scope
+of any single database authority as the previous scenario describes,
+this approach would introduce some overhead as the list of database
+authorities would grow to as many as 200, and possibly more if
+jurisdictions within countries attempted to regulate the function.
+  There are two drawbacks to this approach.  First, as distribution of
+  EIDs is driven to more local jurisdictions, an EID prefix is tied
+  even tighter to a location.  Second, a large number of database
+  authorities will demand some sort of discovery mechanism.
+</t>
+<t>Independent operators manage database
+  authorities.  This has the appeals of being location independent,
+  and enabling competition for good performance.  This method has the
+  drawback of potentially requiring a discovery mechanism.
+</t>
+</list>
+<vspace blankLines="1" />
+The latter two approaches are not mutually exclusive.  While this
+specification allows for multiple databases, discovery mechanisms are
+left as future work.
+</t>
+</section>
+</section>
+<section title="NERD Format" anchor="MECHANISM">
+<t>
+The NERD consists of a header that contains a database
+version and a signature that is generated by ignoring the signature
+field and setting the authentication block length to 0 (NULL).  The
+authentication block itself consists of a signature and a certificate
+whose private key counterpart was used to generate the signature.
+</t>
+<t>
+Records are kept sorted in numeric order
+with AFI plus EID as primary key and mask length as secondary.
+This is so that after a database update it should be possible to
+reconstruct the database to verify the digest signature, which may be
+retrieved separately from the database for verification purposes.
+</t>
+<figure>
+<artwork>
+<![CDATA[
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    | Schema Vers=1 |  DB Code      |     Database Name Size        |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                      Database Version                         |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                   Old Database Version or 0                   |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                                                               |
+    |                        Database Name                          |
+    |                                                               |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |       PKCS#7 Block Size       |          Reserved             |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                                                               |
+    |      PKCS#7 Block containing Certificate and Signature        |
+    |                                                               |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+
+]]>
+</artwork>
+<postamble>
+Database Header
+</postamble>
+</figure>
+<t>The DB Code indicates 0 if what follows is an entire database or 1
+if what follows is an update.
+The database file version is incremented each time the complete
+database is generated by the authority.  In the case of an update, the
+database file version indicates the new database file version, and the
+old database file version is indicated in the "old DB version" field.
+The database file version is used by routers to determine whether or
+not they have the most current database.
+</t>
+<t>
+The database name is a domain name.  This is the name that will appear
+in the Subject field of the certificate used to verify the database.
+The purpose of the database name is to allow for more than one database.
+Such databases would be merged by the router.  It is important that an
+EID/RLOC mapping be listed in no more than one database, lest
+inconsistencies arise.  However, it may be possible to transition a
+mapping from one database to another.  During the transition period,
+the mappings MUST be identical.  When they are not, the resultant
+behavior will be undefined.
+</t>
+<t>The <xref target="RFC2315">PKCS#7</xref> authentication block
+contains a <xref target="ITU.X509.2000">DER encoded</xref> signature
+and associated public key.
+</t>
+<section title="NERD Record Format" anchor="RECORD-FORMAT">
+<t>
+As distributed over the network, NERD records appear as follows:
+</t>
+<figure>
+<artwork>
+<![CDATA[
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    | Num. RLOCs    | EID Mask Len  |            EID AFI            |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                       End point identifier                    |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    | Priority 1    |    Weight 1   |             AFI 1             |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                       Routing Locator 1                       |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    | Priority 2    |    Weight 2   |             AFI 2             |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                       Routing Locator 2                       |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    | Priority 3    |    Weight 3   |             AFI 3             |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                       Routing Locator 3...                    |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+]]>
+</artwork>
+</figure>
+<t>
+Priority N and Weight N, and AFI N are associated with Routing Locator
+N.  There will always be at least one routing locator.
+The minimum record size for IPv4 is 16 bytes.  Each additional IPv4
+RLOC increases the record size by 8 bytes. The purpose of this format
+is to keep the database compact, but somewhat easily read.  The
+meaning of weight and priority are
+described in <xref target="I-D.farinacci-lisp"/>.  The format of the
+AFI is specified by IANA as "Address Family Numbers", with the
+exception of how IPv6 EID prefixes are stored.
+</t>
+<t>
+In order to reduce storage and transmission amounts for IPv6, only the
+necessary number of bytes as specified by the prefix length are kept
+in the record, rounded to the nearest four byte (word) boundary.  For
+instance, if the prefix length is /49, the nearest four-byte word
+boundary would require that eight bytes are stored.  IPv6 RLOCs are
+represented as normal 128-bit IPv6 addresses.
+</t>
+</section>
+<section title="Database Update Format" anchor="UPDATE-FORMAT">
+<t>
+A database update contains a set of changes to an existing database.
+Each AFI/EID/mask-length tuple may have zero or more RLOCs associated
+with it.  In the case where there are no RLOCs, the EID entry is
+removed from the database.   Records that contain EIDs and mask lengths
+that were not previously listed are simply added.  Otherwise, the old
+record for the EID and mask length is replaced by the more current
+information. The record format used by the a database
+update is the same as described in <xref target="RECORD-FORMAT"/>.
+</t>
+</section>
+</section>
+<section title="NERD Distribution Mechanism" anchor="DISTRIBUTION">
+<section title="Initial Bootstrap" anchor="BOOTSTRAP">
+<t>
+Bootstrap occurs when a router needs to retrieve the entire database.
+It knows it needs to retrieve the entire database because either it
+has none or an update too substantial to process, as might be the case
+if a router has been out of service for a substantially lengthy period
+of time.</t>
+<t>
+To bootstrap the ITR appends the database name plus "/current/entiredb" to
+a Base Distribution URI and retrieves the file via HTTP.  For example,
+if the configured URI is
+&quot;http://www.example.com/eiddb/&quot;, and assuming a database
+name of "nerd.arin.net", the ITR would request
+&quot;http://www.example.com/eiddb/current/nerd.arin.net/entiredb&quot;.
+Routers MUST check the signature on the database prior to installing
+it, and MUST check that the database schema matches a schema they
+understand.  Once a router has a valid database it MUST store that
+database in some sort of non-volatile memory (e.g., disk, flash
+memory, etc).
+</t>
+<t>
+N.B., the host component for such URIs MUST NOT resolve to a LISP EID,
+lest a circular dependency be created.
+</t>
+</section>
+<section title="Retrieving Changes">
+<t>
+In order to retrieve a set of database changes an ITR will have
+previously retrieved the entire database.  Hence it knows the current
+version of the database it has.  Its first step for retrieving changes
+is to retrieve the current version of the database.  It does so by
+appending "current/version" to the base distribution URI and
+retrieving the file.  Its format is text and it contains the integer
+value of the current database version.
+</t>
+<t>
+Once an ITR has retrieved the current version it compares version of
+its local copy.  If there is no difference, then the router is up to
+date and need take no further actions until it next checks.
+</t>
+<t>
+If the versions differ, the router next sends a request for the
+appropriate change file by appending &quot;current/changes/&quot; and the
+textual representation of the version of its local copy of the
+database to the base distribution URI.  For example, if the current
+version of the database is 1105503 and router&apos;s version is
+1105500, and the base URI and database name are the same as above, the
+router would request
+&quot;http://www.example.com/eiddb/nerd.arin.net/current/changes/1105500&quot;.
+</t>
+<t>The server may not have that change file, either because there are
+too many versions between what the router has and what is current, or
+because no such change file was generated.  If the server has changes
+from the routers version to any later version, the server SHOULD issue
+an HTTP redirect to that change file, and the router SHOULD retrieve
+and process it.  Once it has done so, the router should then repeat
+the process until it has brought itself up to date.  It is thus
+important for servers to expire old change files in the order in which
+they were generated.</t>
+<t>
+By way of convention, it is suggested that the URIs issued in
+redirects be of the following form:
+</t>
+<t>
+ {base dist. URI}/{dbname}/{more-recent-version}/changes/{older-version}
+</t>
+<t>where &quot;base dist. URI&quot; is the base distribution URI,
+&quot;dbname&quot; is the name of the database, and each version is
+the textual representation of the integer version value.
+</t>
+<t>
+For example, if the current database version was 1105503 and a router
+made a request for
+&quot;http://www.example.com/eiddb/nerd.arin.net/current/changes/1105400&quot;
+but there was no change file from 1105400 to 1105503,
+and the server had a group of change files to make the router current,
+it would issue a redirect to
+&quot;http://www.example.com/eiddb/nerd.arin.net/110450/changes/1105400&quot; that the
+router would then process.  The router would then make a
+request for &quot;http://www.example.com/eiddb/nerd.arin.net/current/changes/110450&quot;
+that the server would have.
+</t>
+<t>
+While it is unlikely that database versions would wrap, as they
+consists of 32 bit integers, should the event occur, ITRs MUST attempt
+first to retrieve a change file when their current version number is
+within 10,000 of 2^32 and they see a version available that is less
+than 10,000.  Barring the availability of a change file, the ITR MUST
+still assume that the database version has wrapped and retrieve a new
+copy.
+</t>
+</section>
+</section>
+<section title="Analysis" anchor="ANALYSIS">
+<t>
+We will start our analysis by looking at how much data will be
+transferred to a router during bootstrap conditions.  We will then
+look at the bandwidth required.  Next we will turn our concerns to
+servers.  Finally we will ponder the effect of providing only changes.
+</t>
+<t>In the analysis below we treat the overhead of the database header
+as insignificant (because it is).  The analysis should be similar,
+whether a single database or multiple databases are employed, as we
+would assume that no entry would appear more than once.
+</t>
+<section title="Database Size">
+<t>
+By its very nature the information to be transported is relatively
+static and is specifically designed to be topologically insensitive.
+That is, every ITR is intended to have the same set of RLOCs for a
+given EID.  While some processing power will be necessary to install a
+table, the amount required should be far less than that of a routing
+information database because the level of entropy is intended to be
+lower.
+</t>
+<t>
+For purposes of this analysis, we will assume that the world has
+migrated to IPv6, as this increases the size of the database, which
+would be our primary concern.  However, to mitigate the size increase,
+we have limited the size of the prefix transmitted.  For purposes of
+this analysis, we shall assume an average prefix length of 64 bits.
+</t><t>
+Based on that assumption, <xref target="RECORD-FORMAT" /> states
+that mapping information for each EID/Prefix includes a group of
+RLOCs, each with an associated priority and weight, and
+that a minimum record size with IPv6 EIDs with at least one RLOC is
+30 bytes uncompressed.  Each additional IPv6 RLOC costs 20 bytes.
+</t>
+<!-- Here is the same table for IPv6
+     E * (30 + 20 * (R -1 ))
+-->
+<texttable anchor="6RECSIZE">
+   <ttcol align="right">10^n EIDs</ttcol>
+   <ttcol align="right">2 RLOC</ttcol>
+   <ttcol align="right">4 RLOC</ttcol>
+   <ttcol align="right">8 RLOC</ttcol>
+<c>4</c>
+<c>500 KB</c>
+<c>900 KB</c>
+<c>1.70 MB</c>
+<c>5</c>
+<c>5.0 MB</c>
+<c>9.0 MB</c>
+<c>17.0 MB</c>
+<c>6</c>
+<c>50 MB</c>
+<c>90 MB</c>
+<c>170 MB</c>
+<c>7</c>
+<c>500 MB</c>
+<c>900 MB</c>
+<c>1.70 GB</c>
+<c>8</c>
+<c>5.0 GB</c>
+<c>9.0 GB</c>
+<c>17.0 GB</c>
+<postamble>
+Database size for IPv6 routes with average prefix length = 64 bits
+</postamble>
+</texttable>
+<t>
+Entries in the above table are derived as follows:
+</t>
+<figure>
+<artwork>
+<![CDATA[
+     E * (30 + 20 * (R - 1 ))
+]]>
+</artwork>
+</figure>
+<t>
+where E = number of EIDs (10^n), R = number of RLOCs per EID. 
+</t>
+<t>
+Our scaling target is to accommodate 10^8 multihomed systems, which is
+one order magnitude greater than what is discussed in <xref target="CARP07"/>.
+At 10^8 entries, a device could be expected to use between 5 and 17
+gigabytes of RAM for the mapping.  No matter the method of
+distribution, any router that sits in the core of the Internet would
+require near this amount of memory in order to perform the ITR
+function.  Large enterprise ETRs would be similarly strained, 
+simply due to the diversity of of sites that communicate with one another.
+The good news is that this is not our starting point, but rather our
+scaling target, a number that we intend to reach by the year 2050.
+Our starting point is more likely in the neighborhood of 10^4 or
+10^5 EIDs, thus requiring between 500KB and 17 MB.
+</t>
+
+</section>
+<section title="Router Throughput Versus Time">
+<!-- This table is generated as follows:
+
+(T * 8 ) / B
+For T = Table Size in Bytes (10^n), B = bandwidth
+
+-->
+<texttable anchor="XFERSPEED">
+<ttcol align="right">Table Size (10^N)</ttcol>
+<ttcol align="right">1mb/s</ttcol>
+<ttcol align="right">10mb/s</ttcol>
+<ttcol align="right">100mb/s</ttcol>
+<ttcol align="right">1gb/s</ttcol>
+<c>6</c>
+<c>8</c>
+<c>0.8</c>
+<c>0.08</c>
+<c>0.008</c>
+<c>7</c>
+<c>80</c>
+<c>8</c>
+<c>0.8</c>
+<c>0.08</c>
+<c>8</c>
+<c>800</c>
+<c>80</c>
+<c>8</c>
+<c>0.8</c>
+<c>9</c>
+<c>8,000</c>
+<c>800</c>
+<c>80</c>
+<c>8</c>
+<c>10</c>
+<c>80,000</c>
+<c>8,000</c>
+<c>800</c>
+<c>80</c>
+<c>11</c>
+<c>800,000</c>
+<c>80,000</c>
+<c>8,000</c>
+<c>800</c>
+<postamble>
+Number of seconds to process NERD
+</postamble>
+</texttable>
+<t>
+The length of time it takes to process the database is
+significant in models where the device acquires the entire table.
+During this period of time, either the router will be unable to route
+packets using LISP or it must use some sort of query mechanism for
+specific EIDs as the rest it populates its table through the transfer.
+<xref target="XFERSPEED"/> shows us that at our scaling target,
+the length of time it would take for a router using 1 mb/s of
+bandwidth is about 80 seconds.  We can measure the processing
+rate in small numbers of hours for any transfer speed greater than
+that.  The fastest processing time shows us as taking 8
+seconds to process an entire table of 10^9 bytes and 80 seconds for 10^10
+bytes.
+</t>
+</section>
+<section title="Number of Servers Required">
+<t>
+
+As easy as it may be for a router to retrieve, the aggregate
+information may be difficult for servers to transmit, assuming the
+information is transmitted in aggregate (we&apos;ll revisit that assumption
+later).
+</t>
+<texttable anchor="SRVOUT">
+<!-- This table is generated as follows:
+
+10^8 entries with 4 RLOCs = 9,000,000,000 bytes = 72,000,000,000 bits
+Assume 1gb/s.  A single transfer at 100% efficiency completes in
+72 seconds.  With this in mind, each entry is as follows:
+
+   max(1X,N*X/S)
+where N=number of transfers, X = 72, S = number of servers.
+-->
+<ttcol align="right"># Simultaneous Requests</ttcol>
+<ttcol align="right">10 Servers</ttcol>
+<ttcol align="right">100 Servers</ttcol>
+<ttcol align="right">1,000 Servers</ttcol>
+<ttcol align="right">10,000 Servers</ttcol>
+<c>100</c>
+<c>720</c>
+<c>72</c>
+<c>72</c>
+<c>72</c>
+<c>1,000</c>
+<c>7,200</c>
+<c>720</c>
+<c>72</c>
+<c>72</c>
+<c>10,000</c>
+<c>72,000</c>
+<c>7,200</c>
+<c>720</c>
+<c>72</c>
+<c>100,000</c>
+<c>720,000</c>
+<c>72,000</c>
+<c>7,200</c>
+<c>720</c>
+<c>1,000,000</c>
+<c>7,200,000</c>
+<c>720,000</c>
+<c>72,000</c>
+<c>7,200</c>
+<c>10,000,000</c>
+<c>72,000,000</c>
+<c>7,200,000</c>
+<c>720,000</c>
+<c>72,000</c>
+<postamble>
+Retrieval time per number of servers in seconds.  Assumes
+average 10^8 entries with 4 RLOCs per EID and that each server has
+access to 1gb/s and 100% efficient use of that bandwidth and no compression.
+</postamble>
+</texttable>
+<t>
+Entries in the above table were generated using the following method:
+</t>
+<t>
+    For 10^8 entries with four RLOCs per EID, the table size
+    is 9.0GB, per our previous table.  Assume 1 Gb/s
+    transfer rates and 100% utilization.  Protocol overhead is
+    ignored for this exercise.  Hence a single transfer X takes
+    48 seconds and can get no faster.
+</t>
+<t>
+    With this in mind, each entry is as follows:
+</t>
+<figure>
+<artwork>
+<![CDATA[
+         max(1X,N*X/S)
+
+  where N=number of transfers, X = 72 seconds, 
+  and S = number of servers.
+]]>
+</artwork>
+</figure>
+<t>
+If we have a distribution model which every device must retrieve the
+mapping information upon start, <xref target="SRVOUT"/> shows the
+length of time in seconds it will take for a given number of servers
+to complete a transfer to a given number of devices.  This table says,
+as an example, that it would take 72,000 seconds (20 hours) for
+one million ITRs to simultaneously retrieve the database from one
+thousand servers.  Should a cold start scenario occur, this number
+should be of some concern.  Hence it is important to take some
+measures both to avoid such a scenario, and to ease the load should it
+occur.  The primary defense should be for ITRs to first attempt to
+retrieve their databases from their peers or upstream providers.
+Secondary defenses could include data sanity checks within ITRs, with
+agreed norms for how much the database should change in any given
+update or over any given period of time.  As we will see below,
+dissemination of changes is considerably less volume.
+</t>
+<texttable anchor="SRV-DIFF-OUT">
+<!-- This table is generated as follows:
+
+10^8 entries = 9.0 gigabytes = 72.0 gigabits.
+Asume 1gb/s.  A single transfer at 100% efficiency completes in
+72 seconds.  Now apply a daily percentage change broken up into
+24 hourly updates.  Assume 10,000,000 routers.
+With that in mind each entry is as follows:
+
+   (R * X * P) / (24 * S)
+where R = number of routers, X = 72, S = number of servers,
+P = percentage of daily change.
+-->
+<ttcol align="right">% Daily Change</ttcol>
+<ttcol align="right">100 Servers</ttcol>
+<ttcol align="right">1,000 Servers</ttcol>
+<ttcol align="right">10,000 Servers</ttcol>
+<c>0.1%</c>
+<c>300</c>
+<c>30</c>
+<c>3</c>
+<c>0.5%</c>
+<c>1500</c>
+<c>150</c>
+<c>15</c>
+<c>1%</c>
+<c>3000</c>
+<c>300</c>
+<c>30</c>
+<c>5%</c>
+<c>15,000</c>
+<c>1500</c>
+<c>150</c>
+<c>10%</c>
+<c>30,000</c>
+<c>3000</c>
+<c>300</c>
+<postamble>
+Assuming 10 million routers and a database size of 9GB, resulting
+hourly transfer times are shown in seconds, given number of servers
+and daily rate of change.
+</postamble>
+</texttable>
+<t>This table shows us that with 10,000 servers the average transfer
+time with 1Gb/s links for 10,000,000 routers will be 300 seconds
+with 10% daily change spread over 24 hourly updates.  For a 0.1% daily
+change, that number is 3 seconds for a database of size 9.0GB.
+</t>
+<t>
+The amount of change goes to the purpose of LISP.  If its purpose
+is to provide effective multihoming support to end customers, then we might
+anticipate relatively few changes.  If, on the other, service
+providers attempt to make use of LISP to provide some form of traffic
+engineering, we can expect the same data to change more often.  We can
+probably not conclude much in this regard without additional
+operational experience.  The one thing we can say is that
+different applications of the LISP protocol may require new and
+different distribution mechanisms.  Such optimization is left for
+another day.
+</t>
+</section>
+<section title="Security Considerations">
+<t>
+Whichever the answer to our previous question, we must consider the
+security of the information being transported.  If an attacker can
+forge an update or tamper with the database, he can in effect redirect
+traffic to end sites.  Hence, integrity and authenticity of the
+NERD is critical.  In addition, a means is required to determine
+whether a source is authorized to modify a given database.  No data
+privacy is required. Quite to the contrary, this information will be
+necessary for any ITR.
+</t>
+<t>The first question one must ask is who to trust to provide the ITR
+a mapping.  Ultimately the owner of the EID prefix is most
+authoritative for the mapping to RLOCs.  However, were all owners to
+sign all such mappings, ITRs would need to know which owner is
+authorized to modify which mapping, creating a problem of O(N^2)
+complexity.</t>
+<t>
+We can reduce this problem substantially by investing
+some trust in a small number of entities that are allowed to sign
+entries.  If authority  manages EIDs much the same way a domain name
+registrar handles domains, then the owner of the EID would choose a
+database authority she or he trusts, and ITRs must trust each such
+authority in order to map the EIDs listed by that authority to RLOCs.
+This reduces the amount of management complexity on the ETR to
+retaining knowledge of  O(#authorities),
+but does require that each authority establish procedures for
+authenticating the owner of an EID.  Those procedures needn't be the
+same.
+</t>
+<t>
+There are two classic methods to ensure integrity of data:
+<vspace blankLines="1" />
+<list style="symbols">
+<t>secure
+transport of the source of the data to the consumer, such as <xref
+target="RFC4346">Transport Layer Security (TLS)</xref>; and </t>
+<t>provide object level security.</t>
+</list>
+<vspace blankLines="1" />
+
+These methods are not mutually exclusive, although one can argue about
+the need for the former, given the latter.
+</t>
+<t>
+In the case of TLS, when it is properly
+implemented, the objects being transported cannot easily be modified
+by interlopers or so-called men in the middle.  When data objects are
+distributed to multiple servers, each of those servers must be
+trusted.  As we have seen above, we could have quite a large number of
+servers, thus providing an attacker a large number of targets.  We
+conclude that some form of object level security is required.</t>
+<t>
+Object level security involves an authority signing an object in a way
+that can easily be verified by a consumer, in this case a router.  In
+this case, we would want the mapping table and any incremental update
+to be signed by the originator of the update.  This implies that we
+cannot simply make use of a tool like <xref target="CVS">CVS</xref>.
+Instead, the originator will want to generate diffs, sign them, and
+make them available either directly or through some sort of content
+distribution or peer to peer network.
+</t>
+<section title="Use of Public Key Infrastructures (PKIs)">
+<t>X.509 provides a certificate hierarchy that has scaled to the
+size of the Internet.  The system is most manageable when
+there are few certificates to manage.  The model proposed in this
+memo makes use of one current certificate per database authority.  The
+three pieces of information necessary to verify a signature, therefore,
+are as follows:
+<vspace blankLines="1" />
+<list style="symbols">
+<t>the certificate of the database authority, which can be provided
+along with the database;
+</t>
+<t>the certificate authority's certificate; and
+</t>
+<t>A table of database names and distinguished names (DNs) that are
+allowed to update them.
+</t>
+</list>
+<vspace blankLines="1" />
+The latter two pieces of information must be very well known and must
+be configured on each ITR.  It is expected that both would change very
+rarely, and it would not be unreasonable for such updates to occur as
+part of a normal OS release process.
+</t>
+<t>The tools for both signing and verifying are readily available.
+<eref target="http://www.openssl.org">OpenSSL</eref> provides tools
+and libraries for both signing and verifying.  Other tools commonly
+exist.
+</t>
+<t>
+Use of PKIs is not without implementation, operational complexity or
+risk.  The following risks and mitigations are identified with
+NERD&apos;s use of PKIs:
+<vspace blankLines="1" />
+<vspace blankLines="1" />
+<list style="hanging">
+<t hangText="If a NERD database authority private key is exposed:">
+<vspace blankLines="1" />
+In this case an attacker could sign a false database update, either
+redirecting traffic, or otherwise causing havoc.  In this case, the
+NERD database administrator must revoke its existing key and issue a
+new one.  The certificate is added to a certificate revocation list (CRL),
+which may be distributed with both this and other databases, as well
+as through other channels.  Because this event is expected to be rare,
+and the number of database authorities is expected to be small, a
+CRL will be small.  When a router receives a revocation, it checks it
+against its existing databases, and attempts to update the one that
+is revoked.  This implies that prior to issuing the revocation, the
+database authority MUST sign an update with the new key.  Routers
+SHOULD discard updates they have already received that were signed
+after the revocation was generated.  If a router cannot confirm that
+whether the authority&apos;s certificate was revoked before or after a
+particular update, it MUST retrieve a fresh new copy of the
+database with a valid signature.
+<vspace blankLines="1" />
+</t>
+<t hangText="The private key associated with the CA that signed the
+Authority&apos;s certificate is compromised:">
+<vspace blankLines="1" />
+In this case, it becomes possible for an attacker to masquerade as the
+database authority.  To ameliorate damage, the database authority
+SHOULD revoke its certificate and get a new certificate issued from a
+CA that is not compromised.  Once it has done so, the previous
+procedure is followed.  The compromised certificate can be removed
+during the normal operating system upgrade cycle.
+<vspace blankLines="1" />
+</t>
+<t hangText="An algorithm used if either the certificate or the
+signature is cracked:">
+<vspace blankLines="1" />
+This is a catastrophic failure and the above forms of attack become
+possible.  The only mitigation is to make use of a new algorithm.  In
+theory this should be possible, but in practice has proved very
+difficult.  For this reason, additional work is recommended to make
+alternative algorithms available.
+<vspace blankLines="1" />
+</t>
+<t hangText="The Database Authority loses its key or disappears:">
+<vspace blankLines="1" />
+In this case nobody can update the existing database.  There are few
+programmatic mitigations.  If the database authority places its
+private keys and suitable amounts of information escrow, under agreed
+upon circumstances, such as no updates for three days, for example,
+the escrow agent would release the information to a party competent of
+generating a database update.
+</t>
+</list>
+<vspace blankLines="1" />
+</t>
+</section>
+<section title="Other Risks">
+<t>
+Because this specification does not require secure transport, if an
+attacker prevents updates to an ITR for the purposes of having that
+ITR continue to use a compromised ETR, the ITR could continue to use
+an old version of the database without realizing a new version has
+been made available.  If one is worried about such an attack, a secure
+channel such as SSL to a secure chain back to the database authority
+should be used.  It is possible that after some operational
+experience, later versions of this format will contain additional
+semantics to address this attack.
+</t>
+<t>As discussed above, substantial risk would be a cold start
+scenario.  If an attacker found a bug in a common operating system
+that allowed it to erase an ITR's database, and was able to
+disseminate that bug, the collective ability of ITRs to retrieve new
+copies of the database could be taxed by collective demand.  The
+remedy to this is for devices to share copies of the database with
+their neighbors, thus making each potential requester a potential
+service.
+</t>
+</section>
+</section>
+</section>
+<section title="Why not use XML?">
+<t>
+Many objects these days are distributed as either XML pages or
+something derived as <xref target="W3C.REC-xml11-20040204">XML</xref>, such
+as <xref target="W3C.REC-soap12-part1-20070427">SOAP</xref>,<xref
+target="W3C.REC-soap12-part2-20070427"/>.  Use of such well known standards allows
+for high level tools and library reuse.  XML&apos;s strength is
+extensibility.  Without a doubt XML would be more extensible than a
+fixed field database.  Why not, then, use these
+standards in this case?  The greatest concern the author had was
+compactness of the data stream.  In as much as this mechanism is
+used at all in the future, so long as that concern could be addressed,
+and so long as signatures of the database can be verified,
+XML probably should be considered.
+</t>
+</section>
+<section title="Other Distribution Mechanisms" anchor="OTHER-MECHANISMS">
+<t>
+We now consider various
+different mechanisms.  The problem of distributing changes in various
+databases is as old as databases.  The author is aware of two obvious
+approaches that have been well used in the past.  One approach would
+be the wide distribution of CVS repositories.  However, for reasons
+mentioned in the previous section, CVS is insufficient to the task.
+</t>
+<t>
+The other tried and true approach is the use
+of periodic updates in the form of messages.  <xref
+target="RFC0977">Good old NNTP</xref> itself provides two separate
+mechanisms (one push and another pull) to provide a coherent update
+process.  This was in fact used to <xref target="gb91"> update
+molecular biology databases</xref> in the early 1990s.  Netnews offers
+a way to determine whether articles with specified Article-Ids have
+been received.  In the case where the mapping file source of authority
+wishes to transmit updates, it can sign a change file and then post it
+into the network.  Routers merely need to keep a record of article ids
+that it has received.  Netnews systems have years
+ago handled <eref target="http://en.wikipedia.org/wiki/Usenet">far
+    greater volume of traffic than we envision.</eref>
+  Initially this is probably overkill, but it may
+not be so later in this process.  Some consideration should be given
+to a mechanism known to widely distribute vast amounts of data, as
+instantaneously either the sender or the receiver wishes.
+</t>
+<t>To attain an additional level of hierarchy in the distribution
+network, service providers could retrieve information to their own
+local servers, and configure their routers with the host portion of
+the above URI.</t>
+<t>
+Another possibility would be for providers to establish an agreement
+on a small set of anycast addresses for use for this purpose.  There
+are limitations to the use of anycast, particularly with TCP.  In the
+midst of a routing flap anycast address can become all but unusable.
+Careful study of such a use as well as appropriate use of HTTP
+redirects is expected.
+</t>
+<section title="What About DNS as a retrieval model?" anchor="NOT-DNS">
+<t>
+It has been proposed that a query/response mechanism be used for this
+information, and that specifically the <xref target="RFC1034">domain
+name system (DNS)</xref> be used.  The previous models do not preclude
+the DNS.  DNS has the advantage that the administrative lines are well
+drawn, and that the ID/RLOC mapping is likely to appear very close to
+these boundaries.  DNS also has the added benefit that an entire
+distribution infrastructure already exists.  There are, however, some
+problems that could impact end hosts when intermediate routers make
+queries, some of which were first pointed out in <xref
+target="RFC1383" />:
+<vspace blankLines="1" />
+<list style="symbols">
+<t>Any query mechanism offers an opportunity for a resource
+attack if an attacker can force the ITR to query for information.  In
+this case, all that would be necessary would be for a
+&quot;botnet&quot; (a group of computers that have been compromised
+and used as vehicles to attack others) to ping or otherwise contact
+via some normal
+service hosts that sit behind the ETR.  If the botnet hosts themselves
+are behind ETRs, the victim&apos;s ITR will need to query for each and
+every one of them, thus becoming part of a classic reflector attack.</t>
+<t>Packets will be delayed at the very least, and probably dropped
+in the process of a mapping query.  This could be at the beginning of
+a communication, but it will be impossible for a router to conclude
+with certainty that this is the case.
+</t>
+<t>The DNS has a backoff algorithm that presumes that applications are
+making queries prior to the beginning of a communication.  This is
+appropriate for end hosts who know in fact when a communication
+begins.  An end user  may not enjoy a router waiting seconds for a retry.
+</t>
+<t>While the administrative lines may appear to be correct, the
+location of name servers may not be.  If name servers sit within PI
+address space, thus requiring LISP to reach, a circular dependency is
+created.  This is precisely where many enterprise name servers sit.
+The LISP experiment should not predicate its success on relocation of
+such name servers.
+</t>
+</list>
+<vspace blankLines="1" />
+Never-the-less, DNS may be able to play a role in providing the
+enterprise control over the mapping of its EIDs to RLOCs.  Posit a new
+DNS record &quot;EID2RLOC&quot;.  This record is used by the authority
+to collect and aggregate mapping information so that it may be
+distributed through one of the other mechanisms.  As an example:
+</t>
+<figure>
+<artwork><![CDATA[
+   $ORIGIN 0.10.PI-SPACE.
+    128   EID2RLOC   mask 23 priority 10 weight 5 172.16.5.60
+          EID2RLOC   mask 23 priority 15 weight 5 192.168.1.5
+]]>
+</artwork>
+</figure>
+<t>
+In the above figure network 10.0.128/23 would delegated to some
+end system, say EXAMPLE.COM.  They would manage the above zone
+information.   This would allow a DNS mechanism to work, but it would
+also allow someone to aggregate the information and distribution a
+table.
+</t>
+</section>
+<section title="Use of BGP and LISP+ALT">
+<t>
+<xref target="RFC4271">Border Gateway Protocol (BGP)</xref> is
+currently used to distribute inter-domain routing throughout the
+Internet.  Why not, then, use BGP to distribute mapping entries, or
+provide a rendezvous mechanism to initialize mapping entries?
+In fact this is precisely
+what <xref target="I-D.fuller-lisp-alt">LISP+ALT</xref> accomplishes,
+using a completely separate topology from the normal DFZ.  It does so
+  using existing code paths and expertise.  The alternate topology
+  also provides an extremely accurate control path from ITRs to
+  ETRs, whereas NERD&apos;s operational model requires an optimistic
+  assumption and control plane functionality to cycle through
+  unresponsive ETRs in an EID prefix&apos;s mapping entry.  The
+  memory scaling characteristics of LISP+ALT are extremely attractive
+  because of expected strong aggregation, whereas NERD makes almost no
+  attempt at aggregation.
+</t><t>
+  A number of key deployment issues are left open.  The principle
+  issue is whether it is deemed acceptable for routers to drop packets
+  occasionally while mapping information is being gathered.  This
+  should be the subject of future research for ALT, as it was a key
+  design goal of NERD to avoid such a situation.
+</t>
+</section>
+
+<section title="Perhaps use a hybrid model?">
+<t>
+Perhaps it would be useful to use both a prepopulated database such as NERD
+and a query mechanism (perhaps LISP+ALT, <xref target="I-D.meyer-lisp-cons">
+LISP-CONS</xref>, or DNS) to determine an
+EID/RLOC mapping.  One idea would be to receive a subset of
+the mappings, say, by taking only the NERD for certain regions.  This
+alleviates the need to drop packets for some subset of destinations
+under the assumption that one&apos;s business is localized to a
+particular region.  If one did not have a local entry for a particular
+EID one would then make a query.</t>
+<t>One approach to using DNS to query live would be to
+  periodically walk &quot;interesting&quot; portions of the  network, in
+  search of relevant records, and caching them to non-volatile
+  storage.  While preventing resource attacks, the walk itself could
+  be viewed as an attack, if the algorithm was not selective enough
+  about what it thought was interesting.  A similar approach could be
+  applied to LISP+ALT or LISP-CONS by forcing a data-driven
+  Map Reply for certain sites.
+</t>
+</section>
+</section>
+<section title="Deployment Issues">
+<t>
+While LISP and NERD are intended as experiments at this point, it is
+already obvious one must give serious consideration to circular
+dependencies with regard to the protocols used and the elements within
+them.</t>
+<section title="HTTP">
+<t>
+<!-- 
+  In <xref target="NOT-DNS"/> we have already seen how DNS can
+have circular dependencies.
+-->
+  In as much as HTTP depends on DNS, either
+due to the authority section of a URI, or due to the configured base
+distribution URI, these same concerns apply.  In addition, any HTTP
+server that itself makes use of provider independent addresses would
+be a poor choice to distribute the database for these exact same
+reasons.
+</t>
+<t>One issue with using HTTP is that it is possible that a middlebox
+of some form, such as a cache, may intercept and process requests.  In
+some cases this might be a good thing.  For instance, if a cache
+correctly returns a database, some amount of bandwidth is conserved.
+On the other hand, if the cache itself fails to function properly for
+whatever reason, end to end connectivity could be impaired.  For
+example, if the cache itself depended on the mapping being in place
+and functional, a cold start scenario might leave the cache
+functioning improperly, in turn providing routers no means to update
+their databases.  Some care must be given to avoid such circumstances.
+</t>
+</section>
+</section>
+<section title="Open Questions">
+<t>
+  Do we need to discuss reachability in more detail?  This was
+  clearly an issue at the IST-RING workshop.  There are two key
+  issues.  First, what is the appropriate architectural separation
+  between the data plane and the control plane?  Second, is there some
+  specific way in which NERD impacts the data plane?
+</t>
+<t>Should we specify a (perhaps compressed) tarball that treads a
+middle ground for the last question, where each update tarball
+contains both a signature for the update and for the entire database,
+once the update is applied.
+</t>
+<t>
+Should we compress?  In some initial testing of databases with 1, 5,
+and 10 million IPv4 EIDs and a random distribution of IPv4 RLOCs, the
+current format in this document compresses down by a factor of between
+35% and 36%, using  Burrows-Wheeler block sorting text compression
+algorithm (bzip2).  The NERD used random EIDs with mask lengths
+varying from 19-29, with probability weighted toward the smaller
+masks.  This only very roughly reflects reality.  A better test would
+be to start with the existing prefixes found in the DFZ.
+</t>
+</section>
+<section title="Conclusions">
+<t>
+This memo has specified a database format, an update format, a URI
+convention, an update method, and a validation method for EID/RLOC
+mappings.  We have shown that beyond the predictions of 10^8
+EID-prefix entries,
+the aggregate database size would likely be at most 17GB.  We have
+considered the amount of servers to distribute that information and we
+have demonstrated the limitations of a simple content distribution
+network and other well known mechanisms.
+The effort required to retrieve a database change amounts to between 3
+and 30 seconds of processing time per hour at at
+today&apos;s gigabit speeds.  We conclude that there is no need for an
+off box query mechanism today, and that there are distinct
+disadvantages for having such a mechanism in the control plane.
+</t>
+<t>Beyond this we have examined alternatives that allow for hybrid
+models that do use query mechanisms, should our operating assumptions
+prove overly optimistic.  Use of NERD today does not foreclose use of
+such models in the future, and in fact both models can happily
+co-exist.
+</t>
+<t>
+We leave to future work how the list of databases is distributed, how
+BGP can play a role in distributing knowledge of the databases, and
+how DNS can play a role in aggregating information into these
+databases.
+</t>
+<t>
+We also leave to future work whether HTTP is the best protocol for the
+job, and whether the scheme described in this document is the most
+efficient.  One could easily envision that when applied in high delay
+or high loss environments, a broadcast or multicast method may prove
+more effective.
+</t>
+<t>
+Speaking of multicast, we also leave to future work how multicast is
+implemented, if at all, either in conjunction or as an extension to
+this model.
+</t>
+</section>
+<section title="IANA Considerations">
+<t>This memo makes no requests of IANA.
+</t>
+</section>
+<section title="Acknowledgments">
+<t>Dino Farinacci, Patrik Faltstrom, Dave Meyer, Joel Halpern, Dave
+Thaler, Mohamed Boucadair, Robin Whittle, Max Pritikin, and Scott Brim
+  were very helpful with their reviews of this work.  Thanks also to
+  the participants of the Routing Research Group and the IST-RING workshop held in Madrid in  December of 2007 for their incisive comments.  The astute will
+  notice a lengthy References section.  This work stands on the
+  shoulders of many others&apos; efforts.
+</t>
+</section>
+</middle>
+<back>
+
+<references title="Normative References">
+<?rfc include="reference.I-D.farinacci-lisp" ?>
+<?rfc include="reference.RFC.2616" ?>
+<?rfc include="reference.RFC.2119" ?>
+<?rfc include="reference.RFC.2315" ?>
+<?rfc include="reference.ITU.X509.2000" ?>
+<?rfc include="reference.RFC.3986" ?>
+</references>
+<references title="Informational References">
+<?rfc include="reference.RFC.0977" ?>
+<?rfc include="reference.RFC.1034" ?>
+<?rfc include="reference.RFC.1383" ?>
+<?rfc include="reference.RFC.4271" ?>
+<!--
+<reference anchor="NACH86">
+<front>
+<title>When Network File Systems Aren&apos;t Enough: Automatic Software
+Distribution Revisited</title>
+<author initials="D." surname="Nachbar" fullname="Daniel Nachbar">
+<organization>Bell Communications Research</organization>
+</author>
+<date month='June' year='1986' />
+</front>
+<seriesInfo name="Proceedings of Usenix Summer 1986" value='' />
+</reference> -->
+<?rfc include="reference.RFC.4346" ?>
+<reference anchor="CARP07">
+<front>
+  <title>IETF Plenary Presentation: Routing and Addressing: Where we are today</title>
+  <author initials="B. R." surname="Carpenter">
+  <organization abbrev="IBM">
+  IBM Research
+  </organization>
+  </author>
+  <date month="March" year="2007" />
+</front>
+<format type="pdf" octets="24136"
+   target="http://www3.ietf.org/proceedings/07mar/slides/plenaryw-3.pdf" />
+</reference>
+<reference anchor="CVS">
+<front>
+<title>CVS: Concurrent Versions System</title>
+  <author initials="R." surname="Grune">
+  <organization>
+  vrije Universiteit Amsterdam
+  </organization>
+  </author>
+  <author initials="E." surname="Baalbergen">
+  <organization>
+  vrije Universiteit Amsterdam
+  </organization>
+  </author>
+  <author initials="M." surname="Waage">
+  <organization>
+  vrije Universiteit Amsterdam
+  </organization>
+  </author>
+  <author initials="B." surname="Berliner">
+  <organization />
+  </author>
+  <author initials="J." surname="Polk">
+  <organization />
+  </author>
+  <date month="November" year="1985" />
+</front>
+</reference>
+<reference anchor="gb91">
+  <front>
+    <title>A mechanism for maintaining an up-to-date GenBank database
+  via Usenet
+  </title>
+  <author initials="R.H." surname="Smith">
+<organization />
+</author>
+  <author initials="Y." surname="Gottesman">
+<organization />
+</author>
+  <author initials="B." surname="Hobbs">
+<organization />
+</author>
+  <author initials="E." surname="Lear">
+<organization />
+</author>
+  <author initials="D." surname="Kristofferson">
+<organization />
+</author>
+  <author initials="D." surname="Benton">
+<organization />
+</author>
+  <author initials="P.R" surname="Smith">
+<organization />
+</author>
+  <date month="April" year="1991" />
+</front>
+<seriesInfo name="CABIOS" value="" />
+</reference>
+<?rfc include="reference.CCITT.X509.1988.xml" ?>
+ &W3C.REC-xml; 
+ &W3C.soap12-part1;
+ &W3C.soap12-part2; 
+<?rfc include="reference.I-D.fuller-lisp-alt" ?>
+<?rfc include="reference.I-D.meyer-lisp-cons" ?>
+</references>
+<section title="Generating and verifying the database signature with
+  OpenSSL">
+  <t>As previously mentioned, one goal of NERD was to use
+  off-the-shelf tools to both generate and retrieve the database.  To
+  many, PKI is magic.  This section is meant to provide at least some
+  clarification as to both the generation and verification process,
+  complete with command line examples.  Not included is how you get
+  the entries themselves.  We'll assume they exist, and that you're
+  just trying to sign the database.
+  </t>
+  <t>
+  To sign the database, to start with, you need a database file that
+  has a database header described in <xref target="MECHANISM" />.  Block
+  size should be zero, and there should be no PKCS#7 block at this
+  point.  You also need a certificate and its private key with which
+  you will sign the database.
+  </t>
+  <t>
+  The OpenSSL &quot;smime&quot; command contains all the functions we
+  need from this point forth.  To sign the database, issue the
+  following command:
+  </t>
+<figure>
+<artwork><![CDATA[
+
+      openssl smime -binary -sign -outform DER -signer yourcert.crt \
+              -inkey yourcert.key -in database-file -out signature
+
+]]>
+</artwork>
+</figure>
+   <t>
+   -binary states that no MIME canonicalization should be performed.
+   -sign indicates that you are signing the file that was given as the
+   argument to -in.  The output format (-outform) is binary DER, and
+   your public certificate is provided with -signer along with your
+   key with -inkey.  The signature itself is specified with -out.
+   </t>
+   <t>The resulting file &quot;signature&quot; is then copied into to
+   PKCS#7 block in the database header, its size in bytes is
+   recorded in the PKCS#7 block size field, and the resulting file is
+   ready for distribution to ITRs.
+   </t>
+   <t>
+   To verify a database file, first retrieve the PKCS#7 block from the
+   file by copying the appropriate number of bytes into another file,
+   say &quot;signature&quot;.  Next, zero this field, and set the block
+   size field to 0.  Next use the &quot;smime&quot; command to verify
+   the signature as follows:
+   </t>
+<figure>
+<artwork><![CDATA[
+
+    openssl smime -binary -verify -inform DER -content database-file
+            -out /dev/null -in signature
+
+]]>
+</artwork>
+</figure>
+<t>Openssl will return &quot;Verification OK&quot; if the signature is
+correct.  OpenSSL provides sufficiently rich libraries to accomplish
+  the above within the C programming language with a single pass.
+</t>
+</section>
+
+<section title="Changes">
+<t>This section to be removed prior to publication.
+<vspace blankLines="1" />
+<list style="symbols">
+<t>04: Analysis change: IPv6 RLOCs are 128 bits.  While they can be
+  shortened to 64 bits, that involves substantial ETR changes and
+  expenditure of IPv6 networks, which is probably unnecessary, and can
+  be left as a later optimization.  Added an option of independent
+  operators.  Processed all but two of Dino&apos;s comments.
+  Addressed Scott&apos;s comments.  Removed existing work analysis.
+  Saving that for another day.  Clarified OpenSSL Appendix.
+</t>
+<t>05: clean DOWN.  reinsert some text for historical purposes.</t>
+<t>04: cleanup</t>
+<t>03: Change dbname to a domain name, indicate that is what is in the
+  subject of the X.509 certificate, and list editorial changes,
+update acknowledgments.</t>
+<t>02: Incorporate some of Dave Thaler's comments.  Add authentication
+block detail.  Modify analysis to take IPv6 into account, along with a
+more realistic number of RLOCs per EID.  Add some comments about
+potential risks of a cold start.  Add S/MIME example as appendix A and
+take out old ToDo.  Provide some amount of compression of IPv6
+addresses by limiting their size to significant bytes rounded to a
+four byte word boundary.</t>
+<t>01: Massive spelling correction, URI example correction.
+</t>
+<t>00: Initial Revision.
+</t>
+</list>
+<vspace blankLines="1" />
+</t>
+</section>
+</back>
+</rfc>

@@ -1,0 +1,229 @@
+INTERNET-DRAFT                                           D. Ray de Silva
+Intended status: Standard                                      Sri Lanka
+File: draft-ray-foretrunc-00                               2 August 2011
+Expires: 3 February 2012
+
+       Implementing Block-Level Enhancements for POSIX Filesystems:
+           Fore-truncation, Ensparsement, and Re-Contiguization
+
+      Copyright (c) 2011 IETF Trust and the persons identified as the
+      document authors. All rights reserved.
+
+      This document is subject to BCP 78 and the IETF Trust's Legal
+      Provisions Relating to IETF Documents
+      (http://trustee.ietf.org/license-info) in effect on the date of
+      publication of this document. Please review these documents
+      carefully, as they describe your rights and restrictions with
+      respect to this document.
+
+      This Internet-Draft is submitted in full conformance with the
+      provisions of BCP 78 and BCP 79.
+      
+      Internet-Drafts are working documents of the Internet Engineering
+      Task Force (IETF), its areas, and its working groups.  Note that
+      other groups may also distribute working documents as Internet-
+      Drafts.
+
+      Internet-Drafts are draft documents valid for a maximum of six
+      months and may be updated, replaced, or obsoleted by other
+      documents at any time.  It is inappropriate to use Internet-
+      Drafts as reference material or to cite them other than as
+      "work in progress."
+
+      The list of current Internet-Drafts can be accessed at
+      http://www.ietf.org/1id-abstracts.html
+
+      The list of Internet-Draft Shadow Directories can be accessed at
+      http://www.ietf.org/shadow.html
+
+Abstract
+
+   This memo describes a method for the truncation, ensparsement and
+   block-reallocation of POSIX files for the purpose of improving data
+   access and reducing churn.  This specification is primarily useful
+   for managing large log files and pre-allocated database files in
+   enterprise environments.
+
+Overview and Rationale
+
+   Log files are a necessary curse in the computing world.  Logs must
+   be maintained for technical, business, and legal reasons.  Logs
+   need not, however, be kept forever on expensive rotating media;
+   only a working subset is required on-line.  The issue is that logs
+   grow from the end, but must be truncated from the front.  The few
+   systems that allow truncation only permit it at the end.
+
+   Some systems rely on sparse files, i.e. those in which not all
+   logically sequential blocks are actually allocated.  The net effect
+   is that any query on a non-existent block simply returns a block of
+   zeroes, without any disk storage overhead (except during backups,
+   where some archival methods faithfully copy the non-existent blocks
+   and magically enlarge the storage requirement).  It is useful to be
+   able to actually drop blocks that are unused, such that sparsity
+   can be applied to a file after it was originally written.
+
+   Much is made of the lack of necessity for defragmentation of files
+   in POSIX filesystems, but the argumentation is not completely
+   convincing. In many cases, poorly allocated files, especially in
+   very large files such as log files and pre-allocated database,
+   make even a sequential pass through the file akin to a random set
+   of seeks.  The ability to enhance the contiguity of large files,
+   if possible at reasonable I/O cost, would be a very worthwhile
+   addition.
+
+Assumptions on File Allocation Model
+
+   Although technically possible on any filesystem, the methods herein
+   are addressed to the POSIX model, in which the following block
+   allocation model is followed (or faithfully faked, which amounts to
+   the same thing):
+
+      1. The name of the file is independent of the data, and is stored
+         elsewhere. The actual identifier of the file is a (usually)
+         32-bit identifier termed an Index Node (Inode), unique to the
+         filesystem but only if qualified with the filesystem id. 
+
+      2. The Inode contains, either within itself or in extension
+         blocks, the allocation table for file space.  The file block
+         numbers appear in logical sequential order such that, i.e., if
+         4K blocks are being allocated, then byte number 40960001 will
+         be allocated in the 10001st block in the list.  This actual
+         data block may exist anywhere within the confines of the
+         filesystem.
+
+      3. The block size may vary from 512, the original standard, to any
+         power of 2, with 4096 bytes being the current favourite.  Some
+         SSDs allocate data blocks of 64K each, but it is probably not
+         in the interest of the rest of the community to assume such a
+         large unit as a default size.  However, varying sizes need to
+         be allowed for.
+
+Discussion
+
+   The following additional operations are proposed.
+
+      A. Drop Block Range.  This operation, applied to a file, would
+         result in the file freeing the referred blocks.  The effect
+         on users would be that any requests to those blocks would now
+         simply return a block of zeroes.
+
+         1. Implementation difficulty: Trivial.
+               Can be implemented on any known system almost
+               immediately.
+
+         2. Operation permitted while file is in use: No.
+               Users may have cached blocks or have buffered sequential
+               reads.
+
+         3. Operation safe to use in event of catastrophic failure: Yes.
+               The only downside would be the failure to write-back the
+               freeing of blocks, and this would be a safe failure.
+
+      B. Re-Arrange Block Allocation Order.  This would permit the
+         moving of an already-allocated block or blocks to the location
+         of a free'd block or blocks.  The Inode allocation table size
+         remains unchanged, the location of some block numbers simply
+         moves from one place in the virtual array to another (which
+         were originally zeroes).
+
+         1. Implementation difficulty: Moderate.
+               Can be implemented on most systems easily.
+
+         2. Operation permitted while file is in use: No.
+               Users may have cached blocks or have buffered sequential
+               reads.
+
+         3. Operation safe to use in event of catastrophic failure: No.
+               Metadata updates may cause a loss of the whole file. The
+               safe implementation would be to allocate a new inode,
+               copy the changed allocation table, and then switch
+               inodes. This procedure can be logged for replay/undo.
+
+      C. Optimize Block Allocation.  This could be a nearly
+         parameterless request, since the filesystem manager must make
+         most of the decisions.  The following algorithm is proposed:
+            i. Get the current free list, add to it all blocks assigned
+               to the current file, and sort the list.
+           ii. Prepare a list of optimal exchange-pairs by eliminating
+               blocks already in correct order.
+          iii. Grab the free blocks required and lock them.
+           iv. Apply your favourite defrag algorithm: move to free
+               blocks first, exchange nearest blocks first, whatever.
+
+         1. Implementation difficulty: non-trivial.
+               Requires careful design and will use considerable memory
+               for operation, in addition to high I/O bandwidth.
+
+         2. Operation permitted while file is in use: Yes.
+               The file logical order is unchanged, and buffered data
+               remains valid.
+
+         3. Operation safe to use in event of catastrophic failure:
+               Yes. Provided that write-before-metadata-update is
+               followed, no corruption should occur except to the free
+               list, which can be easily rebuilt.
+
+Implementation
+
+   1. User-level implementation
+         One operation, that of ensparsement, is actually already
+         implemented de-facto in the Sandforce 1200/1500 series of SSD
+         controllers.  In these systems, the incoming write data
+         effectively generates a hash which is compared with existing
+         signatures on the media; if there is a duplicate, the data is
+         simply not written.  Consider the effect of overwriting an
+         existing file with blocks of zeroes: after the first few blocks
+         are written, the next blocks are simply free'd and re-used.
+         This feature operates across all files in the filesystem, so
+         that if any file has blocks of zeroes, only one such block
+         will ever be written.
+
+   2. Application-level implementation
+         It is envisaged that this feature would be added to the
+         (already cluttered!) fcntl functions.
+
+         One issue that would have to be addressed is the earlier
+         mentioned fact that different systems have different block
+         sizes.  To enable the implementation to recover smoothly from
+         parameter errors, it is suggested that one set of error returns
+         be "Incorrect Block Size Specified", in which case the error
+         return would be the actual block size available.  Where there
+         are multiple block sizes in simultaneous use, such as in some
+         tail-packing schemes, the largest size is defaulted.
+
+         To avoid having to specify a long list of block numbers, the
+         parameters should permit a block range (i.e. block 0 to 10000)
+         to be specified.  It is also possible to let the system decide
+         in which order to operate on the blocks, for greatest
+         efficiency.
+
+Resulting Features
+
+   The goals set at the beginning of this paper will be achieved by
+   using the three operations specified.
+
+   1. Fore-truncation of log files: Operation A applied to the beginning
+      of the file, followed by Operation B applied to the entire file
+      with offset to the location of the surviving data.  This would
+      move all data logically up a number of blocks, and set the new
+      EOF.
+
+   2. Applying sparsity to already-written files: Operation A by itself.
+
+   3. De-fragmentation: Operation C by itself.  Various degrees of
+      re-contiguization are possible: a) only re-arrange blocks which
+      are in reversed order, b) find free space to create large
+      contiguous extents, or 3) full-fleged optimization.
+
+
+
+Author's Address
+
+   D. Renuk de Silva
+   Renux Private Limited
+   Ratmalana WP 10370
+   Sri Lanka
+
+   Phone: +9478 622-7093
+
+   EMail: renuk007@users.sourceforge.net

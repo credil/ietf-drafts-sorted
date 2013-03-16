@@ -1,0 +1,313 @@
+<?xml version="1.0" encoding="US-ASCII"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+<?rfc toc="yes"?>
+<?rfc tocompact="yes"?>
+<?rfc tocdepth="3"?>
+<?rfc tocindent="yes"?>
+<?rfc symrefs="yes"?>
+<?rfc sortrefs="yes"?>
+<?rfc comments="yes"?>
+<?rfc inline="yes"?>
+<?rfc compact="yes"?>
+<?rfc subcompact="no"?>
+<?rfc strict='yes'?>
+<?rfc iprnotified='no'?>
+<rfc category="info" docName="draft-generic-v6ops-tunmtu-02.txt"
+     ipr="trust200902">
+  <front>
+    <title abbrev="Generic Tunnel MTU">Generic Tunnel MTU
+    Determination</title>
+
+    <author fullname="Fred L. Templin" initials="F. L." role="editor"
+            surname="Templin">
+      <organization>Boeing Research &amp; Technology</organization>
+
+      <address>
+        <postal>
+          <street>P.O. Box 3707</street>
+
+          <city>Seattle</city>
+
+          <region>WA</region>
+
+          <code>98124</code>
+
+          <country>USA</country>
+        </postal>
+
+        <email>fltemplin@acm.org</email>
+      </address>
+    </author>
+
+    <date day="06" month="June" year="2012" />
+
+    <keyword>I-D</keyword>
+
+    <keyword>Internet-Draft</keyword>
+
+    <abstract>
+      <t>The Maximum Transmission Unit (MTU) for popular IP-within-IP tunnels
+      is currently recommended to be set to 1500 (or less) minus the length of
+      the encapsulation headers when static MTU determination is used. This
+      requires the tunnel ingress to either fragment any IP packet larger than
+      the MTU or drop the packet and return an ICMP Packet Too Big (PTB)
+      message. Concerns for operational issues with Path MTU Discovery (PMTUD)
+      point to the possibility of MTU-related black holes when a packet is
+      dropped due to an MTU restriction. The current "Internet cell size" is
+      therefore stuck at 1500 bytes (i.e., the minimum MTU configured by the
+      vast majority of links in the Internet), but the desired end state is
+      full accommodation of MTU diversity. This document therefore presents a
+      method to boost the tunnel MTU to larger values.</t>
+    </abstract>
+  </front>
+
+  <middle>
+    <section title="Introduction">
+      <t>The Maximum Transmission Unit (MTU) for popular IP-within-IP tunnels
+      is currently recommended to be set to 1500 (or less) minus the length of
+      the encapsulation headers when static MTU determination is used. This
+      requires the tunnel ingress to either fragment any IP packet larger than
+      the MTU or drop the packet and return an ICMP Packet Too Big (PTB)
+      message <xref target="RFC0791"></xref><xref target="RFC2460"></xref>.
+      Concerns for operational issues with Path MTU Discovery (PMTUD) <xref
+      target="RFC1191"></xref><xref target="RFC1981"></xref> point to the
+      possibility of MTU-related black holes when a packet is dropped due to
+      an MTU restriction. The current "Internet cell size" is therefore stuck
+      at 1500 bytes (i.e., the minimum MTU configured by the vast majority of
+      links in the Internet), but the desired end state is full accommodation
+      of MTU diversity. This document therefore presents a method to boost the
+      tunnel MTU to larger values.</t>
+
+      <t>Pushing the tunnel MTU to 1500 bytes or beyond is met with the
+      challenge that the addition of encapsulation headers would cause an
+      inner IP packet that is slightly less than 1500 bytes to appear as a
+      1501 byte or larger outer IP packet on the wire. This can result in the
+      packet being either fragmented or dropped by a router that connects to a
+      1500 byte link. Using the approach outlined in this document, the tunnel
+      ingress avoids this issue by performing IP fragmentation on the inner
+      packet before encapsulating each fragment in outer headers. The approach
+      is outlined in the following sections.</t>
+    </section>
+
+    <section title="Problem Statement">
+      <t>When an IP tunnel configures a smaller MTU than 1500 bytes, packets
+      that are small enough to traverse earlier links in the path toward the
+      final destination may be dropped at the tunnel ingress with a PTB
+      message returned to the original source. However, operational experience
+      has shown that the PTB messages can be lost in the network due to
+      filtering in which case the source does not receive notification of the
+      loss. It is therefore highly desirable that the tunnel configure an MTU
+      of at least 1500 bytes, even though encapsulation would cause the
+      tunneled packet to be larger than 1500 bytes.</t>
+
+      <t>One possibility is to use IP fragmentation of the outer IP layer
+      protocol so that inner packets up to 1500 bytes are delivered even if
+      the tunnel encapsulation causes the outer packet to be larger than 1500
+      bytes. However, fragmentation has been shown to be dangerous at high
+      data rates due to the Identification field wrapping while reassemblies
+      are still active <xref target="RFC4963"></xref>. Also, if outer IP
+      fragmentation were used the tunnel egress would need to reassemble which
+      can be an onerous burden when the egress is located on a router. The
+      tunnel ingress further has no assurance that the egress can reassemble
+      packets larger than 1500 bytes.</t>
+
+      <t>A second possibility is to enable PMTUD on the outer packet. However,
+      the PTB messages that may result could either be lost on the return path
+      to the tunnel ingress or may not contain enough information for
+      translation into an inner packet PTB for delivery to the original
+      source. Still another possibility is for the tunnel ingress to maintain
+      state about MTU sizes for various tunnel egresses, but this becomes
+      unwieldy when the number of egresses is large.</t>
+
+      <t>In short, PMTUD is a mess and new approaches are needed.</t>
+    </section>
+
+    <section title="Tunnel MTU">
+      <t>Section 3.2 of <xref target="RFC4213"></xref> presents both static
+      and dynamic MTU determination algorithms. Similar algorithms appear in
+      other tunneling mechanisms. These algorithms have been shown to be
+      problematic in many instances, as discussed in Section 2. This document
+      therefore proposes a generic MTU determination method suitable for all
+      tunnel types via the following algorithm:</t>
+
+      <t><figure>
+          <artwork><![CDATA[
+   1. set "HLEN" to the length of the encapsulation headers.
+   2. set the tunnel ingress MTU to "infinity", where "infinity"
+      is defined as ((2^32 - 1) - HLEN) for tunnels over IPv6
+      and ((2^16 - 1) - HLEN) for tunnels over IPv4.
+   3. for IP packets to be admitted into the tunnel:
+      a) if the packet is 1501 or more:
+         - if the packet is an atomic packet (*) admit it
+           into the tunnel if it is no larger than the MTU
+           of the underlying interface; otherwise, drop the
+           packet and return a PTB message.
+         - if the packet is not an atomic packet, break it
+           into N pieces (where each piece is a random length
+           between 500-1000 bytes) and admit each piece into
+           the tunnel.
+      b) if the packet is between 1281 - 1500:
+         - break the packet into 2 pieces (where each piece
+           is a random length between 500-1000 bytes) and
+           admit each piece into the tunnel.
+      c) if the packet is 1280 or less:
+         - admit the packet into the tunnel
+  4. the IP destination gets to reassemble if necessary
+]]></artwork>
+        </figure>(*) An "atomic packet" is an IPv6 packet that does not
+      contain a fragment header, or an IPv4 packet with (DF=1 &amp;&amp; MF=0
+      &amp;&amp; Offset=0) <xref
+      target="I-D.ietf-intarea-ipv4-id-update"></xref>.</t>
+
+      <t>In the above algorithm, clause 3 a) requires that atomic packets not
+      be subject to fragmentation within the tunnel. Instead, the tunnel
+      ingress should process any PTB messages returned by the tunnel and
+      translate them into a corresponding PTB message to return to the
+      original source. In clauses 3 b) and 3 c), fragmentation within the
+      tunnel must be permitted, however the fragment size chosen for inner
+      fragmentation before encapsulation reduces the likelihood that tunnel
+      fragmentation will occur following encapsulation.</t>
+    </section>
+
+    <section title="Inner Packet Fragmentation and Identification">
+      <t>For non-atomic inner IP packets, clause 3 b) in the algorithm in
+      Section 3 performs inner fragmentation using the Identification value
+      already present in the packet. The tunnel ingress then admits each
+      fragment into the tunnel unconditionally, since it is the original
+      source (and not the tunnel) that asserts the uniqueness of the packet's
+      Identification value. For atomic inner IP packets, clause 3 b) in the
+      algorithm in Section 3 ignores the requirement that routers in the
+      network must not fragment atomic packets. The rest of this section
+      discusses considerations for fragmentation of atomic IP packets.</t>
+
+      <t>The tunnel ingress maintains a randomly-initialized and
+      arithmetically-increasing Identification value as either a per-tunnel or
+      per-destination variable. For IPv6 atomic packets, the use of inner
+      fragmentation requires that the tunnel ingress insert an IPv6 fragment
+      header on each fragment. For IPv4 atomic packets, the tunnel ingress
+      must rewrite the value in the packet header Identification field. In
+      both cases, we observe that the Identification field provides sufficient
+      protection against accidental reassembly of fragments from different IP
+      packets given careful operational considerations.</t>
+
+      <t>Specifically, the tunnel ingress must ensure that there will be no IP
+      fragments alive in the system with duplicate Identification values.
+      Since <xref target="RFC2460"></xref> specifies that the maximum time a
+      node may retain an incomplete fragmented packet is 60 seconds, this
+      means that the tunnel ingress must not allow the Identification values
+      to be repeated within this timeframe. The tunnel ingress can therefore
+      calculate a maximum data rate for admission of fragmented packets into
+      the tunnel.</t>
+
+      <t>For IPv4, to avoid Identification value duplication the tunnel
+      ingress must admit no more than (2^16 / 60) = 1092 IPv4 packets
+      requiring fragmentation into the tunnel per second. In the worst case,
+      consider that each packet is 1281 bytes (i.e., 10248 bits) in length.
+      The tunnel ingress can then calculate the maximum data rate as (1092 *
+      10248) = 11190816 bits/sec, or approximately 11 Mbps. It is therefore
+      essential that the tunnel ingress set a rate limit to no more than 11
+      Mbps for those atomic IPv4 packets that will require fragmentation. This
+      restriction can be relaxed if the tunnel ingress maintains a
+      per-destination Identification value instead of a single Identification
+      value for all destinations.</t>
+
+      <t>For IPv6, to avoid Identification value duplication the tunnel
+      ingress must admit no more than (2^32 / 60) = 71582788 IPv6 packets
+      requiring fragmentation into the tunnel per second. In the worst case,
+      consider that each packet is 1281 bytes (i.e., 10248 bits) in length.
+      The tunnel ingress can then calculate the maximum data rate as (71582788
+      * 10248) = 733580411424 bits/sec, or approximately 733 Gbps. It is
+      therefore essential that the tunnel ingress set a rate limit to no more
+      than 733 Gbps for those atomic IPv6 packets that will require
+      fragmentation. This restriction can be relaxed if the tunnel ingress
+      maintains a per-destination Identification value instead of a single
+      Identification value for all destinations.</t>
+
+      <t>Note that a possible conflict exists when a source host emits both
+      atomic and non-atomic packets. In that case, there is a small
+      possibility that the Identification values used by the source host in
+      non-atomic packets will temporarily be in close correlation with those
+      used by the tunnel ingress in atomic packets, where a "collision" may
+      occur in the Identification values. Factors that mitigate such conflicts
+      are the random assignment of the initial Identification value, random
+      arrivals of atomic and non-atomic packets, the random length of the
+      fragments used by the tunnel ingress (i.e., to cause a length mismatch
+      for colliding reassemblies) and, in even rarer instance, the use of the
+      Internet checksum following reassembly.</t>
+    </section>
+
+    <section title="Applicability">
+      <t>This approach applies to common IPv6 transition mechanisms, including
+      configured tunnels <xref target="RFC4213"></xref>, 6to4 <xref
+      target="RFC3056"></xref>, ISATAP <xref target="RFC5214"></xref>, DSMIP
+      <xref target="RFC5555"></xref>, 6rd <xref target="RFC5969"></xref>,
+      etc.</t>
+
+      <t>This same approach can further be applied to any variety of
+      IP-within-IP tunnels, including GRE <xref target="RFC1701"></xref>,
+      IPv4-in-IPv4 <xref target="RFC2003"></xref>, IPv6-in-IPv6 <xref
+      target="RFC2473"></xref>, IPv4-in-IPv6 <xref target="RFC6333"></xref>,
+      IPsec <xref target="RFC4301"></xref>, Teredo <xref
+      target="RFC4380"></xref>, LISP <xref target="I-D.ietf-lisp"></xref>,
+      SEAL <xref target="I-D.templin-intarea-seal"></xref>, etc.</t>
+    </section>
+
+    <section title="IANA Considerations">
+      <t>There are no IANA considerations for this document.</t>
+    </section>
+
+    <section anchor="security" title="Security Considerations">
+      <t>The security considerations for the various tunneling mechanisms
+      apply also to this document.</t>
+    </section>
+
+    <section anchor="acknowledge" title="Acknowledgments">
+      <t>This method was inspired through discussion on the IETF v6ops and
+      NANOG mailing lists in the May/June 2012 timeframe.</t>
+    </section>
+  </middle>
+
+  <back>
+    <references title="Normative References">
+      <?rfc include="reference.RFC.0791"?>
+
+      <?rfc include="reference.RFC.2460"?>
+    </references>
+
+    <references title="Informative References">
+      <?rfc include="reference.RFC.1981"?>
+
+      <?rfc include="reference.RFC.1191"?>
+
+      <?rfc include="reference.RFC.3056"?>
+
+      <?rfc include="reference.RFC.5214"?>
+
+      <?rfc include="reference.RFC.5555"?>
+
+      <?rfc include="reference.RFC.5969"?>
+
+      <?rfc include="reference.RFC.4380"?>
+
+      <?rfc include="reference.RFC.2473"?>
+
+      <?rfc include="reference.RFC.6333"?>
+
+      <?rfc include="reference.RFC.4213"?>
+
+      <?rfc include="reference.RFC.4301"?>
+
+      <?rfc include="reference.RFC.4963"?>
+
+      <?rfc include="reference.RFC.1701"?>
+
+      <?rfc include="reference.RFC.2003"?>
+
+      <?rfc include="reference.I-D.templin-intarea-seal"?>
+
+      <?rfc include="reference.I-D.ietf-intarea-ipv4-id-update"?>
+
+      <?rfc include="reference.I-D.ietf-lisp"?>
+    </references>
+  </back>
+</rfc>

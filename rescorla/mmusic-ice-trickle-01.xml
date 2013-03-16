@@ -1,0 +1,920 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type='text/xsl' href='rfc2629.xslt' ?>
+
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+
+<rfc category='std' ipr='trust200902'
+     docName='draft-rescorla-mmusic-ice-trickle-01'>
+
+<?rfc toc='yes' ?>
+<?rfc symrefs='yes' ?>
+<?rfc sortrefs='yes'?>
+<?rfc iprnotified='no' ?>
+<?rfc strict='yes' ?>
+<?rfc compact='yes' ?>
+  <front>
+
+    <title abbrev='Trickle ICE'>
+      Trickle ICE: Incremental Provisioning of Candidates for the
+      Interactive Connectivity Establishment (ICE) Protocol
+    </title>
+    <author fullname="Eric Rescorla" initials="E.K." surname="Rescorla">
+      <organization>RTFM, Inc.</organization>
+      <address>
+        <postal>
+          <street>2064 Edgewood Drive</street>
+          <city>Palo Alto</city>
+          <region>CA</region>
+          <code>94303</code>
+          <country>USA</country>
+        </postal>
+        <phone>+1 650 678 2350</phone>
+        <email>ekr@rtfm.com</email>
+      </address>
+    </author>
+    <author fullname="Justin Uberti" initials="J." surname="Uberti">
+      <organization>Google</organization>
+      <address>
+        <postal>
+          <street>747 6th St S</street>
+          <city>Kirkland</city>
+          <region>WA</region>
+          <code>98033</code>
+          <country>USA</country>
+        </postal>
+        <phone>+1 857 288 8888</phone>
+        <email>justin@uberti.name</email>
+      </address>
+    </author>
+    <author initials='E.' surname='Ivov'
+            fullname='Emil Ivov'>
+      <organization abbrev='Jitsi'>Jitsi</organization>
+      <address>
+        <postal>
+          <street></street>
+          <city>Strasbourg</city>
+          <code>67000</code>
+          <country>France</country>
+        </postal>
+        <phone>+33 6 72 81 15 55</phone>
+        <email>emcho@jitsi.org</email>
+      </address>
+    </author>
+    <date />
+    <abstract>
+      <t>
+        This document describes an extension to the Interactive
+        Connectivity Establishment (ICE) protocol that allows ICE agents
+        to send and receive candidates incrementally rather than
+        exchanging complete lists. With such incremental provisioning,
+        ICE agents can begin connectivity checks while they are still
+        gathering candidates and considerably shorten the time necessary
+        for ICE processing to complete.
+      </t>
+      <t>
+        The above mechanism is also referred to as "trickle ICE".
+      </t>
+    </abstract>
+  </front>
+  <middle>
+    <section title='Introduction'>
+      <t>
+        The Interactive Connectivity Establishment (ICE) protocol
+        <xref target="RFC5245"/> describes mechanisms for gathering,
+        candidates, prioritizing them, choosing default ones, exchanging
+        them with the remote party, pairing them and ordering them into
+        check lists. Once all of the above have been completed, and only
+        then, the participating agents can begin a phase of connectivity
+        checks and eventually select the pair of candidates that will be
+        used in the following session.
+      </t>
+      <t>
+        While the above sequence has the advantage of being relatively
+        straightforward to implement and debug once deployed, it may
+        also prove to be rather lengthy. Gathering candidates or
+        candidate harvesting would often involve things like querying
+        <xref target="RFC5389">STUN</xref> servers, discovering UPnP
+        devices, and allocating relayed candidates at
+        <xref target="RFC5766">TURN</xref> servers. All of these can
+        be delayed for a noticeable amount of time and while they can be
+        run in parallel, they still need to respect the pacing
+        requirements from <xref target="RFC5245"/>, which is likely to
+        delay them even further. Some or all of the above would also
+        have to be completed by the remote agent. Both agents would
+        next perform connectivity checks and only then would they be
+        ready to begin streaming media.
+      </t>
+      <t>
+        All of the above could lead to relatively lengthy session
+        establishment times and degraded user experience.
+      </t>
+      <t>
+        The purpose of this document is to define an alternative mode of
+        operation for ICE implementations, also known as "trickle ICE",
+        where candidates can be exchanged incrementally. This would
+        allow ICE agents to exchange host candidates as soon as a
+        session has been initiated. Connectivity checks for a media
+        stream would also start as soon as the first candidates for that
+        stream have become available.
+      </t>
+      <t>
+        Trickle ICE allows reducing session establishment times in cases
+        where connectivity is confirmed for the first exchanged
+        candidates (e.g. where the host candidates for one of the agents
+        are directly reachable from the second agent). Even when this is
+        not the case, running candidate harvesting for both agents and
+        connectivity checks all in parallel allows to considerably
+        reduce ICE processing times.
+      </t>
+      <t>
+        It is worth pointing out that before being introduced to the
+        IETF, trickle ICE had already been included in specifications
+        such as <xref target="XEP-0176">XMPP Jingle</xref> and it has
+        been in use in various implementations and deployments.
+      </t>
+      <t>
+        In addition to the basics of trickle ICE, this document also
+        describes how support for trickle ICE needs to be discovered,
+        how regular ICE processing needs to be modified when
+        building and updating check lists, and how trickle ICE
+        implementations should interoperate with agents that only
+        implement <xref target="RFC5245"/> processing.
+      </t>
+      <t>
+        This specification does not define usage of trickle ICE with any
+        specific signalling or media description protocol, contrary to
+        <xref target="RFC5245"/> which defined a usage for ICE wht SIP
+        and SDP. Such usages would have to be specified in separate
+        documents.
+      </t>
+    </section>
+    <section title="Terminology">
+      <t>
+        The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL
+        NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and
+        "OPTIONAL" in this document are to be interpreted as described
+        in <xref target="RFC2119"/>.
+      </t>
+      <t>
+        This specification makes use of all terminology defined by the
+        protocol for Interactive Connectivity Establishment in
+        <xref target="RFC5245"/>.
+      </t>
+      <t>
+        <list style="hanging">
+          <t hangText="Vanilla ICE:">
+            The Interactive Connectivity Establishment protocol as
+            defined in <xref target="RFC5245"/>.
+          </t>
+          <t hangText="Candidate Harvester:">
+            A module used by an ICE agent to obtain local candidates.
+            Candidate harvesters use different mechanisms for
+            discovering local candidates. Some of them would typically
+            make use of protocols such as STUN or TURN. Others may also
+            employ techniques that are not referenced within
+            <xref target="RFC5245"/>. UPnP based port allocation and
+            XMPP Jingle Relay Nodes <xref target="XEP-0278"/> are among
+            the possible examples.
+          </t>
+          <t hangText="ICE Description:">
+            A set of parameters necessary for ICE initiation. Such
+            parameters include ice-ufrag, ice-pwd and other attributes
+            that agents need to exchange in the beginning of an ICE
+            session. ICE descriptions are transmitted by signalling. In
+            the case of protocols using Offer/Answer semantics, they are
+            always part of the offer and often also part of the answer.
+          </t>
+        </list>
+      </t>
+    </section>
+    <section title='Incompatibility with Standard ICE'
+             anchor='incompat'>
+      <t>
+        The ICE protocol was designed to be fairly flexible so that it
+        would work in and adapt to as many network environments as
+        possible. It is hence important to point out at least some of
+        the reasons why, despite its flexibility, the specification in
+        <xref target="RFC5245"/> would not support trickle-ICE.
+      </t>
+      <t>
+        <xref target="RFC5245"/> describes the conditions required to
+        update check lists and timer states while an ICE agent is in the
+        Running state. These conditions are verified upon transaction
+        completion and one of them stipulates that:
+        <list style='empty'>
+          <t>
+            If there is not a pair in the valid list for each component
+            of the media stream, the state of the check list is set to
+            Failed.
+          </t>
+        </list>
+        This could be a problem and cause ICE processing to fail
+        prematurely in a number of scenarios. Consider the following
+        case:
+        <list style='symbols'>
+          <t>
+            Alice and Bob are both located in different networks with
+            Network Address Translation (NAT). Alice and Bob themselves
+            have different address but both networks use the same
+            <xref target="RFC1918"/> block.
+          </t>
+          <t>
+            Alice sends Bob the candidate 10.0.0.10 which also happens
+            to correspond to an existing host on Bob's network.
+          </t>
+          <t>
+            Bob creates a check list consisting solely of 10.0.0.10 and
+            starts checks.
+          </t>
+          <t>
+            These checks reach the host at 10.0.0.10 in Bob's network,
+            which responds with an ICMP "port unreachable" error and per
+            <xref target="RFC5245"/> Bob marks the transaction as
+            Failed.
+          </t>
+        </list>
+        At this point the check list only contains Failed candidates and
+        the valid list is empty. This causes the media stream and
+        potentially all ICE processing to Fail.
+      </t>
+      <t>
+        A similar race condition would occur if the initial offer from
+        Alice only contains candidates that can be determined as
+        unreachable (per
+        <xref target="I-D.keranen-mmusic-ice-address-selection"/>) from
+        any of the candidates that Bob has gathered. This would be the
+        case if Bob's candidates only contain IPv4 addresses and the
+        first candidate that he receives from Alice is an IPv6 one.
+      </t>
+      <t>
+        Another potential problem could arise when a non-trickle
+        ICE implementation sends an offer to a trickle one. Consider the
+        following case:
+        <list style='symbols'>
+          <t>
+            Alice's client has a non-trickle ICE implementation
+          </t>
+          <t>
+            Bob's client has support for trickle ICE.
+          </t>
+          <t>
+            Alice and Bob are behind NATs with address-dependent
+            filtering <xref target="RFC4787"/>.
+          </t>
+          <t>
+            Bob has two STUN servers but one of them is currently
+            unreachable
+          </t>
+        </list>
+        After Bob's agent receives Alice's offer it would immediately
+        start connectivity checks. It would also start gathering
+        candidates, which would take long because of the unreachable
+        STUN server. By the time Bob's answer is ready and sent to
+        Alice, Bob's connectivity checks may well have failed: until
+        Alice gets Bob's answer, she won't be able to start connectivity
+        checks and punch holes in her NAT. The NAT would hence be
+        filtering Bob's checks as originating from an unknown endpoint.
+      </t>
+    </section>
+    <section title='Detecting Support for Trickle ICE' anchor="disco">
+      <t>
+        In order to avoid interoperability problems such as those
+        described in <xref target="incompat"/>, it is important that
+        trickle ICE sessions are only attempted in cases where both
+        parties support this specification. This means that usages of
+        trickle for specific protocols MUST provide one of the
+        following:
+      </t>
+      <t>
+        <list style='symbols'>
+          <t>
+            A way for agents to verify support of trickle ICE prior to
+            initiation a session.
+          </t>
+          <t>
+            A procedure for attempting a trickle ICE session in a way
+            that, when received by non-supporting agents, would either
+            allow for a smooth fallback to vanilla ICE, or fail in a
+            predictable way so that a vanilla ICE session can be retried
+            subsequently.
+          </t>
+        </list>
+      </t>
+      <t>
+        The exact mechanisms that would allow for the verifications
+        above are outside the scope of this document and should be
+        handled by the signalling protocol that is employing ICE.
+      </t>
+      <t>
+        Examples of how some signalling protocols already handle
+        service and capabilities discovery include:
+        <list style='symbols'>
+          <t>
+            <xref target="XEP-0030">Service discovery</xref> and
+            <xref target="XEP-0115">Entity capabilities</xref> for XMPP
+          </t>
+          <t>
+            <xref target="RFC3840">Indicating User Agent
+            Capabilities</xref> for SIP
+          </t>
+        </list>
+      </t>
+      <t>
+        Usages of trickle ICE SHOULD make use of these mechanisms where
+        they exist and can provide reliable indication.
+      </t>
+      <t>
+        In some cases, agents may choose to just send an offer
+        that the remote party would reject as invalid unless it supports
+        trickling. One such example would be an offer with no ICE
+        candidates and an invalid default address (e.g. 0.0.0.0).
+      </t>
+      <t>
+        Usages of trickle ICE MUST define a way for ICE descriptions
+        to indicate support for trickling as well as a clear procedure
+        for falling back to vanilla ICE in the absence of such support.
+      </t>
+    </section>
+    <section title='Relationship to the Offer/Answer Model' >
+      <t>
+        The vanilla ICE specification uses the Offer/Answer model for
+        exchanging all ICE parameters. Using just a couple of signalling
+        messages is obviously no longer possible with continuous
+        candidate provisioning and trying to fit candidate exchanges
+        into consecutive offer/answer pairs is clearly not practical.
+        This specification therefore loosens the relationship with  the
+        Offer/Answer model by splitting trickle ICE signalling into
+        two phases: initial ICE Descriptions and subsequent exchange of
+        additional candidates.
+      </t>
+      <t>
+        ICE descriptions contain session or media-level parameters that
+        are necessary for ICE processing to begin. Those include
+        attributes such as ice-ufrag and ice-pwd. Due to their nature
+        ICE descriptions are exchanged in the beginning of a session and
+        trickle ICE agents MUST NOT send any candidates prior to a
+        description. It is however possible for ICE descriptions to be
+        accompanied by a first set of candidates.
+      </t>
+      <t>
+        When using trickle ICE with Offer/Answer protocols agents MUST
+        include an initial ICE description in their Offers. Answerers in
+        this situation MAY send their ICE description at any point after
+        receiving that of the offerer but no later than sending their
+        answer, which MUST contain an ICE description if the agent did
+        not provide one before.
+      </t>
+      <t>
+        After sending an ICE description each agent can continue
+        trickling candidates regardless of what the state of the
+        Offer/Answer negotiation is.
+      </t>
+    </section>
+    <section title='Sending the Initial Description'
+             anchor="initial-desc">
+      <t>
+        An agent starts gathering candidates as soon as it has an
+        indication that communication is imminent (e.g. a user interface
+        cue or an explicit request to initiate a session). Contrary to
+        vanilla ICE, implementations of trickle ICE do not need to
+        gather candidates in a blocking manner, and SHOULD generate and
+        transmit their initial ICE description as early as possible.
+      </t>
+      <t>
+        In the case of protocols using the Offer/Answer model, agents
+        MUST include the initial ICE description in the corresponding
+        offer.
+      </t>
+      <t>
+        Trickle ICE agents MAY include any set of candidates in an ICE
+        description. This includes the possibility of generating a
+        description with no candidates, or one that contains all the
+        candidates that the agent is planning on using in the following
+        session.
+      </t>
+      <t>
+        For optimal performance, it is RECOMMENDED that an ICE
+        description contains host candidates only. This would allow both
+        agents to start gathering server reflexive, relayed and other
+        non-host candidates simultaneously, and it would also enable
+        them to begin connectivity checks.
+      </t>
+      <t>
+        If the privacy implications of revealing host addresses are a
+        concern, agents MAY generate an initial ICE description that
+        contains no candidates and then only trickle candidates that do
+        not reveal host addresses (e.g. relayed candidates).
+      </t>
+      <t>
+        Prior to actually sending an initial ICE description, agents
+        MAY verify if the remote party supports trickle ICE. If absence
+        of such support is confirmed agents SHOULD fall back to using
+        vanilla ICE or abandon the entire session.
+      </t>
+      <t>
+        All trickle ICE descriptions MUST indicate support of this
+        specification. The exact syntax of providing this indication is
+        left to the usages that define how signalling protocols employ
+        trickle ICE.
+      </t>
+      <t>
+        Calculating priorities and foundations, as well as determining
+        redundancy of candidates work the same way they do with vanilla
+        ICE.
+      </t>
+    </section>
+    <section title='Receiving the Initial Description' >
+      <t>
+        When an agent receives an initial ICE description, in the case
+        of protocols using Offer/Answer this description will be part
+        of the offer, it will check if it indicates support for trickle
+        ICE as explained in <xref target="disco"/>. If this is not the
+        case, the agent MUST process the description according to the
+        <xref target="RFC5245"/> procedures or standard
+        <xref target="RFC3264"/> processing in case no ICE support is
+        detected at all.
+      </t>
+      <t>
+        If, the description does indicate support for trickle ICE, the
+        agent will determine its role, start gathering and prioritizing
+        candidates and, while doing so it will also respond by sending
+        its own ICE description, so that both agents can start forming
+        check lists and begin connectivity checks.
+      </t>
+      <t>
+        Otherwise the agent would simply fallback to vanilla ICE
+        processing.
+      </t>
+      <section title="Responding to an Initial ICE Description">
+        <t>
+          An agent can respond to an initial ICE description at any
+          point while gathering candidates. Just as with initial ICE
+          descriptions (<xref target="initial-desc"/>), the agent does
+          send the description without any candidates or with all those
+          it is planning on using. Again, as with initial descriptions
+          it is RECOMMENDED that responses to initial ICE descriptions
+          contain host candidates so that the remote party can also
+          start forming checklists and performing connectivity checks.
+        </t>
+        <t>
+          The answer MUST indicate support for trickle ICE as described
+          by usage specifications.
+        </t>
+        <t>
+          For protocols using Offer/Answer semantics the response to
+          the initial ICE description would either be transmitted prior
+          to the <xref target="RFC3264"/> answer or as a part of it.
+        </t>
+      </section>
+      <section title="Forming check lists and beginning connectivity
+                      checks" anchor="check.lists">
+        <t>
+          After exchanging descriptions, and as soon as they have
+          gathered any candidates, agents will begin forming candidate
+          pairs, computing their priorities and creating check lists
+          according to the vanilla ICE procedures described in
+          <xref target="RFC5245"/>. Obviously in order for candidate
+          pairing to be possible, it would be necessary that both
+          descriptions contained candidates. If this was not the case
+          agents will still create the check lists (so that their
+          Active/Frozen state could be monitored and updated) but they
+          will only populate them once they have learned any local and
+          remote candidates.
+        </t>
+        <t>
+          Initially, all check lists will have their Active/Frozen state
+          set to Frozen.
+        </t>
+        <t>
+          Trickle ICE agents will then also attempt to unfreeze the
+          check list for the first media stream (i.e. the first media
+          stream that was reported to the ICE implementation from the
+          using application). If this checklist is still empty however,
+          agents will continue examining media streams in the order they
+          were reported and will unfreeze the first non-empty checklist.
+        </t>
+        <t>
+          Respecting the order in which lists have been reported to an
+          ICE implementation, or in other words, the order in which
+          streams had been described by the signalling protocol (e.g.
+          SDP), is helpful so that checks for the same media stream
+          is more likely to be performed simultaneously by both agents.
+        </t>
+      </section>
+    </section>
+    <section title="Receiving a Response to the Initial ICE
+                    Description">
+      <t>
+        When receiving an answer, agents will follow vanilla ICE
+        procedures to determine their role and they would then
+        form check lists and begin connectivity checks as described in
+        <xref target="check.lists"/>.
+      </t>
+    </section>
+    <section title='Performing Connectivity Checks' >
+      <t>
+        For the most part, trickle ICE agents perform connectivity
+        checks following vanilla ICE procedures. Of course, the
+        asynchronous nature of candidate harvesting in trickle ICE would
+        impose a number of changes:
+      </t>
+      <section title="Check List and Timer State Updates"
+               anchor="state-updates">
+        <t>
+          The vanilla ICE specification requires that agents update
+          check lists and timer states upon completing a connectivity
+          check transaction. During such an update vanilla ICE agents
+          would set the state of a check list to Failed if the following
+          two conditions are satisfied:
+          <list style="symbols">
+            <t>
+              all of the pairs in the check list are either in the
+              Failed or Succeeded state;
+            </t>
+            <t>
+              if at least one of the components of the media stream
+              has no pairs in its valid list.
+            </t>
+          </list>
+        </t>
+        <t>
+          With trickle ICE, the above situation would often occur when
+          candidate harvesting and trickling are still in progress and
+          it is perfectly possible that future checks will succeed. For
+          this reason trickle ICE agents add the following conditions to
+          the above list:
+        </t>
+        <t>
+          <list style="symbols">
+            <t>
+              all candidate harvesters have completed and the agent
+              is not expecting to learn any new candidates;
+            </t>
+            <t>
+              the remote agent has sent an end-of-candidates message
+              for that check list as described in
+              <xref target="end-of-candidates"/>.
+            </t>
+          </list>
+        </t>
+        <t>
+          Vanilla ICE requires that agents then update all other check
+          lists, placing one pair in each of them into the Waiting
+          state, effectively unfreezing the check list. Given that
+          with trickle ICE, other check lists may still be empty at that
+          point, a trickle ICE agent SHOULD also maintain an explicit
+          Active/Frozen state for every check list, rather than deducing
+          it from the state of the pairs it contains. This state should
+          be set to Active when unfreezing the first pair in a list
+          or when that couldn't happen because a list was empty.
+        </t>
+      </section>
+    </section>
+    <section title='Learning and Sending Additional Local Candidates'
+             anchor="send-trickling">
+      <t>
+        After an ICE description has been sent or received, agents will
+        most likely continue discovering new local candidates as
+        STUN, TURN and other non-host candidate harvesting mechanisms
+        begin to yield results. Whenever such a new candidate is
+        learned agents will compute its priority, type, foundation and
+        component id according to normal vanilla ICE procedures.
+      </t>
+      <t>
+        The new candidate is then checked for redundancy against the
+        existing list of local candidates. If its transport address and
+        base match those of an existing candidate, it will be considered
+        redundant and will be ignored. This would often happen for
+        server reflexive candidates that match the host addresses they
+        were obtained from (e.g. when the latter are public IPv4
+        addresses). Contrary to vanilla ICE, trickle ICE agents will
+        consider the new candidate redundant regardless of its priority.
+        [TODO: is this OK? if not we need to check if the existing
+        candidate was already used in conn checks, cancel them, and then
+        restart them with the new candidate ... and in this specific
+        case there's probably no point to do that].
+      </t>
+      <t>
+        Then, if no remote candidates are currently known for this same
+        stream, the new candidate will simply be added to the list of
+        local candidates.
+      </t>
+      <t>
+        Otherwise, if the agent has already learned of one or more
+        remote candidates for this stream and component, it will begin
+        pairing the new local candidates with them and adding the pairs
+        to the existing check lists according to their priority. Forming
+        candidate pairs will work the way it is described by the vanilla
+        ICE specification. Actually adding the new pair to a check list
+        however, will happen according to the rules described below.
+      </t>
+      <t>
+        If the new pair's local candidate is server reflexive, the
+        server reflexive candidate MUST be replaced by its base before
+        adding the pair to the list. Once this is done, the agent
+        examines the check list looking for another pair that would be
+        redundant with the new one. If such a pair exists and its state
+        is:
+      </t>
+      <t>
+        <list style="hanging">
+          <t hangText="Succeeded: ">
+            the newly formed pair is ignored.
+          </t>
+          <t hangText="Frozen or Waiting: ">
+            the agent chooses the pair with the higher priority local
+            candidate, places it in the state that the old pair was in
+            (i.e. Frozen or Waiting) and removes the other one as
+            redundant.
+          </t>
+          <t hangText="Failed: ">
+            the agent chooses the pair with the higher priority local
+            candidate, places it in the Waiting state and removes the
+            other one as redundant.
+          </t>
+          <t hangText="In-Progress: ">
+            The agent cancels the in-progress transaction (where
+            cancellation happens as explained in Section 7.2.1.4 of
+            <xref target="RFC5245"/>), then it chooses the pair with the
+            higher priority local candidate, places it in the Waiting
+            state and removes the other one as redundant.
+          </t>
+        </list>
+      </t>
+      <t>
+        For all other pairs, including those with a server reflexive
+        local candidate that were not found to be redundant:
+        <list style="symbols">
+          <t>
+            if this check list is Frozen then the new pair will
+            also be assigned a Frozen state.
+          </t>
+          <t>
+            else if the check list is Active and it is either empty or
+            contains only candidates in the Succeeded and Failed states,
+            then the new pair's state is set to Waiting.
+          </t>
+          <t>
+            else if the check list is non-empty and Active, then the new
+            pair state will be set to
+            <list style="hanging">
+              <t hangText="Frozen: ">
+                if there is at least one pair in the list whose
+                foundation matches the one in the new pair and whose
+                state is neither Succeeded nor Failed (eventually the
+                new pair will get unfrozen after the the on-going check
+                for the existing pair concludes);
+              </t>
+              <t hangText="Waiting: ">
+                if the list contains no pairs with the same foundation
+                as the new one, or, in case such pairs exist, they are
+                all in either the Succeeded or Failed states.
+              </t>
+            </list>
+          </t>
+        </list>
+      </t>
+      <section title='Announcing End of Candidates'
+             anchor="end-of-candidates">
+      <t>
+        Once all candidate harvesters for a specific media stream
+        complete, or expire, the agent MUST generate an
+        "end-of-candidates" event for that stream and send it to the
+        remote agent via the signalling channel. This would allow the
+        remote agent to begin updating check list states and, in case
+        valid pairs do not exist for every component in every media
+        stream, determine that ICE processing has failed.
+      </t>
+      <t>
+        An agent MAY also choose to generate an "end-of-candidates"
+        event before candidate harvesting has actually completed, if the
+        agent determines that harvesting has continued for more than an
+        acceptable period of time.
+      </t>
+      <t>
+        Once the agent sends the end-of-candidates event, it SHOULD
+        update the state of the corresponding check list as explained
+        in section <xref target="state-updates"/>
+      </t>
+      <t>
+        [TODO: should we also have an end-of-candidates for the entire
+        harvesting process (as opposed to that of a single stream)]
+      </t>
+      </section>
+    </section>
+    <section title='Receiving Additional Remote Candidates'
+             anchor="recv-trickling">
+      <t>
+        At any point of ICE processing, a trickle ICE agent may receive
+        new candidates from the remote agent. When this happens and no
+        local candidates are currently known for this same stream, the
+        new remote candidates are simply added to the list of remote
+        candidates.
+      </t>
+      <t>
+        Otherwise, the new candidates are used for forming candidate
+        pairs with the pool of local candidates.
+      </t>
+      <t>
+        Once the remote agent has completed candidate harvesting, it
+        will send an "end-of-candidates" event. Upon receiving such an
+        event, the local agent MUST update check list states as per
+        <xref target="state-updates"/>. This may lead to some check
+        lists being marked as Failed.
+      </t>
+    </section>
+    <section title='Concluding ICE Processing with Trickle ICE'
+             anchor="end.ice">
+      <t>
+        Trickle ICE processing SHOULD be concluded as explained in 
+        Section 8 of <xref target="RFC5245"/>.
+      </t>
+    </section>
+    <section title='Interaction with non-Trickle ICE implementations'>
+      <t>
+        Trickle ICE implementations MUST behave as non-trickle and
+        follow <xref target="RFC5245"/> unless they can confirm that
+        the remote party supports this specification. [TODO: anything
+        else?]
+      </t>
+    </section>
+    <section title='Example Flow'>
+      <t>
+        A typical successful trickle ICE exchange with an Offer/Answer
+        protocol would look this way:
+      </t>
+      <figure title="Example " anchor="fig-example">
+        <artwork>
+<![CDATA[
+        Alice                                            Bob
+          |            Offer+ICE Description              |
+          |---------------------------------------------->|
+          |            Additional Candidates              |
+          |---------------------------------------------->|
+          |                                               |
+          |            Answer+ICE Description             |
+          |<----------------------------------------------|
+          |            Additional Candidates              |
+          |<----------------------------------------------|
+          |                                               |
+          | Additional Candidates and Connectivity Checks |
+          |<--------------------------------------------->|
+          |                                               |
+          |<=============== MEDIA FLOWS =================>|
+
+]]>
+        </artwork>
+      </figure>
+    </section>
+    <section title='Security Considerations'>
+      <t>
+        [TODO]
+      </t>
+    </section>
+    <section title='Acknowledgements'>
+      <t>
+        The authors would like to thank Christer Holmberg and Martin
+        Thomson for their reviews and suggestions on improving this
+        document.
+      </t>
+    </section>
+  </middle>
+  <back>
+    <references title='Normative References'>
+      <?rfc include="reference.RFC.2119"?>
+      <?rfc include="reference.RFC.5245"?>
+    </references>
+    <references title='Informative References'>
+      <?rfc include="reference.RFC.1918"?>
+      <?rfc include="reference.RFC.3264"?>
+      <?rfc include="reference.RFC.3840"?>
+      <?rfc include="reference.RFC.4787"?>
+      <?rfc include="reference.RFC.5389"?>
+      <?rfc include="reference.RFC.5766"?>
+      <?rfc include="reference.I-D.keranen-mmusic-ice-address-selection"?>
+      <reference anchor="XEP-0176">
+        <front>
+          <title>XEP-0176: Jingle ICE-UDP Transport Method</title>
+          <author initials='J.' surname='Beda' fullname='Joe Beda'>
+                  <organization abbrev='Google'>Google</organization>
+          </author>
+          <author initials='S.' surname='Ludwig'
+                  fullname='Scott Ludwig'>
+            <organization abbrev='Google'>Google</organization>
+          </author>
+          <author initials='P.' surname='Saint-Andre'
+                  fullname='Peter Saint-Andre'>
+            <organization abbrev='Cisco'>Cisco</organization>
+          </author>
+          <author initials='J.' surname='Hildebrand'
+                  fullname='Joe Hildebrand'>
+            <organization abbrev='Cisco'>Cisco</organization>
+          </author>
+          <author initials='S.' surname='Egan' fullname='Sean Egan'>
+            <organization abbrev='Google'>Google </organization>
+          </author>
+          <author initials='R.' surname='McQueen'
+                      fullname='Robert McQueen'>
+            <organization abbrev='Collabora'>Collabora</organization>
+          </author>
+          <date month="June" year="2009" />
+        </front>
+        <seriesInfo name="XEP" value="XEP-0176" />
+      </reference>
+      <reference anchor="XEP-0030">
+        <front>
+          <title>XEP-0030: Service Discovery</title>
+          <author initials='J.' surname='Hildebrand'
+                  fullname='Joe Hildebrand'>
+            <organization abbrev='Cisco'>Cisco</organization>
+          </author>
+          <author initials='P.' surname='Millard'
+                  fullname='Peter Millard'>
+          </author>
+          <author initials='R.' surname='Eatmon'
+                  fullname='Ryan Eatmon'>
+          </author>
+          <author initials='P.' surname='Saint-Andre'
+                  fullname='Peter Saint-Andre'>
+            <organization abbrev='Cisco'>Cisco</organization>
+          </author>
+          <date month="June" year="2008" />
+        </front>
+        <seriesInfo name="XEP" value="XEP-0030" />
+      </reference>
+      <reference anchor="XEP-0115">
+        <front>
+          <title>XEP-0115: Entity Capabilities</title>
+          <author initials='J.' surname='Hildebrand'
+                  fullname='Joe Hildebrand'>
+            <organization abbrev='Cisco'>Cisco</organization>
+          </author>
+          <author initials='P.' surname='Saint-Andre'
+                  fullname='Peter Saint-Andre'>
+            <organization abbrev='Cisco'>Cisco</organization>
+          </author>
+          <author initials='R.' surname='Tronçon'
+                  fullname='Remko Tronçon'>
+            <organization abbrev='Synopsys'>Synopsys</organization>
+          </author>
+          <author initials='J.' surname='Konieczny'
+                  fullname='Jacek Konieczny'>
+          </author>
+          <date month="February" year="2008" />
+        </front>
+        <seriesInfo name="XEP" value="XEP-0115" />
+      </reference>
+      <reference anchor="XEP-0278">
+        <front>
+          <title>XEP-0278: Jingle Relay Nodes</title>
+          <author initials='T.' surname='Camargo'
+                  fullname='T. Camargo'>
+          </author>
+          <date month="June" year="2011" />
+        </front>
+        <seriesInfo name="XEP" value="XEP-0278" />
+      </reference>
+    </references>
+    <section title='Open issues'>
+      <t>
+        At the time of writing of this document the authors have no
+        clear view on how and if the following list of issues should
+        be address here:
+        <list style='numbers'>
+          <t>
+            Do we need a "stop sending me candidates" message. What
+            would be the use case for that.
+          </t>
+          <t>
+            Is there anything specific we need to say about ICE lite?
+          </t>
+        </list>
+      </t>
+    </section>
+    <section title='Changes From Earlier Versions'>
+      <t>
+        Note to the RFC-Editor: please remove this section prior to
+        publication as an RFC.
+      </t>
+      <section title='Changes From Individual Submission Draft -00'>
+        <t>
+          <list style='symbols'>
+            <t>
+              Relaxed requirements about verifying support following
+              a discussion on MMUSIC.
+            </t>
+            <t>
+              Introduced ICE descriptions in order to remove ambiguous
+              use of 3264 language and inappropriate references to
+              offers and answers.
+            </t>
+            <t>
+              Removed inappropriate assumption of adoption by RTCWEB
+              pointed out by Martin Thomson.
+            </t>
+          </list>
+        </t>
+      </section>
+    </section>
+  </back>
+</rfc>

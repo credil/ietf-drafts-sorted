@@ -1,0 +1,323 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type='text/xsl' href='./rfc2629.xslt' ?>
+
+<?rfc toc="yes"?>
+<?rfc symrefs="no"?>
+<?rfc compact="yes" ?>
+<?rfc sortrefs="yes" ?>
+<?rfc strict="yes" ?>
+<?rfc linkmailto="yes" ?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" >
+    
+
+<?xml-stylesheet type='text/xsl' href='./rfc2629.xslt' ?>
+
+<?rfc toc="yes"?>
+<?rfc symrefs="yes"?>
+<?rfc compact="yes" ?>
+<?rfc subcompact="yes" ?>
+<?rfc sortrefs="yes" ?>
+<rfc ipr="pre5378Trust200902" docName="draft-ietf-ipsecme-ipsec-ha-00" category="info">
+  <front>
+    <title abbrev="IPsec HA & LS Problem Statement">IPsec High Availability and Load Sharing Problem Statement</title>
+    <author initials="Y." surname="Nir" fullname="Yoav Nir">
+      <organization abbrev="Check Point">Check Point Software Technologies Ltd.</organization>
+      <address>
+        <postal>
+          <street>5 Hasolelim st.</street>
+          <city>Tel Aviv</city>
+          <code>67897</code>
+          <country>Israel</country>
+        </postal>
+        <email>ynir@checkpoint.com</email>
+      </address>
+    </author>
+    <date year="2010"/>
+    <area>Security Area</area>
+    <keyword>Internet-Draft</keyword>
+    <abstract>
+      <t>This document describes a requirement from IKE and IPsec to allow for more scalable 
+        and available deployments for VPNs. It defines terminology for high availability and load 
+        sharing clusters implementing IKE and IPsec, and describes gaps in the existing standards.</t>
+    </abstract>
+  </front>
+  <middle>
+    <!-- ====================================================================== -->
+    <section anchor="introduction" title="Introduction">
+      <t> IKEv2, as described in <xref target="RFC4306"/> and <xref target="RFC4718"/>, and IPsec, 
+        as described in <xref target="RFC4301"/> and others, allows deployment of VPNs between 
+        different sites as well as from VPN clients to protected networks.</t> 
+      <t> As VPNs become increasingly important to the organizations deploying them, there is a 
+        demand to make IPsec solutions more scalable and less prone to down time, by using more 
+        than one physical gateway to either share the load or back each other up. Similar demands 
+        have been made in the past for other critical pieces of an organizations's infrastructure, 
+        such as DHCP and DNS servers, web servers, databases and others.</t>
+      <t> IKE and IPsec are in particular less friendly to clustering than these other protocols,
+        because they store more state, and that state is more volatile. <xref target="Term"/> 
+        defines terminology for use in this document, and in the envisioned solution documents.</t>
+      <t> In general, deploying IKE and IPsec in a cluster requires such a large amount of 
+        information to be synchronized among the members of the cluster, that it becomes 
+        impractical. Alternatively, if less information is synchronized, failover would mean a 
+        prolonged and intensive recovery phase, which negates the scalability and availability
+        promises of using clusters. In <xref target="PS"/> we will describe this in more detail.</t> 
+      <section anchor="mustshouldmay" title="Conventions Used in This Document">
+        <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT",
+          "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described
+          in <xref target="RFC2119"/>.</t>
+      </section>
+      </section>
+      <section anchor="Term" title="Terminology">
+        <t> "Single Gateway" is an implementation of IKE and IPsec enforcing a certain policy, as
+          described in <xref target="RFC4301"/>.</t>
+        <t> "Cluster" is a set of two or more gateways, implementing the same security policy, and
+          protecting the same domain.</t>
+        <t> "Member" is one gateway in a cluster.</t>
+        <t> "High Availability Cluster", or "HA Cluster" is a cluster where only one of the members
+          is active at any one time. This member is also referred to as the the "active", whereas 
+          the others are referred to as "stand-bys".</t>
+        <t> "Load Sharing Cluster", or "LS Cluster" is a cluster where more than one of the members
+          may be active at the same time.</t>
+        <t> "Failover" is the event where a stand-by member becomes active, and the formerly active
+          member becomes a stand-by.</t>
+        <t> "Tight Cluster" is a cluster where all the members share an IP address. This could be
+          accomplished using configured interfaces with specialized protocols or hardware, such as
+          <xref target="VRRP"/>, or through the use of multicast addresses, but in any case, peers 
+          need only be configured with one IP address in the PAD.</t>
+        <t> "Loose Cluster" is a cluster where each member has a different IP address. Peers find 
+          the correct member using some method such as DNS queries or <xref target="REDIRECT"/>.</t>
+        <t> "Synch Channel" is a communications channel among the cluster members, used to transfer
+          state information. The synch channel may or may not be IP based, may or may not be 
+          encrypted, and may work over short or long distances. The security and physical
+          characteristics of this channel are out of scope for this document, but it is a
+          requirement that its use be minimized for scalability.</t>
+      </section>
+      <section anchor="PS" title="The Problem Statement">
+        <t> This document will make no attempt to describe the problems in setting up a cluster.
+          The following subsections describe the problems related to the protocol itself.</t>
+        <t> We also ignore the problem of synchronizing the policy between cluster members, as this
+          is an administrative issue that is not particular to either clusters or to IPsec.</t>
+        <t> Note that the interesting scenario here is VPN, whether tunneled site-to-site or remote
+          access. host-to-host transport mode is not expected to benefit from this work.</t>
+        <section anchor="state" title="Lots of Long Lived State">
+          <t> IKE and IPsec have a lot of long lived state:<list style="symbols">
+            <t> IKE SAs last for minutes, hours, or days, and carry keys and other information. 
+              Some gateways may carry thousands to hundreds of thousands of IKE SAs.</t>
+            <t> IPsec SAs last for minutes or hours, and carry keys, selectors and other 
+              information. Some gateways may carry hundreds of thousands such IPsec SAs.</t>
+            <t> SPD Cache entries. While the SPD is unchanging, the SPD cache changes on the fly
+              due to narrowing. Entries last at least as long as the SAD entries, but
+              tend to last even longer than that</t>
+            </list></t>
+          <t> A naive implementation of a high availability cluster would have no synchronized 
+            state, and a failover would produce an effect similar to that of a rebooted gateway.
+            <xref target="resumption"/> describes how new IKE and IPsec SAs can be recreated in 
+            such a case.</t>
+        </section>
+        <section anchor="counters" title="IKE and IPsec Counters">
+          <t> We can overcome the first problem described in <xref target="state"/>, by 
+            synchronizing states - whenever an SA is created, we can share this new state with all 
+            other members. There is, however, another problem. Those states are not only long-lived, 
+            but they are ever changing.</t>
+          <t> IKE has message counters. A peer may not process message n until after it has 
+            processed message n-1. Skipping message IDs is not allowed. So a newly-active member 
+            needs to know the last message IDs both received and transmitted.</t>
+          <t> ESP and AH have an anti-replay feature, where every encrypted packet carries a
+            counter number. Repeating counter numbers is considered an attack, so the newly-active
+            member SHOULD NOT use a replay counter number that has already been used.</t>
+          <t> In some cases, it is feasible to synchronize the IKE message counters for every IKE
+            exchange, but it is almost never feasible to synchronize the IPsec message counters for
+            every IPsec packet transmitted or received. So we have to assume that at least for
+            IPsec, the replay counter will not be up-to-date on the newly-active member.</t>
+          <t> A possible solution to the IPsec problem is to send replay counter information not
+            for each packet processed, but only at regular intervals, say, every 10,000 packets.
+            After a failover, the newly-active member advances the counters for outbound SAs by
+            10,000. To the peer this looks like up to 10,000 packets were lost, but this should 
+            be acceptable, as neither ESP nor AH are reliable protocols. This still has the
+            problem of what to do with inbound IPsec packets, for which the newly-active
+            member is unable to determine if they are replayed or not.</t>
+          <t> Another possible solution to the IPsec problem is to rekey all child SAs following
+            a failover. This may or may not be feasible depending on the implementation and the
+            configuration.</t>
+        </section>
+        <section anchor="missing" title="Missing Synch Messages">
+          <t> The synch channel is very likely not to be infallible. Before failover is detected,
+            some synchronization messages may have been missed. For example, the active member may 
+            have created a new Child SA using message n. The new information (entry in the SAD and 
+            update to counters of the IKE SA) is sent on the synch channel. Still, with every
+            possible technology, the update may be missed before the failover.</t>
+          <t> This is a bad situation, because the IKE SA is doomed. the newly-active member has 
+            two problems: <list style="symbols">
+            <t> It does not have the new IPsec SA pair. It will drop all incoming packets protected
+              with such an SA. This could be fixed by sending some DELETEs and INVALID_SPI 
+              notifications, if it wasn't for the other problem...</t>
+            <t> The counters for the IKE SA show that only request n-1 has been sent. The next 
+              request will get the message ID n, but that will be rejected by the peer. After
+              a sufficient number of retransmissions and rejections, the whole IKE SA with all
+              associated IPsec SAs will get dropped.</t></list></t>
+          <t> The above scenario may be rare enough that it is acceptable that on a configuration
+            with thousands of IKE SAs, a few will need to be recreated from scratch or using 
+            session resumption techniques. However, detecting this may take a long time (several
+            minutes) and this negates the goal of creating a high availability cluster in the first
+            place.</t>
+        </section>
+        <section anchor="ls_simul" title="Simultaneous use of IKE and IPsec SAs by Different Members">
+          <t> For load sharing clusters, all active members may need to use the same SAs, both IKE
+            and IPsec. This is an even greater problem than in the case of HA, because consecutive
+            packets may need to be sent by different members to the same peer gateway.</t>
+          <t> The solution to the IKE SA issue is up to the application. It's possible to create
+            some locking mechanism over the synch channel, or else have one member "own" the IKE SA
+            and manage the child SAs for all other members. For IPsec, solutions fall into two 
+            broad categories.</t>
+          <t> The first is the "sticky" category, where all communications with a single peer, or
+            all communications involving a certain SPD cache entry go through a single peer. In
+            this case, all packets that match any particular SA go through the same member, so no
+            synchronization of the replay counter needs to be done. Inbound processing is a "sticky"
+            issue, because the packets have to be processed by the correct member based on peer and
+            SPI. Another issue is that commodity load balancers will not be able to match the SPIs
+            of the encrypted side to the clear traffic, and so the wrong member may get the the 
+            other half of the flow.</t>
+          <t> The other way, is to duplicate the child SAs, and have a pair of IPsec SAs for each
+            active member. Different packets for the same peer go through different members, and
+            get protected using different SAs with the same selectors and matching the same entries
+            in the SPD cache.  This has some shortcomings:<list style="symbols">
+            <t>It requires multiple parallel SAs, which the peer has no use for. Section 2.8 or 
+              <xref target="RFC4306"/> specifically allows this, but some implementation might
+              have a policy against long term maintenance of redundant SAs.</t>
+            <t>Different packets that belong to the same flow may be protected by different SAs,
+              which may seem "weird" to the peer gateway, especially if it is integrated with 
+              some deep inspection middleware such as a firewall. It is not known whether this will
+              cause problems with current gateways. It is also impossible to mandate against this, 
+              because the definition of "flow" varies from one implementation to another.</t>
+            <t>Reply packets may arrive with an IPsec SA that is not "matched" to the one used
+              for the outgoing packets. Also, they might arrive at a different member. This problem
+              is beyond the scope of this document and should be solved by the application, perhaps
+              by forwarding misdirected packets to the correct gateway for deep inspection.</t>
+            </list></t>
+        </section>
+      </section>
+      <section anchor="sec" title="Security Considerations">
+        <t>Implementations running on clusters MUST be as secure as implementations running on 
+          single gateways. In other words, no extension or interpretation used to allow operation
+          in a cluster may facilitate attacks that are not possible for single gateways.</t>
+        <t>Moreover, thought must be given to the synching requirements of any protocol extension,
+          to make sure that it does not create an opportunity for denial of service attacks on the
+          cluster.</t>
+      </section> 
+      <section anchor="history" title="Change Log">
+        <t> This is the first version, re-spun as an WG document</t>
+      </section>
+  </middle>
+  <!-- ====================================================================== -->
+  <back>
+    <references title="Informative References"> 
+      <reference anchor='RFC2119'>
+        <front>
+          <title abbrev='RFC Key Words'>Key words for use in RFCs to Indicate Requirement Levels</title>
+          <author initials='S.' surname='Bradner' fullname='Scott Bradner'>
+            <organization>Harvard University</organization>
+            <address>
+              <postal>
+                <street>1350 Mass. Ave.</street>
+                <street>Cambridge</street>
+                <street>MA 02138</street>
+              </postal>
+              <phone>- +1 617 495 3864</phone>
+              <email>sob@harvard.edu</email>
+            </address>
+          </author>
+          <date year='1997' month='March' />
+          <area>General</area>
+          <keyword>keyword</keyword>
+        </front>
+        <seriesInfo name='BCP' value='14' />
+        <seriesInfo name='RFC' value='2119' />
+        <format type='TXT' octets='4723' target='ftp://ftp.isi.edu/in-notes/rfc2119.txt' />
+        <format type='HTML' octets='16553' target='http://xml.resource.org/public/rfc/html/rfc2119.html' />
+        <format type='XML' octets='5703' target='http://xml.resource.org/public/rfc/xml/rfc2119.xml' />
+      </reference>
+      <reference anchor='RFC4306'>
+        <front>
+          <title>Internet Key Exchange (IKEv2) Protocol</title>
+          <author initials='C.' surname='Kaufman' fullname='C. Kaufman'>
+            <organization /></author>
+          <date year='2005' month='December' />
+        </front>
+        <seriesInfo name='RFC' value='4306' />
+        <format type='TXT' target='http://www.ietf.org/rfc/rfc4306.txt' />
+        <format type='HTML' target='http://xml.resource.org/public/rfc/html/rfc4306.html' />
+        <format type='XML' target='http://xml.resource.org/public/rfc/xml/rfc4306.xml' />
+      </reference>
+      <reference anchor='RFC4718'>
+        <front>
+          <title>IKEv2 Clarifications and Implementation Guidelines</title>
+          <author initials='P.' surname='Eronen' fullname='P. Eronen'>
+            <organization>Nokia</organization></author>
+          <author initials='P.' surname='Hoffman' fullname='P. Hoffman'>
+            <organization>VPN Consortium</organization></author>
+          <date year='2006' month='October' />
+        </front>
+        <seriesInfo name='RFC' value='4718' />
+        <format type='TXT' target='http://www.ietf.org/rfc/rfc4718.txt' />
+        <format type='HTML' target='http://xml.resource.org/public/rfc/html/rfc4718.html' />
+        <format type='XML' target='http://xml.resource.org/public/rfc/xml/rfc4718.xml' />
+      </reference>
+      <reference anchor='RFC4301'>
+        <front>
+          <title>Security Architecture for the Internet Protocol</title>
+          <author initials='S.' surname='Kent' fullname='S. Kent'>
+            <organization>BBN Technologies</organization></author>
+          <author initials='K.' surname='Seo' fullname='K. Seo'>
+            <organization>BBN Technologies</organization></author>
+          <date year='2005' month='December' />
+        </front>
+        <seriesInfo name='RFC' value='4301' />
+        <format type='TXT' target='http://www.ietf.org/rfc/rfc4301.txt' />
+        <format type='HTML' target='http://xml.resource.org/public/rfc/html/rfc4301.html' />
+        <format type='XML' target='http://xml.resource.org/public/rfc/xml/rfc4301.xml' />
+      </reference>
+      <reference anchor='resumption'>
+        <front>
+          <title>IKEv2 Session Resumption</title>
+          <author initials='Y.' surname='Sheffer' fullname='Y. Sheffer'>
+            <organization>Check Point</organization></author>
+          <author initials='H.' surname='Tschofenig' fullname='H. Tschofenig'>
+            <organization>Nokia Siemens Networks</organization></author>
+          <date year='2009' month='June' />
+        </front>
+        <seriesInfo name='Internet-Draft' value='draft-ietf-ipsecme-ikev2-resumption' />
+        <format type='TXT'
+          target='http://tools.ietf.org/id/draft-ietf-ipsecme-ikev2-resumption' />
+        <format type='HTML'
+          target='http://tools.ietf.org/html/draft-ietf-ipsecme-ikev2-resumption' />
+       </reference>
+      <reference anchor='VRRP'>
+        <front>
+          <title>Virtual Router Redundancy Protocol (VRRP)</title>
+          <author initials='R.' surname='Hinden' fullname='R. Hinden'>
+            <organization>Nokia</organization></author>
+          <date year='2004' month='April' />
+        </front>
+        <seriesInfo name='RFC' value='3768' />
+        <format type='TXT' target='http://www.ietf.org/rfc/rfc3768.txt' />
+        <format type='HTML' target='http://xml.resource.org/public/rfc/html/rfc3768.html' />
+        <format type='XML' target='http://xml.resource.org/public/rfc/xml/rfc3768.xml' />
+      </reference>
+      <reference anchor='REDIRECT'>
+        <front>
+          <title>Redirect Mechanism for IKEv2</title>
+          <author initials='V.' surname='Devarapalli' fullname='V. Devarapalli'>
+            <organization>WiChorus</organization></author>
+          <author initials='K.' surname='Weniger' fullname='K. Weniger'>
+            <organization /></author>
+          <date year='2009' month='August' />
+        </front>
+        <seriesInfo name='Internet-Draft' value='draft-ietf-ipsecme-ikev2-redirect' />
+        <format type='TXT'
+          target='http://tools.ietf.org/id/draft-ietf-ipsecme-ikev2-redirect' />
+        <format type='HTML'
+          target='http://tools.ietf.org/html/draft-ietf-ipsecme-ikev2-redirect' />
+      </reference>
+    </references>
+    <!-- ====================================================================== -->
+  </back>
+</rfc>

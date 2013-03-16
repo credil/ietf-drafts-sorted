@@ -1,0 +1,616 @@
+
+
+
+Network Working Group                                     A. Yourtchenko
+Internet-Draft                                                   D. Wing
+Intended status:  Standards Track                                  cisco
+Expires:  February 26, 2011                              August 25, 2010
+
+
+       NAT confessions: revealing the hosts behind the translator
+                  draft-yourtchenko-nat-reveal-hash-00
+
+Abstract
+
+   When an IP address is shared among several subscribers, it is
+   impossible to determine which subscriber has initiated that TCP
+   connection.  This memo describes a technique to share the identity of
+   a subscriber that initiated a TCP connection with the TCP server..
+   The proposed method avoids altering the application-level payload and
+   works well with SSL-protected connections.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on February 26, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2010 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011               [Page 1]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Notational Conventions . . . . . . . . . . . . . . . . . . . .  4
+   3.  Description  . . . . . . . . . . . . . . . . . . . . . . . . .  4
+   4.  Calculating the Internal Address Mapping . . . . . . . . . . .  5
+   5.  Calculating the Verifier . . . . . . . . . . . . . . . . . . .  6
+   6.  Encoding of the VFY into the packet: IP ID encoding  . . . . .  6
+   7.  Encoding of the VFY into the packet: TSval encoding  . . . . .  6
+   8.  Operation of the mechanism . . . . . . . . . . . . . . . . . .  7
+     8.1.  Translator Operation . . . . . . . . . . . . . . . . . . .  7
+     8.2.  Server Operation . . . . . . . . . . . . . . . . . . . . .  7
+   9.  Interaction with TCP SYN cookies . . . . . . . . . . . . . . .  8
+   10. Other Mechanisms to Encode Client Identifier . . . . . . . . .  8
+     10.1. Defining a new TCP option to store the address . . . . . .  8
+     10.2. Using TSecr in TCP SYN . . . . . . . . . . . . . . . . . .  8
+     10.3. Reserving the different port ranges per client . . . . . .  8
+   11. Security Considerations  . . . . . . . . . . . . . . . . . . .  8
+   12. IANA considerations  . . . . . . . . . . . . . . . . . . . . .  9
+   13. Acknowledgements . . . . . . . . . . . . . . . . . . . . . . .  9
+   14. References . . . . . . . . . . . . . . . . . . . . . . . . . .  9
+     14.1. Normative References . . . . . . . . . . . . . . . . . . .  9
+     14.2. Informative References . . . . . . . . . . . . . . . . . . 10
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 10
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011               [Page 2]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+1.  Introduction
+
+   There are several scenarios where it is valuable to know the identity
+   of a TCP client, including geolocation, DoS blocking, and spam
+   blacklists.  Today, this is done by equating IPv4 address with
+   'identity'.  However, the identity of a TCP client is obscured when
+   an IP address is shared I-D.ietf-intarea-shared-addressing-issues
+   [I-D.ietf-intarea-shared-addressing-issues].  IP address sharing is
+   done by both network address and port translators (NAPT) and by
+   application-layer proxies (e.g., HTTP or FTP proxies).
+
+   The current state of the art requires the address sharing alter the
+   application-level payload and include the identity of the internal
+   host -- usually the internal host's private IP address.  This incurs
+   several drawbacks,
+
+   o  adjustment of TCP sequence numbers and acknowledgement numbers for
+      the duration of the TCP session
+
+   o  risk of false-positive application matching (e.g., accidentally
+      inserting an HTTP header into a non-HTTP payload).
+
+   o  interference with application payload by increasing packet size
+      (e.g., MTU)
+
+    With SSL-protected applications the current state of the art
+   requires breaking the end-to-end encrypted connection.  This results
+   in several undesirable consequences:
+
+   o  necessity for the translator to break the end-to-end encryption,
+      typically by installing an addional Certificate Authority on the
+      client's CA trust list
+
+   o  noticeable increase in the processing power required on the
+      address sharing device to decrypt and re-encrypt that application
+      payload
+
+   This specification avoids the problems described above, and defines
+   the method of communicating the TCP client's identity to the TCP
+   server by overloading the TCP timestamp field and IP Identifier field
+   of the initial TCP SYN.
+
+   This extension is necessary because IP address sharing, deployed by
+   NAT64 devices, will allow malicious users to connect to IPv4-capable
+   servers.  Thus, until a server is only accessible via IPv6 (and
+   inaccessible via IPv4), the IPv4-capable server will suffer from an
+   inability to identify individual TCP clients as discussed in
+   I-D.ietf-intarea-shared-addressing-issues
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011               [Page 3]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+   [I-D.ietf-intarea-shared-addressing-issues].
+
+
+2.  Notational Conventions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC2119 [RFC2119].
+
+
+3.  Description
+
+   This proposal leverages the common deployment of  TCP timestamps and
+   that a timestamp-aware TCP server will echo the timestamp..
+
+   The caveat with the above is that the remote peer must know in
+   advance if the TCP client implements this technique or not -- the
+   timestamp on the server side looks just the same.  This could be
+   resolved by manual configuration but that is impractical, so an
+   automatic detection mechanism is proposed.  The automatic mechanism
+   calculates a hash over the values of interest and placing the result
+   into another field.  The receiver can then perform the same operation
+   and verify.  If the received and computed values match, then the TCP
+   timestamp received does contain the encoded internal address.  The
+   verifier value is computed as a hash function over the mapped value
+   encoded into the timestamp, address after translation, and the TCP
+   initial sequence number - i.e. the sequence number within the SYN
+   segment.  The usage of the TCP initial sequence number allows to
+   avoid the verifier value being almost always the same.  The reason
+   for doing so is to satisfy the protocol constraints of the field that
+   is used to convey this value.
+
+   In order to find some place for storing this verification value, we
+   make another observation:  TCP SYN segments are generally rather
+   small, and the minimum MTU on IPv4 is 576.  Typical stacks send the
+   TCP SYN with DF=1.  Therefore, they would never be fragmented.  This
+   means we could use the 16-bit value of the IP ID to put the verifier
+   value in.  The verifier is dependent on the initial sequence number
+   (ISN) -- which is should have some randomness properties as described
+   in RFC1948 [RFC1948], therefore the IP ID will be reasonably
+   different to still serve its purpose even in the extremely unlikely
+   case that the TCP SYN is fragmented.
+
+   Using a 16-bit value as a verifier gives 1 in 65536 chances (or,
+   0.0015%) probability of erroneously judging that the timestamp
+   contains the encoded internal address.  This may be insufficient
+   assurance for some of the scenarios.  Therefore, we calculate the
+   verifier (referred to as VFY value) to be a 32-bit integer - and
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011               [Page 4]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+   store 16 or more bits of this value - at the expense of storing less
+   bits of Internal Address Mapping (iAM).  However, we expect that the
+   range of iAM for a single public translation would be relatively
+   small - so, no information will be lost in this process.
+
+
+4.  Calculating the Internal Address Mapping
+
+   The main useful property of iAM is that it MUST stay the same for the
+   same internal address unless the configuration on the translator has
+   changed.  Since the goal is to provide the stable mapping, rather
+   than fully reveal the internal address, any method that has this
+   property is acceptable - and the choice of it is left to the
+   implementors of the translator.  If the addresses to be translated
+   are configured as a prefix, then the iAM can be obtained just by
+   taking the host bits of the address within the prefix.  If the
+   assignment of these addresses is on an individual basis, then the
+   simple enumeration might be used.  If the internal addresses are
+   assigned to the pool as set of subnets - then the combination of the
+   two methods above (the host bits in the least significant part, and
+   the enumeration in the most significant part) will give good results.
+   This also stimulates allocation of the internal address in equal-
+   sized chunks, which should make the maintenance of the network
+   easier.
+
+   As a result, the calculation of the iAM on the outgoing SYN segment
+   MUST return two values:
+
+   o  iAM = Internal Address Mapping:  a 32-bit unsigned integer
+
+   o  siAM = Size of Internal Address Mapping, in bits:  integer,
+      allowed range 9..24 - this is the number of significant bits
+      within the iAM.
+
+   The minimum value of siAM being 9 was chosen based on the following
+   logic:
+
+   o  having a room of 512 possible hosts allows to keep the property of
+      iAM to not change during the smaller configuration changes, in
+      case the pool is made up of individual hosts.
+
+   o  the range 9..24 has exactly 16 possible values, which will be
+      useful for encoding.
+
+   By encoding only the significant bits of the internal address mapping
+   the operator of the translator can minimize the probability of the
+   error - all the unused bits are allocated for the value used to
+   "fingerprint" the presence of the internal identifier.  The more bits
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011               [Page 5]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+   this "Verifier" value can contain - the less is the chance of
+   accidental match - and erroneous record of the internal identifier
+   when there is none.
+
+   The range from 9 bits to 24 bits allows to encode between 512 and
+   16777216 internal identifiers for a single public IP address.
+
+
+5.  Calculating the Verifier
+
+   The verifier is calculated as a 32-bit result of a hash function.
+   This hash function is not expected to be cryptographically strong
+   (the 'Security considerations' section explains why), however it
+   should have good distribution, good collision resistance, good
+   avalanche behavior and be fast and cheap to compute.  These
+   properties are satisfied by Murmur hash [URL.Murmur-hash] function,
+   therefore it is the hash that we will use.
+
+   The calculation of the VFY is performed as follows:
+
+   VFY = murmur(iAM | AddrPub | siAM, TCP-ISN)
+
+   o  iAM is included into the calculation as a 32 bit word.
+
+   o  siAM is included into the hash calculation as a single byte.
+      (TBD:  the 'selector' referenced below might be a more natural
+      number to check against, instead of siAM ?).
+
+
+6.  Encoding of the VFY into the packet: IP ID encoding
+
+   The low 16 bits of the VFY are encoded in network order into the IP
+   ID of the packet after translation. the remaining 16 bits form the
+   "VFYhi" value, which we attempt to fit into the TSval along with the
+   other information.
+
+
+7.  Encoding of the VFY into the packet: TSval encoding
+
+   The TCP timestamp field encodes the iAM and VFYhi as follows:
+
+    3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1
+    1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |E E E E|S S S S| iAM MSB ... iAM LSB  | VFYhi MSB .. VFYhi LSB |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+   The range of siAM gives 16 possible ways to store iAM (along with the
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011               [Page 6]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+   same number of degrees of assurance for the detection).  In order to
+   distinguish between those, we introduce the encoding selector (S)
+   field, which will determine how the lower 24 bits are split between
+   the iAM and the upper 16 bit of VFY.  Note that the smallest value of
+   siAM being 9, we will never be able to store the most significant bit
+   of VFY.
+
+   The value of S is the number of zero-fill right-shift operations it
+   would take on the low 24 bit in order to "normalize" the iAM - or, in
+   other words, it is the number of bits of VFYhi stored within the
+   timestamp.
+
+   Best practices in I-D.ietf-tcpm-tcp-timestamps
+   [I-D.ietf-tcpm-tcp-timestamps], mention that to reduce the TIME-WAIT
+   state the timestamp value should be monotonously increasing across
+   the connections with the same 5-tuple.  To give the translators an
+   opportunity to achieve this property, we reserve several most
+   significant bits within the timestamp to signify the "Epoch" (E).This
+   would require storing some additional state per 5-tuple, and the
+   implementation of such a mechanism is outside of scope for this
+   document.  The implementations that do not implement the monotonously
+   increasing timestamps, MUST keep the Epoch bits intact from the
+   original value of the timestamp.
+
+
+8.  Operation of the mechanism
+
+   This section outlines the use of this mechanism by the translators
+   and servers.
+
+8.1.  Translator Operation
+
+   The translator is involved into processing of the initial SYN segment
+   (calculating the new version of the TCP timestamp and IP ID), as well
+   as the SYN-ACK segments (restoring the original value of the TCP
+   timestamp within the TSecr field).
+
+8.2.  Server Operation
+
+   The server would operate on every SYN that is of interest for the
+   logging.  It would extract the candidate iAM, and calculate the VFY
+   value based on the public address and TCP ISN within the received SYN
+   segment.  Then it would compare the VFY against the corresponding
+   bits in the TSval and IP ID fields.  If there is a match, it means
+   (with a reasonable probability) that the iAM was a valid one
+   calculated by the translator inbetween.  This information is stored
+   for later access by the application listening on that socket (e.g.,
+   stored in the TCB).
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011               [Page 7]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+9.  Interaction with TCP SYN cookies
+
+   TCP SYN cookies are commonly deployed to mitigate TCP SYN attacks
+   RFC4987 [RFC4987].  The mechanism described in this document requires
+   the server store extra information which arrives on the TCP SYN,
+   which increases the TCP server's attack surface.  To mitigate this,
+   the translator should apply the similar algorithm to the timestamp of
+   the ACK segment that is sent by the initiator of the connection in
+   response to the server's SYN ACK.  The authors considered that
+   serverside might use the TSval in its SYN ACK segment, however this
+   would interfere with the Extended syncookies.  This section needs
+   further discussion.
+
+
+10.  Other Mechanisms to Encode Client Identifier
+
+   This section outlines other mechanisms that we considered, and
+   outlines the reasons we consider them not applicable.
+
+10.1.  Defining a new TCP option to store the address
+
+   This would be the cleanest and simplest approach, and is discussed in
+   [ I-D.wing-reveal-address].
+
+10.2.  Using TSecr in TCP SYN
+
+   This value is set to zero, and is effectively unused - so it looks
+   like a convenient place.  However this violates the RFC1323
+   [RFC1323], and this would require much more thorough testing - and
+   update to RFC1323 [RFC1323].
+
+10.3.  Reserving the different port ranges per client
+
+   This approach has an appeal due to its simplicity, but it would be
+   specific to each NAPT device operated by each service provider.  That
+   is, there is no way to identify the device or know the source port
+   range assigned to an TCP client without contacting the administrator
+   of the NAPT device.  Restricting clients to a specific range also
+   exposes the clients to some security risk I-D.ietf-tsvwg-port-
+   randomization [I-D.ietf-tsvwg-port-randomization].
+
+
+11.  Security Considerations
+
+   The connections that happen, today, without aNAPT necessarily reveal
+   the source address of the TCP client -- so revealing the identity of
+   the client this should not be a concern except for the installations
+   that attempt to use NAPT for "privacy" reasons.  If such an
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011               [Page 8]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+   installation exists, it is easy to see that any 1:1 remapping of
+   e.g., IP ID would cause the failure of the validation algorithm -
+   therefore "protecting the identity".
+
+   Therefore, if an organization has more than one level of NAPT and
+   wants to ensure that the internal translators do not disclose the
+   information about the internal addresses, it can alter any of the
+   elements used for the calculations - e.g. randomize the ISN, or remap
+   the IP ID.
+
+   An attacker might might use this functionality to appear as if IP
+   address sharing is occuring, in the hopes that a naive server will
+   allow additional attack traffic.  TCP servers and applications SHOULD
+   NOT assume the mere presence of the functionality described in this
+   paper indicates there are other  (benign) users sharing the same IP
+   address.
+
+   The modification of the TSVal option value will break TCP-AO  RFC5925
+   [RFC5925], which provides integrity protection of the  TCP SYN
+   (including TCP options).  However, TCP-AO is already known to not
+   survive address sharing (through a NAPT or through an application
+   proxy).
+
+
+12.  IANA considerations
+
+   None.
+
+
+13.  Acknowledgements
+
+   Thanks to Nicholas Leavy for the review.
+
+
+14.  References
+
+14.1.  Normative References
+
+   [RFC1323]  Jacobson, V., Braden, B., and D. Borman, "TCP Extensions
+              for High Performance", RFC 1323, May 1992.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC5925]  Touch, J., Mankin, A., and R. Bonica, "The TCP
+              Authentication Option", RFC 5925, June 2010.
+
+
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011               [Page 9]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+14.2.  Informative References
+
+   [I-D.ietf-intarea-shared-addressing-issues]
+              Ford, M., Boucadair, M., Durand, A., Levis, P., and P.
+              Roberts, "Issues with IP Address Sharing",
+              draft-ietf-intarea-shared-addressing-issues-01 (work in
+              progress), June 2010.
+
+   [I-D.ietf-tcpm-tcp-timestamps]
+              Gont, F., "Reducing the TIME-WAIT state using TCP
+              timestamps", draft-ietf-tcpm-tcp-timestamps-00 (work in
+              progress), June 2010.
+
+   [I-D.ietf-tsvwg-port-randomization]
+              Larsen, M. and F. Gont, "Transport Protocol Port
+              Randomization Recommendations",
+              draft-ietf-tsvwg-port-randomization-09 (work in progress),
+              August 2010.
+
+   [RFC1948]  Bellovin, S., "Defending Against Sequence Number Attacks",
+              RFC 1948, May 1996.
+
+   [RFC4987]  Eddy, W., "TCP SYN Flooding Attacks and Common
+              Mitigations", RFC 4987, August 2007.
+
+   [URL.Murmur-hash]
+              "Murmur hash", <http://sites.google.com/site/murmurhash/>.
+
+
+Authors' Addresses
+
+   Andrew Yourtchenko
+   cisco
+   6a de Kleetlaan
+   Diegem  1831
+   BE
+
+   Phone:  +32 2 704 5494
+   Email:  ayourtch@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011              [Page 10]
+
+Internet-Draft       Revealing the hosts behind NAPT         August 2010
+
+
+   Dan Wing
+   cisco
+   170 West Tasman Drive
+   San Jose  CA 95134
+   USA
+
+   Email:  dwing@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yourtchenko & Wing      Expires February 26, 2011              [Page 11]
+

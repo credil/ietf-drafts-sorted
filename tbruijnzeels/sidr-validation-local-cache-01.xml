@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- edited with XMLSPY v5 rel. 3 U (http://www.xmlspy.com) by Daniel M Kohn (private) -->
+
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" [
+    <!ENTITY rfc2119 PUBLIC '' 
+      'http://xml.resource.org/public/rfc/bibxml/reference.RFC.2119.xml'>
+]>
+
+<rfc category="info" ipr="trust200902" docName="draft-tbruijnzeels-sidr-validation-local-cache-01">
+
+<?xml-stylesheet type='text/xsl' href='rfc2629.xslt' ?>
+
+<?rfc toc="yes" ?>
+<?rfc symrefs="yes" ?>
+<?rfc sortrefs="yes"?>
+<?rfc iprnotified="no" ?>
+<?rfc strict="yes" ?>
+<?rfc compact="yes" ?>
+
+    <front>
+        <title>RPKI validation using a local cache</title>
+        <author initials='T.' surname="Bruijnzeels" fullname='Tim Bruijnzeels'>
+            <organization>RIPE NCC</organization>
+            <address>
+            <email>tim@ripe.net</email>
+            </address>
+        </author>
+        <author initials='C.' surname="Martinez" fullname='Carlos Martinez'>
+            <organization>LACNIC</organization>
+            <address>
+            <email>carlos@lacnic.net</email>
+            </address>
+        </author>
+        <author initials='A.' surname="Newton" fullname='Andy Newton'>
+            <organization>ARIN</organization>
+            <address>
+            <email>andy@arin.net</email>
+            </address>
+        </author>
+        <date />
+        <abstract>
+            <t>This documents specifies validation of rpki using a local cache that is independent of any particular retrieval mechanism of
+                the objects in this cache. This is useful because it allows for agility in the RPKI to define alternative fetch algorithms
+                and/or multiple publication points of RPKI data.</t>
+        </abstract>
+    </front>
+
+    <middle>
+        <section title="Requirements notation">
+            <t>
+                The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and
+                "OPTIONAL" in this document are to be interpreted as described in
+                <xref target="RFC2119" />
+                .
+            </t>
+        </section>
+
+        <section title="Introduction">
+            <t>It has been suggested by various people that in order to mitigate availability issues in the RPKI repositories, it would be
+                good to support alternative fetch algorithms (easier to maintain by publication servers), multiple publication points (use
+                multiple publication servers) and sharing of unvalidated objects between validating caches (less dependence on a central
+                publication server).</t>
+
+            <t>All these approaches share in common that unvalidated RPKI objects can potentially be retrieved in a number of different
+                ways, separate from the actual validation process. And all these approaches face the same challenge: how to perform a
+                top-down validation process if the SIA, AIA and CRLDP pointers don’t necessarily point to the locations where the Relying
+                Party retrieved the objects.</t>
+
+            <t>This document does not intend to describe the one and only way Relying Parties can deal with this challenge. On the contrary,
+                we feel there are more ways to achieve this. However we believe there are two reasons why it's useful to describe our (intended)
+                approach here: (1) it is a show case demonstrating the feasibility of having multiple publication points and alternative fetch
+                algorithms in the rpki, (2) we invite the WG to scrutinise our intended implementation for correctness.</t>
+
+            <t>The 'rrdp' protocol mentioned in this document refers to the alternative delta protocol described in draft-tbruijnzeels-sidr-delta-protocol.</t>
+        </section>
+
+       <section title="Outline">
+            <t>We validate a trust anchor certificate and note the SKI. Then we search for the most recent manifest in our cache that
+                has an AKI that matches this SKI and has a valid signature. We expect that this MFT contains one CRL entry that we will
+                use to check for revocations. We will retrieve all objects mentioned on the manifest from our cache, by using their hash
+                as a key. We then validate all objects as described in the current standards, with some minor caveats detailed below. We
+                will then recursively find manifests, crls and validate signed objects for any certificate we validated this way.</t>
+        </section>
+ 
+
+        <section title="Maintaining a local cache">
+
+            <section title="Local cache structure">
+                <section title="Object store">
+                <t>We will maintain a an object store of unvalidated objects, where we keep:
+                    <list style="symbols">
+                        <t>The SHA-256 hash of the object as a key</t>
+                        <t>The binary object</t>
+                    </list>
+                </t>
+                <t>Note that we do not store the URI of the object itself. If we retrieve the exact same object more than once from
+                    the RPKI repositories, we still only store it once in the local cache.</t>
+                </section>
+                <section title="Manifest Store">
+                    <t>To optimise for how we use manifests we store some additional information for them:
+                        <list style="symbols">
+                            <t>The AKI of the EE certificate</t>
+                            <t>The serial number</t>
+                            <t>A flag to indicate that this MFT has been found to be valid, invalid, or not validated</t>
+                            <t>The hashes of the objects mentioned on it</t>
+                        </list>
+                    </t>
+                </section>
+            </section>
+
+            <section title="Retrieving objects from the cache">
+                <section title="Registering CA publication points">
+                    <t>Whenever a VALID CA certificate is found we store all new SIA rsync directory, or rrdp pointers on this certificate
+                        for pro-active retrieval. Rsync directory SIA pointers will NOT be stored in case the directory is sub-directory of
+                        and SIA pointer that is already known; the local cache will assume that hierarchical repository lay-out and recursive
+                        fetching is supported in this case.</t> 
+                </section>
+                <section title="Retrieving manifests from the cache">
+                    <t>Whenever we need to retrieve a manifest from the store, our implementation will provide the issuing CA
+                        certificate for this manifest and ask for the manifest matching the following criteria:
+                        <list style="symbols">
+                            <t>Having an AKI on its EE certificate that matches the SKI of the publishing CA certificate</t>
+                            <t>Must be found valid, or not validated (so NOT invalid)</t>
+                            <t>With the highest serial number</t>
+                            <t>For which all objects mentioned can be found in the cache, by their SHA-256 hash</t>
+                        </list>
+                    </t>
+                    <t>If no such manifest can be found the local cache SHOULD check that object retrieval from the rpki has been attempted
+                        recently. If not, then the local cache SHOULD initiate an ad-hoc retrieval for one or more of the known publication
+                        points for the CA certificate that it was asked to return objects for. Note that this triggered retrieval is especially
+                        important when the Relying Party tool is first started and the local cache is incomplete or outdated.</t>
+                </section>
+                <section title="Retrieving object from the cache">
+                    <t>Normal objects are retrieved by their SHA-256 hash.</t>
+                </section>
+                <section title="Managing cache size">
+                    <t>To save space the local cache MAY find the manifest for each AKI, with the highest serial number that is marked as valid,
+                         and proceed to delete all manifests for this AKI with a lower serial number. Any objects in the object store whose SHA-256
+                         is no longer referenced by any manifest may then also be deleted.</t>
+                </section>
+            </section>
+
+            <section title="Retrieving objects from the RPKI">
+                <section title="Retrieving objects using rsync">
+                    <t>As described in RFC6481 a CA certificate MUST have two rsync SIA pointers. One pointing to the CA certificate publication
+                        directory, and one to its manifest that MUST be published in this directory.</t>
+                    <t>For the purpose of this document we will consider the manifest SIA pointer redundant. The local cache will retrieve objects
+                        by doing a recursive rsync fetch for the directory SIA pointer. In case of hierarchical repository lay-outs it may turn out
+                        that the publication directory has already been retrieved because of a recursive rsync fetch higher up in the tree. In such
+                        cases the local cache SHOULD refrain from attempting a new recursive rsync fetch for such sub-directories.</t>
+                    <t>All objects retrieved this way will be read from disk, the SHA-256 will be calculated and all NEW objects will be stored in the
+                        local cache's object store. Any new objects that have a filename ending with .mft that can be parsed as manifests will be stored in
+                        the local cache's manifest store, noting the relevant attributes for retrieval mentioned above, and having validation state
+                        'not validated'.</t>
+                </section>
+                <section title="Retrieving objects using rrdp">
+                    <t>This delta protocol is described in https://datatracker.ietf.org/doc/draft-tbruijnzeels-sidr-delta-protocol/</t>
+                    <t>Note that rrdp pointers may shared by multiple CA certificates. They do not point to a publication point dedicated to any
+                        specific CA certificate. Instead they point to the publication point of an update notification file that is managed by the
+                        publication server that is used by this CA certificate, as well as a potentially large number of other CA certificates.</t>
+                    <t>The local cache will poll the notification file and process it.</t>
+                    <section title="New or unknown session">
+                        <t>In case the update notification is for a new rrdp server for which no session was previously known, or in case the
+                             session id is different from the one know, the local cache will update the session id to one mentioned in the notification
+                             file and process the latest full snapshot mentioned and update the last known version to this version. It will then
+                             attempt to update (see below)</t>
+                    </section>
+                    <section title="No path from last known version to current">
+                        <t>In case there is no delta path mentioned on the update notification file for the last known version, to the current
+                             version, the local cache will process the latest full snapshot mentioned on the notification file. Note that the protocol
+                             requires that a notification update file MUST include a valid update path for the full snapshots it mentions.</t>
+                    </section>
+                    <section title="Processing deltas">
+                        <t>The local cache will find the delta with the highest "version-to" to value that includes the last known version,
+                             and process it, update the last known version. And repeat until the last known version equals the current version
+                             on the notification file.</t>
+                    </section>
+                    <section title="Processing objects from snapshots and deltas">
+                        <t>All new objects in 'publish' elements that are processed will be stored in the local cache's object store. New objects
+                            are objects for which the SHA-256 hash had not been seen before. The local cache will attempt to parse all new objects
+                            for which the uri attribute on the publish element ends with .mft, as manifests and store them in manifest store,
+                            noting the relevant attributes for retrieval mentioned above, and having validation state 'not validated'.</t>
+                        <t>All 'withdraw' elements are ignored. The local cache manages its cache as described in paragraph 4.2.4.</t>
+                    </section>
+                </section>
+                <section title="Pro-active object retrieval">
+                    <t>The local cache will keep a record of all known publication points so that it can pro-actively retrieve objects from
+                        each.</t>
+                    <section title="rsync">
+                        <t>In case of rsync publication points a conservative 4 hour update interval is chosen, because of known issues
+                            with rsync server scalability in relation to repository size and number of connection relying parties.</t>
+                    </section>
+                    <section title="rrdp">
+                        <t>The local cache will attempt to get the update notification for rrdp publication points every 5 minutes, and
+                             process any updates if applicable.</t>
+                    </section>
+                    <section title="Triggering top-down validation">
+                        <t>Whenever the local cache finds any new unvalidated manifests after a full pro-active retrieval run for any publication
+                            point, it will trigger a full top-down validation.</t>
+                    </section>
+                </section>
+            </section>
+
+
+        </section>
+
+        <section title="Top-down Validation Algorithm">
+            <section title="Trust Anchors">
+                <t>
+                    The validation process starts with downloading and validating a the Trust Anchor certificate as described in RFC6490.
+                </t>
+                <t>The validated certificate we obtain this way will be used as the first validated certificate in the recursive algorithm
+                    outlined below.</t>
+            </section>
+            <section title="Processing a Validated CA Certificate">
+                <t>A validated CA certificate has a unique SKI that we can use to identify it. This SKI will be used as the AKI in any
+                    certificates signed by this CA certificate and the CRL it publishes.</t>
+            </section>
+            <section title="Finding the Current Manifest">
+                <t>We retrieve the most recent manifest for this CA certificate as described in section 4.2.2.</t>
+                <t>
+                    The RP MUST validate that the manifest lists exactly one CRL and that this CRL can be retrieved from the cache as
+                    described in the next section. This manifest is then validated using the same criteria as described in RFC6486 section
+                    4.4. With the exception that:
+                    <list style="symbols">
+                        <t>The CRLDP is ignored and the CRL retrieved above is used</t>
+                        <t>The SIA and AIA fields are not used for validation</t>
+                    </list>
+                </t>
+                <t>If the manifest is reject the RP MUST flag it as invalid and try to fetch the next most recent manifest for this CA
+                    certificate. If the manifest is valid then the RP SHOULD flag the manifest as valid in the local cache.</t>
+                <t>Furthermore if all manifests found this way have invalid signatures then the Relying Party MUST conclude that the SKI on
+                    the CA certificate was faked and the CA does not hold the private key, and therefore MUST reject this CA certificate.</t>
+                <t>Note that this situation is extremely unlikely to arise by accident as the normal Certificate Sign Request as described
+                    in RFC6492 includes proof of possession of the private key by the certificate requester to the issuing CA.</t>
+            </section>
+            <section title="Finding the Current CRL">
+                <t>The manifest MUST list only one CRL that can be retrieved from the local cache by its SHA-256 hash. This CRL MUST pass all
+                    validation checks described in RFC5280. This CRL MUST not revoke the EE certificate of the manifest.</t>
+                <t>If no such CRL can be found then the Relying Party MUST fall back to the next most recent manifest in the previous step.</t>
+            </section>
+            <section title="Finding and Validating Signed Objects">
+                <t>
+                    All other objects listed on the manifest can be retrieved from the cache by the SHA-256 hash. They are each validated
+                    according to the validation rules stipulated for their object type, which we can deduce from the extension in the name,
+                    with the exception that:
+                    <list style="symbols">
+                        <t>The CRLDP is ignored and the CRL retrieved above is used</t>
+                        <t>The SIA and AIA fields are not used for validation</t>
+                    </list>
+                </t>
+                <t>Because Prefix Origin Validation (RFC Editor queue) needs to loop over *all* the relevant Validated ROA Prefixes to
+                    determine Route validity it is RECOMMENDED that Relying Parties first check that all objects listed on the manifest can
+                    be retrieved from the cache, and if any objects are missing fall back to the next most recent manifest for processing.
+                    If this would result in rejecting a publication point altogether, e.g. because the previous manifest EE certificate has
+                    expired, then it’s RECOMMENDED that the latest manifest is used despite the missing objects. All these conditions MUST
+                    result in warnings to the users of Relying Party software.</t>
+            </section>
+            <section title="Recursion Down the PKI Tree">
+                <t>Any valid CA certificates found in the previous step can now be processed recursively starting at step 4.3.</t>
+            </section>
+        </section>
+        <section title="Impact on existing RFCs">
+            <section title="Resource Certificate Repository Structure (RFC6481)">
+                <t>This is all in line with the Resource Certificate Repository Structure as described in RFC6481. However, it could be
+                    useful to add the following normative wording to section 2.2:</t>
+                <t>“A CA's publication repository MUST contain the current (non-expired and non-revoked) certificates issued by this CA, the
+                    most recent CRL issued by this CA, the current manifest, and all other current signed objects that can be verified using
+                    an EE certificate [RFC6487] issued by this CA.</t>
+                <t>A CA MUST list all objects that it desires to be considered for top-down validation on a single manifest, and it MUST NOT
+                    divide this list of products over multiple manifests. A CA MUST publish all the objects listed on this manifest. A CA
+                    MAY sign other objects that are not intended for publication in the RPKI repository. Such objects MUST NOT appear on the
+                    manifest and SHOULD not be published in the repository”</t>
+            </section>
+            <section title="Manifests (RFC6486)">
+                <t>Section 1 of RFC6486 has the following on the main purpose of manifests in the RPKI: "A manifest is intended to allow an
+                    RP to detect unauthorized object removal or the substitution of stale versions of objects at a publication point."</t>
+                <t>RFC6486 was written in the context of an rpki repository that assumes single publication points for CAs that can support
+                    recursive fetching of all published objects over rsync. Because RPs can get all objects that a CA publishes this way
+                    there was no need for any object that lists these objects explicitly for retrieval purposes, and therefore the manifest
+                    was not thought to carry this responsibility.</t>
+                <t>
+                    Having said that, however, there are a number use cases that warrant that manifests MUST be useful in this way:
+                    <list style="symbols">
+                        <t>The validation process described in this document is independent of the location where objects are retrieved.
+                            Manifests are used to determine which objects are currently published by a CA.</t>
+                        <t>BGP Prefix Origin Validation (RFC editor queue) section 2 describes a process for determining route validity that
+                            loops over all Validated Roa Prefixes. Therefore it is very desirable to have an authoritative source of
+                            information that instructs the RP which objects MUST be validated.</t>
+                        <t>Other transport protocols, such as http, may be added in the future. These protocols do not necessarily support
+                            recursive fetching and therefore they need an authoritative list to determine what to fetch.</t>
+                    </list>
+                </t>
+                <t>For this reason we propose to change the standards so that manifests MAY be used as the authoritative list of objects
+                    that a CA desires to publish. In the next sections we describe the implications this has on the use of manifests by RPs
+                    as currently described in section 6 of RFC6486.</t>
+                <section title="Missing Manifests">
+                    <t>A missing manifest may be the result of an error by the CA or the publisher. It is most strongly RECOMMENDED that CAs
+                        and publishers monitor this and fix the situation should problems arise.</t>
+                    <t>If no current manifest can be found by the Relying Party then they SHOULD use the most recent old manifest in their
+                        possession, as described in section 4.4 in this document.</t>
+                </section>
+                <section title="Mismatch between Manifest and Publication Point">
+                    <t>Relying Parties that find that objects listed on the manifest are missing MAY decide to use the most recent manifest
+                        in their possession for which all objects could be found, as described in section 4.6 in this document.</t>
+                    <t>As described in RFC6481 CAs MUST publish all objects that MUST be considered for top-down validation, and they SHOULD
+                        NOT publish any other objects. Therefore Relying Parties MAY ignore any objects found in a repository that are not
+                        listed on a manifest.</t>
+                </section>
+                <section title="Hash Values Not Matching Manifest">
+                    <t>Relying Parties MUST reject current published objects with hash values not matching the validated current manifest.</t>
+                </section>
+            </section>
+        </section>
+        <section title="Security Considerations"><t>TBD</t></section>
+        <section title="Acknowledgements"><t>TBD</t></section>
+    </middle>
+
+    <back>
+    <references title="Normative References">&rfc2119;
+    </references>
+    </back>
+
+</rfc>

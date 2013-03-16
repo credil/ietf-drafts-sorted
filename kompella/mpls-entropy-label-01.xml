@@ -1,0 +1,746 @@
+<?xml version="1.0"?>
+<!DOCTYPE rfc SYSTEM "rfc3978.dtd">
+<?rfc strict="yes" ?>
+<?rfc toc="yes"?>
+<?rfc tocdepth="3"?>
+<?rfc tocindent="yes"?>
+<?rfc symrefs="yes"?>
+<?rfc sortrefs="yes"?>
+<?rfc comments="yes"?>
+<?rfc inline="yes"?>
+<?rfc compact="yes"?>
+<?rfc subcompact="no"?>
+<rfc ipr="trust200902" category="std" updates='3031'>
+
+<front>
+    <title abbrev='MPLS Entropy Labels'>
+	The Use of Entropy Labels in MPLS Forwarding
+    </title>
+
+    <author initials="K." surname="Kompella" fullname="Kireeti Kompella">
+	<organization>Juniper Networks</organization>
+	<address>
+	    <postal>
+		<street>1194 N. Mathilda Ave.</street>
+		<city>Sunnyvale</city>
+		<region>CA</region>
+		<code>94089</code>
+		<country>US</country>
+	    </postal>
+	    <email>kireeti@juniper.net</email>
+	</address>
+    </author>
+    <author initials="S." surname="Amante" fullname="Shane Amante">
+	<organization>Level 3 Communications, LLC</organization>
+	<address>
+	    <postal>
+		<street>1025 Eldorado Blvd</street>
+		<city>Broomfield</city>
+		<region>CO</region>
+		<code>80021</code>
+		<country>US</country>
+	    </postal>
+	    <email>shane@level3.net</email>
+	</address>
+    </author>
+
+    <date month="July" year="2010"/>
+    <area>Routing</area>
+	<keyword>Internet-Draft</keyword>
+    <keyword>entropy hash ecmp load balancing</keyword>
+
+    <abstract>
+	<t>
+	Load balancing is a powerful tool for engineering traffic
+	across a network.  This memo suggests ways of improving load
+	balancing across MPLS networks using the notion of "entropy
+	labels".  It defines the concept, describes why they are
+	needed, suggests how they can be used, and enumerates
+	properties of entropy labels that allow optimal benefit.
+	</t>
+    </abstract>
+</front>
+
+<middle>
+<section title="Introduction" anchor='intro'>
+    <t>
+    Load balancing, or multi-pathing, is an attempt to balance traffic
+    across a network by allowing the traffic to use several paths, not
+    just a single shortest path.  Load balancing has several benefits: 
+    it eases capacity planning; it can help absorb traffic surges by
+    spreading them across several links; it allow better resilience by
+    offering alternate paths should a link or node fail.  
+    </t>
+    <t>
+    As providers scale their networks, they resort to a small number of
+    techniques to achieve greater bandwidth between nodes and,
+    subsequently, depend on load-balancing of traffic over those paths.
+    Two widely used techniques are: Link Aggregation (LAG) and
+    Equal-Cost Multi-Path (ECMP). LAG is only used to bond together
+    several physical circuits between two adjacent nodes so they appear
+    to higher-layer protocols as a single, higher bandwidth "virtual"
+    pipe. On the other hand, ECMP is used between two nodes, separated
+    by one or more hops, to allow load-sharing over more than just the
+    shortest path in the network -- this is typically obtained by
+    arranging IGP metrics such that there are several equal cost paths
+    between source-destination pairs.  In summary, both of these
+    techniques may, and oftentimes do, co-exist in various parts of a
+    given providers network, depending on various choices made by the
+    provider.
+    </t>
+    <t>
+    A very important consideration when load balancing is that packets
+    belonging to a given "flow" MUST be mapped to the same path, i.e.,
+    the same exact sequence of links across the network.  This is to
+    avoid jitter, latency and re-ordering issues for the flow.
+    However, what constitutes a flow varies considerably.  A common
+    example of a flow is a TCP session.  Other examples are L2TP
+    sessions corresponding to broadband users, or traffic within an
+    ATM virtual circuit.  A flow is usually defined, for the purposes
+    of forwarding and load balancing, by a hash computed on packet
+    headers such that packets belonging to a given flow map to the
+    same hash value.  The fields chosen for such a hash depend on the
+    packet type; a typical set (for IP packets) is the IP source and
+    destination address, the protocol type, and (for TCP and UDP
+    traffic) the source and destination port numbers.  A conservative
+    choice of fields leads to many flows mapping to the same hash
+    value (and consequently poor load balancing); an overly aggressive
+    choice may map a flow to multiple values, potentially causing the
+    issues mentioned above.
+    </t>
+    <t>
+    For MPLS networks, most of the same principles (and benefits)
+    apply.  However, finding useful fields in a packet for the purpose
+    of load balancing can be more of a challenge.  In many cases, the
+    extra encapsulation may require fairly deep inspection of packets
+    to find these fields at every hop.  An idea for removing the need
+    for this deep inspection is to extract this information *once*, at
+    the ingress of an MPLS Label Switched Path (LSP), and encode,
+    within the label stack itself, in addition to the forwarding
+    semantics of the label stack, the load balancing information.
+    This information can then be used on all MPLS hops across the
+    network.  There are three key reasons why this is beneficial:
+	<list style="numbers">
+	    <t>
+	    at the ingress of the LSP, MPLS encapsulation hasn't yet
+	    occurred, so deep inspection is not necessary;
+	    </t>
+	    <t>
+	    the ingress of an LSP has more context and information
+	    about incoming packets than transit nodes; and
+	    </t>
+	    <t>
+	    ingress nodes usually operate at lower bandwidths than
+	    transit nodes, allowing them to do more work per packet.
+	    </t>
+	</list>
+    </t>
+    <t>
+    This memo describes a few approaches to solving this problem, and
+    focuses on one method, which uses the notion of entropy labels.
+    This memo goes on to define entropy labels, and describes why they
+    are needed, and the properties of entropy labels in the forwarding
+    plane: how they are generated and received and what is expected of
+    transit Label Switching Routers (LSRs).  Finally, it describes in
+    general how signaling works and what needs to be signaled, as well
+    as specifics for LDP.
+    </t>
+    <section title="Motivation">
+    <t>
+    MPLS is very successful generic forwarding substrate that may
+    transport several dozen types of protocols, most notably: IP, PWE3,
+    VPLS and IP VPN's.  Within each type of protocol, there typically
+    exist several variants as it relates to load-sharing, e.g.: IP: 
+    IPv4, IPv6, IPv6 in IPv4, etc.; PWE3: Ethernet, ATM, Frame-Relay, 
+    etc.  There are also several different types of Ethernet over PW 
+    encapsulation, ATM over PW encapsulation, etc. as well.  Finally,
+    given the popularity of MPLS, it is likely that it will continue 
+    to be extended to transport new protocols as the need arises.
+    </t>
+    <t>
+    Currently, each MPLS LSR along a given path needs to individually
+    infer the underlying protocol within a MPLS packet in order to then
+    extract appropriate keys from the payload.  Those keys are then used
+    as input into a hash algorithm to determine the specific output
+    interface on a LSR that is used for that given "microflow".
+    Unfortunately, if the MPLS LSR is unable to infer the MPLS packet's
+    payload (as is often the case), they typically will resort to using
+    the topmost MPLS labels in the MPLS stack as keys to the
+    load-hashing algorithm.  The result is an extremely inequitable
+    distribution of traffic across multiple equal-cost paths exiting
+    that node, simply because the topmost MPLS labels are very
+    coarse-grained forwarding labels that typically describe a next-hop, 
+    or provide some other type of mux/demux forwarding function, and 
+    do not describe the granularity of the underlying traffic.
+    </t>
+    <t>
+    On the other hand, ingress MPLS LER's (PE routers) have detailed
+    knowledge of an MPLS packet's contents, typically through a priori
+    configuration of encapsulation(s) that are expected at a given PE-CE
+    interface, (e.g.: IPv4, IPv6, VPLS, etc.).  PE routers need this
+    information to: a) discern the packet's CoS forwarding treatment, b)
+    apply filters to forward or block traffic to/from the CE; c) to
+    forward routing/control traffic to an onboard management processor;
+    or, d) load-share the traffic on its uplinks to P routers.  By 
+    knowing the expected encapsulation types, an ingress PE router
+    could apply a smaller subset of payload parsing routines to extract
+    keys appropriate for the given protocol.  Ultimately, this should
+    allow for significantly improved accuracy in determining the
+    appropriate load-balancing behavior for each protocol.
+    </t>
+    <t>
+    In addition, compared to MPLS LSR's, PE routers typically operate at 
+    lower forwarding rates as well as have more flexible forwarding 
+    hardware.  As a result, a PE router can typically adapt much more 
+    quickly to new/emerging protocols and determine the appropriate keys 
+    used for load-sharing traffic that type of traffic through the 
+    network.
+    </t>
+    <t>
+    An additional advantage of applying entropy labels only at the edge
+    of the network, on PE routers, would be that core/transit MPLS LSR's
+    could once again return to being completely oblivious to the
+    contents of each MPLS packet, and only use the outer MPLS labels to
+    determine forwarding and forwarding treatment of MPLS packets.
+    Specifically, there will be no reason to duplicate, from MPLS LER's,
+    extremely complex packet/payload parsing functionality within MPLS
+    LSR's and attempt to keep to keep this functionality at parity
+    across all network elements, e.g.: both MPLS LSR's and LER's.
+    Ultimately, this should result in less complexity within core LSR's
+    allowing them to more easily scale to higher forwarding rates,
+    larger port density, consume less power, etc.  Finally, the approach
+    discussed in this memo would allow for more rapid deployment of new
+    protocols, since MPLS LSR's will not have to be developed or
+    modified to understand how to properly extract keys to achieve 
+    good load-sharing of traffic throughout the network.
+    </t>
+    <t>
+    In summary, MPLS LSR's are ill-equipped to infer the protocol within
+    a packet's payload and choose appropriate keys within the payload to
+    correctly identify a given "microflow", which is required to provide
+    the most equitable load-sharing over multiple equal cost paths.
+    On the other hand, PE routers have both the knowledge and
+    capabilities to more accurately determine the load-sharing
+    treatment that should be applied to a given protocol encapsulated
+    within MPLS by MPLS LSR's.
+    </t>          
+    </section>
+
+    <section title="Conventions used" anchor='conv'>
+	<t>
+	The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL
+	NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and
+	"OPTIONAL" in this document are to be interpreted as described
+	in <xref target='RFC2119'/>.
+	</t>
+	<t>
+	Labels stacks are denoted &lt;L1, L2, L3&gt;, which L1 is the
+	"outermost" label and L3 the innermost (closest to the payload).
+	Packet flows are depicted left to right, and signaling is shown
+	right to left (unless otherwise indicated).
+	</t>
+    </section>
+</section>
+
+<section title="Approaches">
+    <t>
+    There are two main approaches to encoding load balancing
+    information in the label stack.  The first allocates multiple
+    labels for a particular Forwarding Equivalance Class (FEC).  These
+    labels are equivalent in terms of forwarding semantics, but having
+    several allows flexibility in assigning labels to flows from the
+    same FEC.  The other approach encodes the load balancing
+    information as a separate label in the label stack.  Here, there
+    are two sub-approaches, based on whether this load-balancing label
+    is signaled or not.
+    </t>
+    <t>
+    The first approach has the advantage that the label stack stays
+    the same depth whether using label-based load balancing or not;
+    and so, consequently, do forwarding operations on transit and
+    egress LSRs.  However, it has a major drawback in that signaling
+    and forwarding state are both increased significantly.  The number
+    of independent choices for load balancing packets belonging to a
+    FEC limits the effectiveness of load balancing, so one would like
+    this number to be large.  However, the larger this number is, the
+    greater the signaling and forwarding state in the network.
+    </t>
+    <t>
+    The second approach increases the size of the label stack by one
+    label.  This consequently affects operations on ingress, transit
+    and egress LSRs.  The sub-approach of signaling the load-balancing
+    labels increases signaling and forwarding state, and so suffers
+    from some of the problems of the first approach.
+    </t>
+    <t>
+    The approach advocated by this memo, and the only one described in
+    detail, is the one where the load-balancing labels are not
+    signaled.  With this approach, there is minimal change to
+    signaling state for a FEC; also, there is no change in forwarding
+    operations in transit LSRs, and no increase of forwarding state in
+    any LSR.  The only purpose of these labels is to increase the
+    entropy in the label stack, so they are called "entropy labels".
+    </t>
+</section>
+
+<section title="Entropy Labels">
+    <t>
+    An entropy label (as used here) is a label:
+	<list style="numbers">
+	    <t>
+		that is not used for forwarding;
+	    </t>
+	    <t>
+		that is not signaled; and
+	    </t>
+	    <t>
+		whose only purpose in the label stack is to provide
+		"entropy" to improve load balancing.
+	    </t>
+	</list>
+    </t>
+    <t>
+    Entropy labels are generated by an ingress LSR, based entirely on
+    load balancing information.  However, they MUST NOT have values in
+    the reserved label space (0-15).  Entropy labels MUST be at the
+    bottom of the label stack, and thus the "end-of-stack" bit in the
+    label should be set.  To ensure that they are not used
+    inadvertently for forwarding, entropy labels SHOULD have a TTL of
+    0.
+    </t>
+    <t>
+    Since entropy labels are generated by the ingress LSR, an egress
+    LSR MUST be able to tell unambiguously that a given label is an
+    entropy label.  This of course depends on the underlying
+    application.  If any ambiguity is possible, the label above the
+    entropy label MUST be an "entropy label indicator" (ELI), which
+    says that the following label is an entropy label.  The ELI may be
+    signaled, or may be a reserved label reserved specifically for
+    this purpose.  Fortunately, for many applications, the use of
+    entropy labels is unambiguous, and does not need an ELI.
+    </t>
+    <t>
+    Applications for MPLS entropy labels include pseudowires
+    (<xref target='RFC4447'/>,
+    <xref target='I-D.ietf-pwe3-fat-pw'/>), Layer 3 VPN's
+    (<xref target='RFC4364'/>), VPLS (<xref target='RFC4761'/>,
+    <xref target='RFC4762'/>) and Tunnel LSPs.  This memo specifies
+    general properties of entropy labels, and the signaling of entropy
+    labels for LDP (<xref target='RFC5036'/>) tunnel LSPs.  Other
+    memos will specify the signaling and use of entropy labels for
+    specific applications.
+    </t>
+</section>
+
+<section title="Forwarding and Load Balancing Behaviors for Entropy Labels">
+    <section title="Ingress LSR">
+	<t>
+	Suppose that for a particular application (or FEC), an ingress
+	LSR X has to push label stack &lt;TL, AL&gt;, where TL is the
+	"tunnel label" and AL is the application label.  (Note the use
+	of the convention for label stacks described in
+	<xref target='conv'/>.  The use of a two-label stack is just
+	for illustrative purposes.)  Suppose furthermore that X is to
+	use entropy labels for this application.  Thus, the resultant
+	label stack will be &lt;TL, AL, EL&gt;, where EL is the
+	entropy label.
+	</t>
+	<t>
+	When a packet for this FEC arrives at X, X must first
+	determine the fields that it will use for load balancing.
+	Typically, X will then generate a hash H over those fields.  X
+	will then pick an outgoing label stack &lt;TL, AL&gt; to push
+	on the packet.  However, X must also generate an entropy label
+	EL (based either directly on the load balancing fields, or on
+	the hash H).  EL is a "regular" 32-bit label, encoded in the
+	usual way; however, the EOS bit MUST be 1 and the TTL field
+	MUST be 0.  X then pushes &lt;TL, AL, EL&gt; on to the packet
+	before forwarding it to the next LSR.  If X is told (via
+	signaling) that it must use an entropy label indicator ELI,
+	then X instead pushes &lt;TL, AL, ELI, EL&gt; on to the packet.
+	</t>
+	<t>
+	Note that ingress LSR X MUST NOT include an entropy label
+	unless the egress LSR for this FEC has indicated that it is
+	ready to receive entropy labels.  Furthermore, if the egress
+	LSR has signaled that an ELI is needed, then X MUST include
+	the ELI with the entropy label; otherwise, X MUST NOT use
+	entropy labels.
+	</t>
+    </section>
+    <section title='Transit LSR'>
+	<t>
+	Transit LSRs have no change in forwarding behavior.  For load
+	balancing, transit LSRs SHOULD use the whole label stack
+	(e.g., for computing the load balance hash).  Transit LSRs MAY
+	choose to look beyond the label stack for further load
+	balancing information; however, if entropy labels are being
+	used, this may not be very useful.  In a mixed environment (or
+	for backward compatibility), this is the simplest approach.
+	</t>
+	<t>
+	Thus, transit LSRs are almost unaffected by the use of entropy
+	labels.  If transit LSRs were programmed to use a subset of
+	the label stack, they may have to be reconfigured to use the
+	full stack.  But otherwise, no changes are needed.
+	</t>
+    </section>
+    <section title='Egress LSRs'>
+	<t>
+	An ingress LSR X MUST NOT send entropy labels to an egress LSR
+	Y unless Y has signaled its readiness to receive such labels.
+	Y must also determine (for a particular application or FEC),
+	whether it can distinguish whether the ingress has added an
+	entropy label or not; if Y cannot do so, Y MUST request that
+	an ELI be used for this FEC.  Alternatively, Y MUST require
+	the use of entropy labels.  (See <xref target='sig'/> for more
+	details on signaling.)
+	</t>
+	<t>
+	Suppose Y has signaled that it is prepared to receive entropy
+	labels for a given FEC.  In this case, Y must be able to
+	distinguish whether an ingress LSR has inserted an entropy
+	label or not based solely on the 'end-of-stack' (EOS) bit on
+	the application label for this FEC.  When Y receives a packet
+	with this application label, then Y looks to see if the EOS
+	bit is set.  If not, Y assumes that the label below is an
+	entropy label and pops it.  Y MAY choose to ensure that the
+	entropy label has its EOS bit set and TTL=0.  Y then processes
+	the packet as usual.  Implementations may choose the order
+	in which they apply these operations, but the net result
+	should be as specified.
+	</t>
+    </section>
+</section>
+
+<section title="Signaling for Entropy Labels" anchor='sig'>
+    <t>
+    Signaling for entropy labels exchanges three types of information:
+	<list style='numbers'>
+	    <t>
+	    whether an LSR Y is prepared to receive entropy labels,
+	    </t>
+	    <t>
+	    whether receiving LSR Y requires ELIs with entropy labels,
+	    and if so, what label to use as the ELI, and
+	    </t>
+	    <t>
+	    whether an LSR X is able to send entropy labels.
+	    </t>
+	</list>
+    </t>
+    <t>
+    The uses of this information can be illustrated as follows.  If an
+    LSR Y is prepared to receive entropy labels for an application (or
+    FEC), it signals that to the ingress LSR(s).  That means that an
+    ingress LSR for this application MAY send an entropy label for
+    this application; Y MUST be able to distinguish whether or not an
+    entropy label was sent based solely on the EOS bit on the
+    application label.
+	</t>
+	<t>
+	In cases where an application label is used, Y does not need to
+	signal an ELI for this FEC.  However, Y MUST clear the EOS bit
+	on the application label to indicate that the label that follows will
+	be an Entropy Label.
+	</t>
+	<t>
+	In cases where no application label exists, Y can signal that an
+    ELI MUST be used for this FEC; Y may also signal what ELI to use.
+    In this case, an ingress LSR will either not send an entropy label,
+    or push the ELI before the entropy label.  This makes the use/non-use
+    of an entropy label unambiguous.  However, this also increases the
+    size of the label stack.
+    </t>
+    <t>
+    The specific protocols and encoding details for the above will
+    depend on the underlying application; see
+    <xref target='I-D.ietf-pwe3-fat-pw'/> for an example for
+    pseudowires.
+    </t>
+
+    <section title="LDP Signaling">
+	<t>
+	When using LDP for signaling tunnel labels (<xref target='RFC5036'/>),
+	a Label Mapping Message sub-TLV (Entropy Label sub-TLV) type is used to
+	synchronize the entropy label states between the ingress and egress PE's.
+	</t>
+	<t>
+	The presence of the Entropy Label sub-TLV in the Label Mapping Message
+	indicates to the ingress PE that the egress PE can correctly process a
+	entropy label.  In addition, the Entropy Label sub-TLV contains a label
+	value that must be inserted as the ELI by the ingress PE, assuming
+	the ingress PE can apply entropy labels to outgoing packets.
+	</t>
+	<t>
+	It should be noted that the egress PE only needs to send a single
+	Label value for the ELI, which does not conflict with any other labels
+	it has advertised to other PE's for other applications.
+	</t>
+	<section title='Structure of Entropy Label sub-TLV'>
+	<t>
+	<figure title="Entropy Label sub-TLV" anchor="el_sub_tlv">
+		<preamble>The structure of the Entropy Label sub-TLV is shown in
+		Figure 1.</preamble>
+		<artwork>
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|U|F|           Type            |      Length                   |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|     ELI Label                                                 |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		</artwork>
+	</figure>
+	</t>
+	<t>
+		Where:
+		<list style="empty">
+			<t>U: Unknown bit.  This bit MUST be set to 1.  If the Entropy
+			Label sub-TLV is not understood, then the TLV is not known to
+			the receiver and MUST be ignored.</t>
+			<t>F: Forward bit.  This bit MUST be set be set to 1.  Since this
+			sub-TLV is going to propagated hop-by-hop, the sub-TLV should be
+			forwarded even by devices that may not understand it.</t>
+			<t>Type: Type field.  'Entropy Label sub-TLV' specified by IANA.
+			</t>
+			<t>Length: Length field.  This field specifies the total length
+			in octets of the Entropy Label sub-TLV.</t>
+			<t>ELI Label: Entropy Label Indicator Label.  The Entropy Label 
+			Indicator (ELI) label notifies the receiver that the following
+			label in the MPLS Label stack is the Entropy Label.  It should be
+			noted that the ELI Label is unnecessary for protocols that use
+			an application label that precedes the Entropy Label.
+			</t>
+		</list>
+	</t>
+	<t>Label</t>
+	<t>
+	<figure title="Entropy Label Indicator Label" anchor="eli_label">
+		<preamble>This is a 20-bit label value represented as a 20-bit number
+		in a 4 octet field as follows:</preamble>
+		<artwork>
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|     ELI Label                         |                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		</artwork>
+	</figure>
+	</t>
+	</section>
+</section>
+	<section title="RSVP Signaling">
+	<t>
+	TBD.
+	</t>
+	</section>
+	<section title="BGP Signaling">
+	<t>
+	TBD.
+	</t>
+	</section>
+</section>
+
+<section title="MPLS-TP and Entropy Labels">
+	<t>
+	Interoperability with MPLS-TP Generic Associated Channel Label (GAL)
+	are outside the scope of this document.
+	</t>
+</section>
+
+<section title='Security Considerations' anchor='sec-con'>
+	<t>
+	This document describes advertisement of the capability to support
+	receipt of entropy-labels and an Entropy Label Indicator that an
+	ingress PE may apply to MPLS packets in order to allow Core LSR's
+	to attain better load-balancing across LAG and/or ECMP paths in the
+	network.
+	</t>
+	<t>
+	This document does not introduce new security vulnerabilities to LDP.
+	Please refer to the Security Considerations section of LDP (<xref 
+	target='RFC5036'/>) for security mechanisms applicable to LDP.
+	</t>
+</section>
+
+<section title='IANA Considerations'>
+	<t>IANA is requested to allocate the next available value from IETF
+	Consensus range in the LDP TLV Type Name Space Registry as the
+	Entropy Label TLV.</t>
+</section>
+
+<section title='Acknowledgments'>
+    <t>
+	We wish to thank Ulrich Drafz and John Drake for their contributions, as 
+	well as the entire "hash label" team for their valuable comments and
+	discussion.
+    </t>
+</section>
+</middle>
+
+
+<back>
+<references title='Normative References'>
+	<reference anchor="RFC2119">
+	<front>
+	<title abbrev="RFC Key Words">Key words for use in RFCs to Indicate
+		Requirement Levels</title>
+	<author initials="S." surname="Bradner" fullname="Scott Bradner">
+	<organization>Harvard University</organization>
+	<address>
+	<postal>
+	<street>1350 Mass. Ave.</street>
+	<street>Cambridge</street>
+	<street>MA 02138</street></postal>
+	<phone>- +1 617 495 3864</phone>
+	<email>-</email></address></author>
+	<date month="March" year="1997"/>
+	<area>General</area>
+	<keyword>keyword</keyword>
+	</front>
+	
+	<seriesInfo name="BCP" value="14"/>
+	<seriesInfo name="RFC" value="2119"/>
+	</reference>
+</references>
+
+
+<references title='Informative References'>
+	<reference anchor='I-D.ietf-pwe3-fat-pw'>
+	<front>
+	<title>Flow Aware Transport of Pseudowires over an MPLS PSN</title>
+
+	<author initials='S' surname='Bryant' fullname='Stewart Bryant'>
+	    <organization />
+	</author>
+	<author initials='C' surname='Filsfils' fullname='Clarence Filsfils'>
+	    <organization />
+	</author>
+	<author initials='U' surname='Drafz' fullname='Ulrich Drafz'>
+	    <organization />
+	</author>
+	<author initials='V' surname='Kompella' fullname='Vach Kompella'>
+	    <organization />
+	</author>
+	<author initials='J' surname='Regan' fullname='Joe Regan'>
+	    <organization />
+	</author>
+	<author initials='S' surname='Amante' fullname='Shane Amante'>
+	    <organization />
+	</author>
+	<date month='January' day='27' year='2010' />
+	<abstract><t>Where the payload carried over a pseudowire carries a number of identifiable flows it can in some circumstances be desirable to carry those flows over the equal cost multiple paths (ECMPs) that exist in the packet switched network.  Most forwarding engines are able to hash based on label stacks and use this to balance flows over ECMPs. This draft describes a method of identifying the flows, or flow groups, to the label switched routers by including an additional label in the label stack.</t></abstract>
+	</front>
+
+	<seriesInfo name='Internet-Draft' value='draft-ietf-pwe3-fat-pw-03' />
+	<format type='TXT' target='http://www.ietf.org/internet-drafts/draft-ietf-pwe3-fat-pw-03.txt' />
+	</reference>
+
+	<reference anchor='RFC5036'>
+
+	<front>
+	<title>LDP Specification</title>
+	<author initials='L.' surname='Andersson' fullname='L. Andersson'>
+	<organization /></author>
+	<author initials='I.' surname='Minei' fullname='I. Minei'>
+	<organization /></author>
+	<author initials='B.' surname='Thomas' fullname='B. Thomas'>
+	<organization /></author>
+	<date year='2007' month='October' />
+	<abstract>
+	<t>The architecture for Multiprotocol Label Switching (MPLS) is described in RFC 3031.  A fundamental concept in MPLS is that two Label Switching Routers (LSRs) must agree on the meaning of the labels used to forward traffic between and through them.  This common understanding is achieved by using a set of procedures, called a label distribution protocol, by which one LSR informs another of label bindings it has made.  This document defines a set of such procedures called LDP (for Label Distribution Protocol) by which LSRs distribute labels to support MPLS forwarding along normally routed paths. [STANDARDS TRACK]</t></abstract></front>
+
+	<seriesInfo name='RFC' value='5036' />
+	<format type='TXT' octets='287101' target='http://www.rfc-editor.org/rfc/rfc5036.txt' />
+	</reference>
+
+	<reference anchor='RFC4364'>
+	<front>
+	<title>BGP/MPLS IP Virtual Private Networks (VPNs)</title>
+	<author initials='E.' surname='Rosen' fullname='E. Rosen'>
+	<organization /></author>
+	<author initials='Y.' surname='Rekhter' fullname='Y. Rekhter'>
+	<organization /></author>
+	<date year='2006' month='February' />
+	<abstract>
+	<t>This document describes a method by which a Service Provider may use an IP backbone to provide IP Virtual Private Networks (VPNs) for its customers.  This method uses a "peer model", in which the customers' edge routers (CE routers) send their routes to the Service Provider's edge routers (PE routers); there is no "overlay" visible to the customer's routing algorithm, and CE routers at different sites do not peer with each other.  Data packets are tunneled through the backbone, so that the core routers do not need to know the VPN routes. [STANDARDS TRACK]</t></abstract></front>
+
+	<seriesInfo name='RFC' value='4364' />
+	<format type='TXT' octets='116446' target='http://www.rfc-editor.org/rfc/rfc4364.txt' />
+	</reference>
+
+	<reference anchor='RFC4447'>
+	<front>
+	<title>Pseudowire Setup and Maintenance Using the Label Distribution Protocol (LDP)</title>
+	<author initials='L.' surname='Martini' fullname='L. Martini'>
+	<organization /></author>
+	<author initials='E.' surname='Rosen' fullname='E. Rosen'>
+	<organization /></author>
+	<author initials='N.' surname='El-Aawar' fullname='N. El-Aawar'>
+	<organization /></author>
+	<author initials='T.' surname='Smith' fullname='T. Smith'>
+	<organization /></author>
+	<author initials='G.' surname='Heron' fullname='G. Heron'>
+	<organization /></author>
+	<date year='2006' month='April' />
+	<abstract>
+	<t>Layer 2 services (such as Frame Relay, Asynchronous Transfer Mode, and Ethernet) can be "emulated" over an MPLS backbone by encapsulating the Layer 2 Protocol Data Units (PDU) and transmitting them over "pseudowires".  It is also possible to use pseudowires to provide low-rate Time Division Multiplexed and a Synchronous Optical NETworking circuit emulation over an MPLS-enabled network.  This document specifies a protocol for establishing and maintaining the pseudowires, using extensions to Label Distribution Protocol (LDP).  Procedures for encapsulating Layer 2 PDUs are specified in a set of companion documents. [STANDARDS TRACK]</t></abstract></front>
+
+	<seriesInfo name='RFC' value='4447' />
+	<format type='TXT' octets='76204' target='http://www.rfc-editor.org/rfc/rfc4447.txt' />
+	</reference>
+
+	<reference anchor='RFC4761'>
+	<front>
+	<title>Virtual Private LAN Service (VPLS) Using BGP for Auto-Discovery and Signaling</title>
+	<author initials='K.' surname='Kompella' fullname='K. Kompella'>
+	<organization /></author>
+	<author initials='Y.' surname='Rekhter' fullname='Y. Rekhter'>
+	<organization /></author>
+	<date year='2007' month='January' />
+	<abstract>
+	<t>Virtual Private LAN Service (VPLS), also known as Transparent LAN Service and Virtual Private Switched Network service, is a useful Service Provider offering. The service offers a Layer 2 Virtual Private Network (VPN); however, in the case of VPLS, the customers in the VPN are connected by a multipoint Ethernet LAN, in contrast to the usual Layer 2 VPNs, which are point-to-point in nature.&lt;/t>&lt;t> This document describes the functions required to offer VPLS, a mechanism for signaling a VPLS, and rules for forwarding VPLS frames across a packet switched network. [STANDARDS TRACK]</t></abstract></front>
+
+	<seriesInfo name='RFC' value='4761' />
+	<format type='TXT' octets='65219' target='http://www.rfc-editor.org/rfc/rfc4761.txt' />
+	</reference>
+
+	<reference anchor='RFC4762'>
+	<front>
+	<title>Virtual Private LAN Service (VPLS) Using Label Distribution Protocol (LDP) Signaling</title>
+	<author initials='M.' surname='Lasserre' fullname='M. Lasserre'>
+	<organization /></author>
+	<author initials='V.' surname='Kompella' fullname='V. Kompella'>
+	<organization /></author>
+	<date year='2007' month='January' />
+	<abstract>
+	<t>This document describes a Virtual Private LAN Service (VPLS) solution using pseudowires, a service previously implemented over other tunneling technologies and known as Transparent LAN Services (TLS). A VPLS creates an emulated LAN segment for a given set of users; i.e., it creates a Layer 2 broadcast domain that is fully capable of learning and forwarding on Ethernet MAC addresses and that is closed to a given set of users. Multiple VPLS services can be supported from a single Provider Edge (PE) node.&lt;/t>&lt;t> This document describes the control plane functions of signaling pseudowire labels using Label Distribution Protocol (LDP), extending RFC 4447. It is agnostic to discovery protocols. The data plane functions of forwarding are also described, focusing in particular on the learning of MAC addresses. The encapsulation of VPLS packets is described by RFC 4448. [STANDARDS TRACK]</t></abstract></front>
+
+	<seriesInfo name='RFC' value='4762' />
+	<format type='TXT' octets='82778' target='http://www.rfc-editor.org/rfc/rfc4762.txt' />
+	</reference>
+</references>
+
+<section title='Applicability of LDP Entropy Label sub-TLV'>
+	<t>
+	In the case of unlabeled IPv4 (Internet) traffic, the Best Current
+	Practice is for an egress PE to propagate eBGP learned routes within a
+	SP's Autonomous System after resetting the BGP next-hop attribute to the
+	Loopback IP address of the egress PE.  That Loopback IP address is
+	injected into the Service Provider's IGP and, concurrently, a label
+	assigned to it via LDP.  Thus, when an ingress PE is performing a
+	forwarding lookup for a BGP destination it recursively resolves the
+	associated next-hop to a Loopback IP address and associated LDP label
+	of the egress PE.
+	</t>
+	<t>
+	Thus, in the context of unlabeled IPv4 traffic, the LDP Entropy Label
+	sub-TLV will typically be applied only to the FEC for the Loopback
+	IP address of the egress PE.
+	</t>
+</section>
+
+</back>
+
+</rfc>

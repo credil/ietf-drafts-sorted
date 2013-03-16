@@ -1,0 +1,729 @@
+
+
+
+Network Working Group                                            Z. Uzmi
+Internet-Draft                                                  A. Tariq
+Intended status: Informational                                      LUMS
+Expires: January 6, 2011                                      P. Francis
+                                                                 MPI-SWS
+                                                           July 05, 2010
+
+
+                      FIB Aggregation with SMALTA
+                        draft-uzmi-smalta-00.txt
+
+Abstract
+
+   Concerns about the growth of the global routing table has led to
+   proposals for short-term FIB-reduction and long-term RIB-reduction
+   solutions.  The simplest type of FIB-reduction solution is "FIB
+   aggregation", whereby individual routers locally reduce the FIB size
+   without any changes to external operation.  The draft
+   [I-D.zhang-fibaggregation] describes and analyzes several FIB
+   aggregation schemes.  This current draft describes and analyzes
+   another point in the design space, called SMALTA.  Compared to the
+   approaches in [I-D.zhang-fibaggregation], SMALTA provides better
+   aggregation and does not introduce non-routable entries in the FIB,
+   but is also more complex.
+
+Status of this Memo
+
+   This Internet-Draft is submitted to IETF in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on January 6, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2010 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+
+
+
+Uzmi, et al.             Expires January 6, 2011                [Page 1]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Requirements notation  . . . . . . . . . . . . . . . . . . . .  3
+   3.  Design of SMALTA . . . . . . . . . . . . . . . . . . . . . . .  4
+     3.1.  Example 1:  Simple SMALTA One-Shot Aggregation . . . . . .  4
+     3.2.  Example 2: SMALTA Update Algorithm for BGP WITHDRAW  . . .  6
+     3.3.  Example 2: SMALTA Update Algorithm for BGP ANNOUNCE  . . .  7
+   4.  Analysis . . . . . . . . . . . . . . . . . . . . . . . . . . .  8
+     4.1.  SMALTA One Shot Aggregation  . . . . . . . . . . . . . . .  8
+     4.2.  Update Processing in SMALTA  . . . . . . . . . . . . . . . 10
+     4.3.  Updates and Aggregated Table Size  . . . . . . . . . . . . 11
+   5.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 11
+   6.  Security Considerations  . . . . . . . . . . . . . . . . . . . 12
+   7.  References . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+     7.1.  Normative References . . . . . . . . . . . . . . . . . . . 12
+     7.2.  Informative References . . . . . . . . . . . . . . . . . . 12
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 12
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Uzmi, et al.             Expires January 6, 2011                [Page 2]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+1.  Introduction
+
+   FIB Aggregation is an approach to shrinking the size of a router's
+   FIB without requiring any changes to the external behavior of the
+   router.  While FIB Aggregation per se is not a new idea, interest has
+   recently increased alongside the growing concern over global routing
+   table growth.  FIB Aggregation represents a short-term but simple fix
+   that can extend the lifetime of existing routers as well as reduce
+   FIB size requirements for routers in the future.  The draft
+   [I-D.zhang-fibaggregation] provides a very good overview of the
+   problem space, and so is not repeated here.
+   [I-D.zhang-fibaggregation] also describes four FIB Aggregation
+   algorithms, called Level 1 through Level 4, each adding complexity
+   but providing better aggregation over its predecessor.
+
+   These 4 levels all have the characteristic that they require a
+   complete crawl through the FIB to produce full aggregation.  They can
+   also be incrementally updated to respond to changes in routes, but
+   these incremental updates don't maintain full aggregation.  The third
+   and fourth levels have the characteristic that they introduce non-
+   routable space into the routing table.  In other words, packets
+   destined for prefixes that are not in the RIB, and would therefore
+   otherwise be dropped, may nevertheless be forwarded towards the
+   destination.
+
+   This draft introduces another FIB aggregation algorithm, SMALTA, that
+   can be viewed as a 5th level in that it is yet more complex, and
+   provides still better aggregation.  Like the first four levels,
+   SMALTA's incremental updates cause the FIB to deviate from its fully
+   aggregated state and, therefore, also requires a periodic re-compute
+   of the full FIB.  Unlike the third and fourth levels, SMALTA
+   introduces no non-routable space into the FIB.  It is semantically
+   identical to the non-aggregated FIB.
+
+   In a nutshell, what distinguishes SMALTA from the first four levels
+   is the following.  In the first four levels, aggregation is always
+   done either by assigning a nexthop to an ancestor prefix, or by
+   removing nexthop(s) of descendent prefix(es).  In other words, if
+   there is a prefix in the pre-aggregated tree, it will either remain
+   unchanged or will be aggregated with a less specific prefix in the
+   aggregated tree.  SMALTA provides additional reduction in the FIB by
+   allowing prefixes to be de-aggregated i.e. to be split into one or
+   more specific prefixes.
+
+
+2.  Requirements notation
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+
+
+
+Uzmi, et al.             Expires January 6, 2011                [Page 3]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in [RFC2119].
+
+
+3.  Design of SMALTA
+
+   SMALTA is composed of two algorithms: the one-shot aggregation and an
+   incremental update algorithm.  The implementations of these
+   algorithms assume a binary tree structure, but is not limited to this
+   and can be easily applied to other data structures.  Furthermore,
+   similar to the example set in [I-D.zhang-fibaggregation], the one-
+   shot aggregation and update algorithms in SMALTA do not introduce any
+   new data structure in the RIB or the FIB, using the existing
+   structures that stores these tables.
+
+   SMALTA one-shot aggregation algorithm takes the current snapshot of
+   the RIB and produces an aggregated version of it.  This aggregated
+   table is downloaded to the FIB, as a monolithic download, during
+   router startup or after a BGP hard reset.  This algorithm can also be
+   invoked at any time to improve the amount of aggregation, for example
+   (i) at regular intervals to ensure that the number of entries in the
+   forwarding table remains small, (ii) when the FIB size exceeds a
+   threshold, or (iii) on-demand when there occurs a significant routing
+   change such as addition or deletion of a physical interface, changes
+   to the IGP metrics or a BGP session restart.
+
+   The update algorithm incrementally incorporates any subsequent BGP
+   updates (withdraw or announce) into the aggregated table.  Any
+   resulting change in the aggregated table is then reflected in the FIB
+   through an on-demand RIB to FIB download.  The update algorithm is
+   efficient for single updates, but slightly degrades the aggregated
+   state of the table.  The update algorithm is invoked whenever there
+   is a change in the primary route of a prefix in the RIB.  When that
+   happens, SMALTA computes the necessary changes to the prefixes in the
+   aggregated table.  Note that some changes to the aggregated table
+   result in no required changes to the FIB, and others may require
+   multiple changes to the FIB.  Section 4 gives results of measurements
+   showing the average and worst-case number of FIB changes per BGP
+   update.
+
+   In the following sections, we provide examples that give the basic
+   idea of how the SMALTA algorithms work.  Complete details are
+   available in a technical report [TR.Uzmi-SMALTA]
+
+3.1.  Example 1:  Simple SMALTA One-Shot Aggregation
+
+   Figure 1A represents an original (non-aggregated) table with four
+   prefixes, using the convention introduced in
+
+
+
+Uzmi, et al.             Expires January 6, 2011                [Page 4]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+   [I-D.zhang-fibaggregation].
+
+
+
+                  (C)              (C)
+                 /                /
+                /                /
+               ()               (A)
+              /  \             /
+             /    \           /
+            (B)   (A)        ()
+           /                   \
+          /                     \
+         (A)                    (B)
+
+         ORIGINAL TABLE     ONE-SHOT AGGREGATED TABLE
+
+           FIGURE 1A           FIGURE 1B
+
+
+   Note that none of the Level 1 through Level 4 algorithms can further
+   aggregate this table.  By contrast, SMALTA would aggregate this table
+   as shown in figure 1B.
+
+   With SMALTA, the prefix with next hop B in the original table is de-
+   aggregated in the aggregated table.  This de-aggregation creates an
+   opportunity for the prefixes with next hop A to be aggregated.  The
+   resulting aggregated table is semantically equivalent to the original
+   table.
+
+   SMALTA's one-shot aggregation is derived from ORTC
+   [Paper.Draves-ORTC].  Like its precursor, one-shot runs three passes
+   over a tree data structure:
+
+   1.  A normalization pass in which the prefixes are expanded such that
+       every node in the binary tree has two or no children,
+   2.  A post-order traversal up the tree, wherein each node is assigned
+       a set of next hops, and
+   3.  A pass where the algorithm assigns next hops to prefix nodes in
+       the tree starting from the root and traversing through to the
+       leaves, removing any unnecessary leaves.
+   Unlike ORTC, SMALTA one-shot is not provably optimal, though it is
+   very close to optimal.  This is because SMALTA places some minor
+   constraints on the ORTC algorithm in order to allow the aggregated
+   table and the original non-aggregated table to be implemented as a
+   single data structure.
+
+
+
+
+
+Uzmi, et al.             Expires January 6, 2011                [Page 5]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+3.2.  Example 2: SMALTA Update Algorithm for BGP WITHDRAW
+
+   To incorporate a withdraw for a prefix P1, the ownership of the IP
+   space originally covered by P1 should be given up in favor of the
+   next hop of its immediate ancestor prefix P in the original table.
+   This is simply achieved by setting nexthop of P1 equal to that of P
+   in the aggregated table.  Next we restore all nearest descendent
+   prefixes of P1 if their nexthop does not match the new nexthop of P1.
+   Finally, we reclaim the space covered by the deaggregates of P1 by
+   setting their nexthops equal to that of P.
+
+   Figure 2A shows the non-aggregated table before the withdraw, and
+   indicates to which prefix the withdraw occurs.  Figure 2B shows the
+   non-aggregated table after the withdraw.  Figure 2C shows the
+   aggregated table that would result from applying the one-shot
+   algorithm to the non-aggregated table of Figure 2A. Note that as a
+   result of one-shot, there is in fact no nexthop in the entry to which
+   the withdraw is being applied.  Figure 2D shows the aggregated table
+   after applying the update to the table of Figure 2C, using SMALTA
+   update algorithm.
+
+
+                  (C)                   (C)
+                 /                     /
+                /                     /
+               ()                    ()
+              /  \                  /  \
+             /    \                /    \
+            (B)   (A)             (B)   (A)
+           /
+          /
+         (A) <--- Withdraw
+
+         WITHDRAW IN           RESULT OF WITHDRAW
+         ORIGINAL TABLE        ON ORIGINAL TABLE
+
+         FIGURE 2A              FIGURE 2B
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Uzmi, et al.             Expires January 6, 2011                [Page 6]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+                            (C)                    (C)
+                           /                      /
+                          /                      /
+                         (A)                    ()
+                        /                      /  \
+                       /                      /    \
+                      ()                     ()    (A)
+                     /  \                   /  \
+                    /    \                 /    \
+      Withdraw --> ()     (B)             (B)   (B)
+
+     WITHDRAW IN AGGREGATED TABLE       RESULT OF WITHDRAW
+                                        ON AGGREGATED TABLE
+
+           FIGURE 2C                       FIGURE 2D
+
+
+
+3.3.  Example 2: SMALTA Update Algorithm for BGP ANNOUNCE
+
+   In order to incorporate an announce for a prefix P1, the IP address
+   space of P1 should be assigned the nexthop of P1 if that next hop
+   does not match the next hop of P, the immediate ancestor of P1.
+   Next, all nearest descendent prefixes of P1 that have a nexthop that
+   differs from the announced nexthop are restored.  Finally, the
+   deaggregate prefixes of P that are specifics of P1 have their
+   nexthops set to that of P1.
+
+   Figures 3A and 3C give the non-aggregated and aggregated tables
+   respectively before the announce, and show to which prefix the
+   announce takes place (corresponding to Figures 2A and 2C).  Figure 3B
+   shows the non-aggregated table after the BGP update, and Figure 3D
+   shows the aggregated table after the SMALTA update algorithm is
+   applied.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Uzmi, et al.             Expires January 6, 2011                [Page 7]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+             (C)                          (C)
+             /                            /
+            /                            /
+           ()                           ()
+          /  \                         /  \
+         /    \                       /    \
+        (B)   (A)                    (B)   (A)
+       /  \                         /  \
+      /    \                       /    \
+     (A)   ()  <-- ANNOUNCE Q     (A)   (Q)
+
+     ANNOUNCE IN                  RESULT OF ANNOUNCE
+     ORIGINAL TABLE               ON ORIGINAL TABLE
+
+     FIGURE 3A                    FIGURE 3B
+
+
+
+
+
+
+
+              (C)                         (C)
+             /                           /
+            /                           /
+           (A)                         (A)
+          /                           /
+         /                           /
+        ()                          ()
+          \                           \
+           \                           \
+           (B) <-- ANNOUNCE Q          (Q)
+
+       ANNOUNCE IN                 RESULT OF ANNOUNCE
+       AGGREGATED TABLE            ON AGGREGATED TABLE
+
+        FIGURE 3C                  FIGURE 3D
+
+
+
+
+
+4.  Analysis
+
+4.1.  SMALTA One Shot Aggregation
+
+   The extent of aggregation achieved by the SMALTA one-shot aggregation
+   algorithm is given in Table 1.  This table also lists the number of
+
+
+
+Uzmi, et al.             Expires January 6, 2011                [Page 8]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+   entries in the aggregated table, obtained after applying Level 1 and
+   Level 2 aggregation from [I-D.zhang-fibaggregation].  Level 3 and
+   Level 4 aggregation results are not provided because these levels
+   create extra routable space and hence can not be fairly compared with
+   the SMALTA one-shot aggregation algorithm which does not create any
+   extra routable space.  (The authors have also produced a version of
+   SMALTA that does create extra routable space, and provides
+   substantially more aggregation than the version here.  This algorithm
+   may be described in a future version.)
+
+   It can be seen from Table 1 that SMALTA one-shot algorithm
+   consistently provides better aggregation as compared to that provided
+   by Level 1 and Level 2 algorithms.
+
+   In Table 1:
+
+   #(OT) = Number of entries in the original table
+
+   #(AT one-shot) = Number of entries in aggregated table after applying
+   SMALTA one-shot algorithm. (% of #(OT) is also shown)
+
+   #Level 1 Aggregation = Number of entries in FIB after applying Level
+   1 Aggregation [I-D.zhang-fibaggregation].
+
+   #Level 2 Aggregation = Number of entries in FIB after applying Level
+   2 Aggregation [I-D.zhang-fibaggregation].
+
+
+      +=======+========+==========+=============+==============+
+      | Year  |#(OT)   | #(AT)    | #Level 1    | #Level 2     |
+      |       |        |(one-shot)| Aggregation | Aggregation  |
+      +-------+--------+----------+-------------+--------------+
+      | 2004  | 160818 | 54340    | 103565      |  69572       |
+      |       |        | (33.7%)  | (64.39%)    |  (43.2%)     |
+      +-------+--------+----------+-------------+--------------+
+      | 2005  | 176474 | 55801    | 109169      |  73169       |
+      |       |        | (31.6%)  | (61.86%)    |  (41.4%)     |
+      +-------+--------+----------+-------------+--------------+
+      | 2006  | 203082 | 75356    | 139763      |  96993       |
+      |       |        | (37.1%)  | (68.8%)     |  (47.7%)     |
+      +-------+--------+----------+-------------+--------------+
+      | 2007  | 240162 | 83282    | 161147      |  110065      |
+      |       |        | (34.6%)  | (67.0%)     |  (45.8%)     |
+      +-------+--------+----------+-------------+--------------+
+      | 2008  | 269532 | 84170    | 178676      |  117139      |
+      |       |        | (31.2%)  | (66.2%)     |  (43.4%)     |
+      +=======+========+==========+=============+==============+
+
+
+
+
+Uzmi, et al.             Expires January 6, 2011                [Page 9]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+   TABLE 1: FIB Aggregation with SMALTA one-shot and comparison with
+            Level 1 and Level 2 aggregation.
+
+
+4.2.  Update Processing in SMALTA
+
+   A single BGP update may change the primary route for a single prefix.
+   This may, in turn, change the next hop for multiple prefixes (or for
+   no prefix) in the aggregated table.  Table 2 shows the number of
+   prefixes in the aggregated table whose next hop is modified (either
+   changed or removed) as a result of a single change in the primary
+   route of a prefix.  These modified entries are then added or deleted
+   from the aggregated FIB through RIB to FIB download.  As indicated in
+   Table 2, the average number of such modified entries remains small
+   over various years.
+
+   It may be noted that when aggregation is not used, a change in the
+   primary route of a prefix is translated to precisely one RIB to FIB
+   download.  Thus, on average, the number of RIB to FIB downloads in
+   SMALTA are comparable to the number of RIB to FIB downloads when no
+   aggregation is used.
+
+   The table also shows the maximum number of entries modified in the
+   aggregated table as a result of a single change in primary route for
+   a prefix.  This worst case usually occurs when a BGP update arrives
+   for very short prefixes (/8 in most cases).  This is expected because
+   shorter prefixes represent a larger IP address space, with the
+   possibility that a larger number of more specific prefixes will fall
+   within that space.
+
+
+    +======+========+==============+===============+=================+
+    | Year | No. of | Avg #entries | Max. #entries | Prefix for Max. |
+    |      | updates| modified     | modified      | modified        |
+    +------+--------+--------------+---------------+-----------------+
+    | 2004 | 86904  | 1.0494       | 300           |  /8             |
+    +------+--------+--------------+---------------+-----------------+
+    | 2005 | 140920 | 1.0962       | 157           |  /8             |
+    +------+--------+--------------+---------------+-----------------+
+    | 2006 | 121651 | 0.9660       | 499           |  /8             |
+    +------+--------+--------------+---------------+-----------------+
+    | 2007 | 246634 | 1.3141       | 376           |  /11            |
+    +------+--------+--------------+---------------+-----------------+
+    | 2008 | 240802 | 0.4031       | 64            |  /8             |
+    +======+========+==============+===============+=================+
+
+ TABLE 2: Number of entries modified when directly incorporating updates
+          into aggregated table
+
+
+
+Uzmi, et al.             Expires January 6, 2011               [Page 10]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+4.3.  Updates and Aggregated Table Size
+
+   SMALTA one-shot aggregation is performed only infrequently.  In
+   between two episodes of one-shot aggregation, any BGP updates are
+   incorporated using the SMALTA update algorithm.  When incorporating
+   the BGP updates incrementally, it is important to track how the size
+   of the aggregated table changes.  Ideally, we would want to keep the
+   FIB in its fully aggregated state (what would have resulted from one-
+   shot aggregation).
+
+   We used the routeviews tables from 2004 to 2008, one table from each
+   year, and applied a corresponding update trace to the aggregated
+   table using SMALTA update algorithm.  The resulting number of entries
+   (in the aggregated table), as a percentage of the number of un-
+   aggregated entries, are shown in Table 3.
+
+   Table 3 also indicates the number of entries in the aggregated table
+   if SMALTA one-shot algorithm is applied after incorporating the
+   updates in the original un-aggregated table.
+
+
+    +======+========+========================+=========================+
+    | Year | No. of | #entries in aggregated | #entries in aggregated  |
+    |      | updates| table (SMALTA update)  | table (SMALTA one-shot) |
+    |      |        |  (% of unaggregated)   |  (% of unaggregated)    |
+    +------+--------+------------------------+-------------------------+
+    | 2004 | 86904  | 35.50                  | 34.38                   |
+    +------+--------+------------------------+-------------------------+
+    | 2005 | 140920 | 36.69                  | 33.08                   |
+    +------+--------+------------------------+-------------------------+
+    | 2006 | 121651 | 45.51                  | 39.9                    |
+    +------+--------+------------------------+-------------------------+
+    | 2007 | 246634 | 60.18                  | 40.25                   |
+    +------+--------+------------------------+--------------------------
+    | 2008 | 240802 | 32.99                  | 31.72                   |
+    +======+========+========================+=========================+
+
+ TABLE 3: Number of Entries in the aggregated table after applying
+          updates using (i) SMALTA one-shot, and (ii) SMALTA update
+
+
+
+5.  IANA Considerations
+
+   There are no IANA considerations.
+
+
+
+
+
+
+Uzmi, et al.             Expires January 6, 2011               [Page 11]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+6.  Security Considerations
+
+   Because SMALTA does not change the external behavior of a router,
+   there are no security considerations.
+
+
+7.  References
+
+7.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+7.2.  Informative References
+
+   [I-D.zhang-fibaggregation]
+              Zhang, B., Wang, L., Zhao, X., Liu, Y., and L. Zhang, "FIB
+              Aggregation", draft-zhang-fibaggregation-02 (work in
+              progress), October 2009.
+
+   [Paper.Draves-ORTC]
+              Draves, R. and J. Doe, "Optimal Routing Table
+              Constructor", INFOCOM 1999, July 1999.
+
+   [TR.Uzmi-SMALTA]
+              Uzmi, Z., Jawad, S., Tariq, A., and P. Francis, "Prefix
+              Aggregation with SMALTA", Technical Report URL
+              http://www.mpi-sws.org/~zartash/TR-MPI-SMALTA.pdf,
+              July 2010.
+
+
+Authors' Addresses
+
+   Zartash Uzmi
+   Lahore University of Management Sciences
+   LUMS, D.H.A.
+   Lahore  54792
+   Pakistan
+
+   Phone: +92 42 35608202
+   Email: zartash@gmail.com
+
+
+
+
+
+
+
+
+
+
+Uzmi, et al.             Expires January 6, 2011               [Page 12]
+
+Internet-Draft                   Smalta                        July 2010
+
+
+   Ahsan Tariq
+   Lahore University of Management Sciences
+   LUMS, D.H.A.
+   Lahore  54792
+   Pakistan
+
+   Phone: +92 42 35608000
+   Email: ahsan.tariq11@gmail.com
+
+
+   Paul Francis
+   Max Planck Institute for Software Systems
+   Gottlieb-Daimler-Strasse
+   Kaiserslautern  67633
+   Germany
+
+   Phone: +49 631 930 39600
+   Email: francis@mpi-sws.org
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Uzmi, et al.             Expires January 6, 2011               [Page 13]
+
+

@@ -1,0 +1,319 @@
+<?xml version="1.0"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd"[
+ <!ENTITY RFC2119 PUBLIC '' 'http://xml.resource.org/public/rfc/bibxml/reference.RFC.2119.xml'>
+ <!ENTITY RFC2560 PUBLIC '' 'http://xml.resource.org/public/rfc/bibxml/reference.RFC.2560.xml'>
+ <!ENTITY RFC4366 PUBLIC '' 'http://xml.resource.org/public/rfc/bibxml/reference.RFC.4366.xml'>
+ <!ENTITY RFC5077 PUBLIC '' 'http://xml.resource.org/public/rfc/bibxml/reference.RFC.5077.xml'>
+ <!ENTITY RFC5246 PUBLIC '' 'http://xml.resource.org/public/rfc/bibxml/reference.RFC.5246.xml'>
+ <!ENTITY RFC5280 PUBLIC '' 'http://xml.resource.org/public/rfc/bibxml/reference.RFC.5280.xml'>
+]>
+
+<?rfc toc="yes" symrefs="yes"?>
+
+<rfc ipr="trust200902" docName="draft-agl-tls-snapstart-00">
+  <front>
+    <title abbrev="TLS Snap Start">Transport Layer Security (TLS) Snap Start</title>
+    <author initials="A." surname="Langley" fullname="Adam Langley">
+      <organization>Google Inc</organization>
+      <address>
+        <email>agl@google.com</email>
+      </address>
+    </author>
+    <date month="June" year="2010" />
+    <area>Security</area>
+    <abstract>
+      <t>
+        This document describes a Transport Layer Security (TLS) extension for eliminating the latency of handshakes when the client has prior knowledge about the server. Unlike resumption, this prior knowledge is not secret and may be obtained from third parties and stored on disk for significant periods of time.
+      </t>
+    </abstract>
+  </front>
+
+  <middle>
+    <section anchor="intro" title="Introduction">
+      <t>
+        Snap Start aims to remove the latency overhead of TLS handshakes in the case that the application protocol involves the client speaking first.  Currently, TLS handshaking imposes additional latency and is costly for time-sensitive applications.
+      </t>
+
+      <t>
+        In order to achieve this, the initial flow from the client must contain application data and, therefore, everything needed for the server to complete a handshake and process it. Starting from this premise we can derive the essential features of Snap Start.
+      </t>
+    </section>
+
+    <section title="Design">
+      <t>
+        At first we are only considering the case of a full handshake. Assume, for the sake of argument, a client that is capable of predicting the contents of a server's first handshake flow (i.e. the <spanx style="verb">ServerHello</spanx> message through to the <spanx style="verb">ServerHelloDone</spanx>). Such a client could send <spanx style="verb">ClientKeyExchange</spanx>, <spanx style="verb">ChangeCipherSpec</spanx> and <spanx style="verb">Finished</spanx> messages immediately following its <spanx style="verb">ClientHello</spanx>. It would then be able to transmit application data records and we have successfully eliminated the TLS handshake latency.
+      </t>
+
+      <t>
+        However, several elements of the server's first handshake flow are unpredictable. Fundamentally, any ephemeral Diffie-Hellman based cipher suite is incompatible with Snap Start so the following assumes that the server is using non-ephemeral key agreement.
+      </t>
+
+      <t>
+        The chosen cipher suite, compression method, supported extensions, ordering of those extensions, certificate etc are all somewhat unpredictable for a given server but are highly correlated across time. Given a previous handshake with the same server, assuming that it will make the same choices when presented with a similar <spanx style="verb">ClientHello</spanx> is sufficiently accurate to expect a very high rate of prediction of these elements of the handshake.
+      </t>
+
+      <t>
+        The server's chosen session id is unpredictable. However, this can be eliminated by using <xref target="RFC5077">Session Tickets</xref>. When Session Tickets are in use the <spanx style="verb">ServerHello</spanx> doesn't include a session id and the <spanx style="verb">NewSessionTicket</spanx> message itself is not part of the first flow.
+      </t>
+
+      <t>
+        Lastly, the <spanx style="verb">server_random</spanx> is unpredictable. The <spanx style="verb">server_random</spanx> exists to provide uniqueness and freshness. When the server picks a random value it can be assured that no previous TLS connection has ever used the same value. Therefore the connection cannot be a replay of the client's traffic. Additionally, the server knows when its unpredictable random value was created, relative to its local clock, and therefore knows that handshake hasn't been delayed for an arbitrary amount of time.
+      </t>
+
+      <t>
+        In order for the <spanx style="verb">server_random</spanx> to be predictable by the client, it will have to be chosen by the client and suggested to the server. In order for the server to be assured of uniqueness, it will have to remember every <spanx style="verb">server_random</spanx> value that has been used so that it may reject duplicates. (Several methods of limiting the amount of state required for this are introduced below.)
+      </t>
+
+      <t>
+        Even without Snap Start, an attacker can delay an application data record in an established connection. However, both parties to the connection are likely to timeout after some period of inactivity, bounding the amount of possible delay introduced. With Snap Start, since we are assuming that the client's initial flow includes a full handshake and application data, an attacker could arbitrarily delay the flow and have the server process the application data at a time of their choosing. As the server lacks an nonce it has no way of detecting this.
+      </t>
+      <t>
+        Without a similar mechanism to bound the delay of a Snap Start handshake, an attacker could perform a pseudo-replay attack: a handshake is delayed until the client retries, but the first handshake can still be used to deliver the same application data a second time. Because of this (and for other reasons other reasons given below) we require some degree of clock synchronisation between the client and server with respect the the timestamp in the <spanx style="verb">ClientHello</spanx>. The level of synchronisation required is left to the application layer to determine although it's recommended that the permitted clock skew be shorter than the application's retry timeout.
+      </t>
+    </section>
+
+    <section title="Details">
+      <t>
+        The essential features of Snap Start are now established: the client predicts the server's handshake flow using a client suggested <spanx style="verb">server_random</spanx>, SessionTickets and knowledge from a previous connection to the same server.
+      </t>
+
+      <t>
+        We now note that this functions for both full and abbreviated handshakes. The abbreviated handshake retains its lower computational requirements but both now complete in the same number of round trips.
+      </t>
+
+      <t>
+        In order to limit the amount of state required for the server to reject repeated <spanx style="verb">server_random</spanx>s, we allow the server to bound this state temporally and spatially. In the temporal dimension, we define that the <spanx style="verb">gmt_unix_time</spanx> of the server random is taken from <spanx style="verb">gmt_unix_time</spanx> of the client's random value. The server may use this timestamp to reject all suggested random values outside some window around the current time.
+      </t>
+
+      <t>
+        Spatially, we define that the subsequent eight bytes of the server's random value are the server's 'orbit' value. This value must be discovered by the client from a previous (non Snap Start) handshake. In the event that several, geographically separated servers share the same certificates, they may use different orbit values. This allows one to reject <spanx style="verb">server_random</spanx> values for the other without any communication between them. (The term 'orbit' was chosen only to be short and otherwise reasonably meaningless in this context.)
+      </t>
+    </section>
+
+    <section title="Requirements Notation">
+      <t>
+        The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+        "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+        document are to be interpreted as described in <xref
+          target="RFC2119">RFC 2119</xref>.
+      </t>
+    </section>
+
+    <section title="Snap Start Extension">
+      <t>
+        A new extension type (<spanx style="verb">snap_start(TBD)</spanx>) is defined and MAY be included by the client in its <spanx style="verb">ClientHello</spanx> message. If, and only if, the server sees this extension in the <spanx style="verb">ClientHello</spanx>, it MAY choose to include the extension in its <spanx style="verb">ServerHello</spanx>.
+      </t>
+
+      <figure>
+        <artwork>
+enum {
+  snap_start(TBD), (65535)
+} ExtensionType;
+        </artwork>
+      </figure>
+
+      <t>The <spanx style="verb">extension_data</spanx> field of a <spanx style="verb">snap_start</spanx> extension in a <spanx style="verb">ClientHello</spanx> MAY be empty.</t>
+
+      <t>If the server chooses to echo a <spanx style="verb">snap_start</spanx> extension then it is indicating that it MAY support Snap Start on future connections. The contents of the <spanx style="verb">extension_data</spanx> in this case MUST be:</t>
+
+      <figure>
+        <artwork>
+struct {
+  opaque orbit[8];
+  CipherSuite snap_start_cipher_suite;
+} ServerSnapStart;
+        </artwork>
+      </figure>
+
+      <t><spanx style="verb">orbit</spanx> is the server's current orbit value and <spanx style="verb">snap_start_cipher_suite</spanx> contains the CipherSuite value that the client should assume that the server will use in a Snap Start handshake.</t>
+
+      <t>If the client wishes to attempt a Snap Start connection then it includes a non-empty <spanx style="verb">snap_start</spanx> extension in its <spanx style="verb">ClientHello</spanx>. If the extension is not empty, then its contents MUST be:</t>
+
+      <figure>
+        <artwork>
+struct {
+  opaque orbit[8];
+  opaque random_bytes[20];
+  opaque predicted_server_handshake[8];
+  // TLSCiphertext structures follow
+} ClientSnapStart;
+        </artwork>
+      </figure>
+
+      <t>Following this, without a length prefix, the client may include one or more <spanx style="verb">TLSCiphertext</spanx> structures to be processed by the server in the case that the Snap Start is successful. These records are as described in <xref target="RFC5246">RFC 5246</xref> section 6.2</t>
+
+      <t>The <spanx style="verb">orbit</spanx> MUST contain an orbit value obtained from a previous connection to the same server. <spanx style="verb">random_bytes</spanx> MUST contain 20 random bytes from a cryptographic random source equal in strength to the one used for the <spanx style="verb">client_random</spanx>.</t>
+
+      <t><spanx style="verb">predicted_server_handshake</spanx> MUST contain an <xref target="fnv1a">FNV1a64</xref> hash of the server's predicted response flow. This hash is taken over the bytes of the <spanx style="verb">Handshake</spanx> structures, as defined in RFC 5246 section 7.4. If the client is attempting to resume a connection then this is calculated over the server's <spanx style="verb">ServerHello</spanx> message. Otherwise, this is calculated over all handshake messages from the <spanx style="verb">ServerHello</spanx> to the <spanx style="verb">ServerHelloDone</spanx> (inclusive). The client's prediction MUST assume that the server chooses its server random as detailed below. The client's prediction MUST also assume that the server includes a Snap Start extension with the same <spanx style="verb">ServerSnapStart</spanx> contents as previously observed.</t>
+
+      <t>If the client's prediction is correct then the server MAY perform a Snap Start handshake. If the server wishes to perform a Snap Start handshake then it MUST form its <spanx style="verb">random</spanx> value from the <spanx style="verb">gmt_unix_time</spanx> of the client's <spanx style="verb">random</spanx>, followed by the server's orbit value, followed by the contents of <spanx style="verb">random_bytes</spanx> from the client's Snap Start extension.</t>
+
+      <t>The server MUST NOT transmit any predicted handshake messages and MUST start processing records from the client's Snap Start extension. For the purposes of the Finished calculation, the client's <spanx style="verb">ClientHello</spanx> is hashed as if the <spanx style="verb">snap_start</spanx> extension were not included (the <spanx style="verb">length</spanx> field of the <spanx style="verb">Handshake</spanx> structure from RFC 5246 section 7.4, and the prefixed length of the <spanx style="verb">extensions</spanx> member of the <spanx style="verb">ClientHello</spanx> are updated accordingly). When processing records from the extension, they are hashed as usual. Once the set of records embedded in the <spanx style="verb">ClientHello</spanx> has been exhausted, the server resumes reading records from the network. Records must not be partially contained within the <spanx style="verb">ClientHello</spanx> and partially read from the network.</t>
+
+      <t>(Since the <spanx style="verb">ClientHello</spanx> is likely to have a <spanx style="verb">Finished</spanx> message embedded within it, it cannot be hashed into the Finished calculation as normal as its contents would then depend in its own hash. One could consider hashing with the embedded hash zeroed out, however a <spanx style="verb">Finished</spanx> message is encrypted under the negotiated cipher suite and a CBC-based ciphersuite would spread the effects of the embedded hash beyond its apparent boundaries. Likewise, the <spanx style="verb">Finished</spanx> message is compressed using the negotiated compression algorithm thus the length of the record, and thus the extension, depend on the contents of the hash. Given these limitations, removing the extension altogether is the simplest way to break the cycle.)</t>
+
+      <t>If the server chooses not to perform a Snap Start handshake (for any reason, including that the application rejected the suggested random value or that the client mispredicted the handshake) then the handshake MUST continue as normal. The server MUST NOT change the way that it hashes the <spanx style="verb">ClientHello</spanx>. The server MAY echo a <spanx style="verb">snap_start</spanx> extension.</t>
+    </section>
+
+    <section title="Active attack considerations">
+      <t>
+        Given that this draft makes changes to the Finished hash, it's required to show that no active attack can cause a handshake to complete which differs from that which would have occurred otherwise.
+      </t>
+
+      <t>Since the <spanx style="verb">snap_start</spanx> extension is not included in the Finished hash of a Snap Start handshake, we have to consider the results of an attacker manipulating its contents.</t>
+
+      <t>Firstly, since the embedded records are hashed as usual, the same security properties hold: any manipulation will be detected by the Finished hash, or by a MAC verification failure.</t>
+
+      <t>An attacker could manipulate the orbit. This would typically cause the server to reject the suggested random value and a normal handshake would detect the manipulation. In the case that the server still proceeds with a Snap Start handshake, the orbit is copied into the <spanx style="verb">server_random</spanx> in the <spanx style="verb">ServerHello</spanx>, which is then hashed into the Finished calculation (although not transmitted).</t>
+
+      <t>An attacker could manipulate the suggested server random. The same argument as for the orbit holds here.</t>
+
+      <t>An attacker could manipulate the hash of the predicted messages. Assuming that the client correctly predicted the hash, the manipulation would cause the server to not perform a Snap Start handshake and the manipulation would be detected. Assuming that the client mispredicted, and that the manipulation results in a different, but also incorrect, value then the same argument applies. Assuming that the client mispredicted and the manipulation corrects the hash, the server could perform a Snap Start handshake, but the differing contents of the predicted handshake messages will be hashed into the Finished calculation and the manipulation will be detected.</t>
+    </section>
+
+    <section title="Requirements on the application">
+      <t>Applications are required to ensure that no suggested random value is accepted twice within the scope of any given certificate. In general, validation of the suggested random value is outside the scope a TLS implementation (although it may handle simple cases and provide utility code for others). Applications may use the orbit value and client timestamp to aid them in this. Applications may always safely reject a suggested random value. Applications SHOULD limit the allowed difference between the timestamp in the suggested random value and the current time in order to prevent arbitrary delays, as detailed in the design section of this document.</t>
+
+      <t>For a single server deployment, the server may generate a new, random orbit value each time that it starts and, thereafter, maintain an in-memory data structure. Each random value seen should be "struck off" by recording it in this data structure (the "strike register"). The strike register's size can be bound by fixed limits and by rejecting all random values where the timestamp is outside a certain window around the current time.</t>
+
+      <t>For a multi-server deployment in a single location, the servers should share an orbit value and a strike register. The strike register is likely to be a held in a single location which the TLS servers access over an internal network.</t>
+
+      <t>For a multi-cluster deployment, where the clusters are geographically separated, each cluster should have its own orbit value and shared strike register. The effectiveness of Snap Start in this setup is limited by the probability of a given client repeatedly being served by the same cluster. With pure round robin scheduling, a Snap Start handshake is unlikely to be successful.</t>
+    </section>
+
+    <section title="Interactions with the Session Tickets extension">
+      <t>A successful Snap Start abbreviated handshake can occur without the use of session tickets. A successful Snap Start full handshake, without session tickets, can only occur if the server doesn't generate a random session id. A server MAY choose not to generate a session id if the client presents a Snap Start extension but not a session tickets extension. However, all TLS implementations of Snap Start SHOULD implement session tickets. TLS clients which send a Snap Start extension SHOULD also send a Session Tickets extension.</t>
+    </section>
+
+    <section title="Interactions with OCSP stapling">
+      <t>Clients attempting a Snap Start handshake MUST trust the server's cached certificate. This includes validating revocation information (via <xref target="RFC2560">OCSP</xref>, <xref target="RFC5280">CRLs</xref> etc) as the local policy dictates.</t>
+
+      <t>TLS clients which send a Snap Start extension SHOULD NOT send a <spanx style="verb">status_request</spanx> extension as defined in <xref target="RFC4366">RFC 4366</xref> section 3.6. A client may be able to predict the contents of a <spanx style="verb">CertificateStatus</spanx> message but, if it can predict it, then it doesn't need it and, if it needs fresh OCSP information, then it shouldn't have attempted a Snap Start handshake using a certificate that it cannot validate.</t>
+
+      <t>This does preclude the case where the client has cached a valid OCSP response that is still timely, but the server has a response valid further into the future. We can only suggest that opportunistic OCSP stapling additionally be included in application level protocols for this situation.</t>
+    </section>
+
+    <section title="Interactions with client certificates">
+      <t>A Snap Start handshake can include client-side authentication. In this case the client must predict that the server will send a <spanx style="verb">CertificateRequest</spanx> message, calculate its <spanx style="verb">predicted_server_handshake</spanx> accordingly and embed <spanx style="verb">Certificate</spanx> and <spanx style="verb">CertificateVerify</spanx> messages in the Snap Start extension.</t>
+
+      <t>The <spanx style="verb">handshake_messages</spanx> over which the <spanx style="verb">CertificateVerify</spanx> is calculated MUST omit the Snap Start extension as detailed for the Finished calculation, above.</t>
+    </section>
+
+    <section title="Examples">
+
+    <t>
+      Firstly, a client contacting a previously unknown server for the first time may include an empty Snap Start extension in its ClientHello. The server, if so capable, could reply with:
+    </t>
+
+    <figure>
+      <artwork>
+01 02 03 04 05 06 07 08         (Orbit value)
+00 2f                           (Cipher suite)
+      </artwork>
+    </figure>
+
+    <t>
+      A future connection may now attempt a Snap Start by including a Snap Start extension in the ClientHello with the following contents:
+    </t>
+
+    <figure>
+      <artwork>
+01 02 03 04 05 06 07 08         (Orbit value)
+88 c0 1e 1c a9 4e ...           (Random bytes)
+aa bb cc dd ee ff 00 11         (predicted server handshake)
+16 03 03 00 84 10 00 00 80 ...  (ClientKeyExchange)
+14 03 03 00 01 01               (ChangeCipherSpec)
+16 03 03 00 20 ...              (Finished)
+17 03 03 00 50 ...              (Application data)
+      </artwork>
+    </figure>
+
+    <t>
+      If the Snap Start is successful, then the message flow looks like this:
+    </t>
+
+    <figure>
+      <artwork>
+ClientHello     --------&gt;
+                              ChangeCipherSpec
+                                      Finished
+                &lt;--------     Application data
+      </artwork>
+    </figure>
+
+    <t>
+      If the client mispredicts the server's handshake, however, then the flow is unaltered from Figure 1 in RFC 5246 section 7.3.
+    </t>
+
+    </section>
+
+    <section title="Prior work">
+      <t>The idea of cache-side caching of long lived server parameters has been discussed in <xref target="fasttrack">Client Side Caching for TLS</xref> and specified in <xref target="cached-info">draft-ietf-tls-cached-info</xref>. <xref target="fasttrack">Client Side Caching for TLS</xref> also considered including an opportunistic <spanx style="verb">ClientKeyExchange</spanx> message in the client's initial flow.</t>
+    </section>
+
+    <section title="IANA Considerations">
+      <t>
+        This document requires IANA to update its registry of TLS extensions
+        to assign an entry, referred herein as <spanx style="verb">snap_start</spanx>.
+      </t>
+    </section>
+
+    <section title="Acknowledgements">
+      <t>
+        This document benefited specifically from discussions with Wan-Teh
+        Chang, Bodo Moeller and Nagendra Modadugu.
+      </t>
+    </section>
+  </middle>
+
+  <back>
+    <references title="Normative References">
+      &RFC2119;
+      &RFC2560;
+      &RFC4366;
+      &RFC5077;
+      &RFC5246;
+      &RFC5280;
+      <reference anchor="fnv1a">
+        <front>
+          <title>FNV hash</title>
+          <author initials="L. C." surname="Noll"> <organization/> </author>
+        </front>
+      </reference>
+
+      <!--
+      <reference anchor="falsestart">
+        <front>
+          <title>Transport Layer Security (TLS) False Start</title>
+          <author initials="A." surname="Langley"> <organization/> </author>
+          <author initials="N." surname="Modadugu"> <organization/> </author>
+          <author initials="B." surname="Moeller"> <organization/> </author>
+          <date month="Internet Draft (work in progress), June" year="2010"/>
+        </front>
+      </reference>
+      -->
+
+      <reference anchor="cached-info">
+        <front>
+          <title>Transport Layer Security (TLS) Cached Information Extension</title>
+          <author initials="S." surname="Santesson"> <organization/> </author>
+          <date month="Internet Draft (work in progress), April" year="2010"/>
+        </front>
+      </reference>
+
+      <reference anchor="fasttrack">
+        <front>
+          <title>Client Side Caching for TLS</title>
+          <author initials="H." surname="Shacham"> <organization/> </author>
+          <author initials="D." surname="Boneh"> <organization/> </author>
+          <author initials="E." surname="Rescorla"> <organization/> </author>
+          <date month="Nov" year="2004"/>
+        </front>
+      </reference>
+
+    </references>
+    <section title="Changes">
+      <t>To be removed by RFC Editor before publication</t>
+    </section>
+  </back>
+</rfc>

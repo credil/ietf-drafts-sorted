@@ -1,0 +1,487 @@
+<?xml version="1.0" -- -*- mode: XML; indent-tabs-mode: nil; fill-column: 100; -*- -- ?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" [
+<!ENTITY RFC2119 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.2119.xml">
+<!ENTITY RFC2616 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.2616.xml">
+<!ENTITY RFC4492 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.4492.xml">
+<!ENTITY RFC5246 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.5246.xml">
+]>
+<?rfc strict="yes" ?>
+<?rfc toc="yes" ?>
+<?rfc compact="yes" ?>
+<?rfc subcompact="no" ?>
+<?rfc symrefs="yes" ?>
+<rfc category="info" docName="draft-bmoeller-tls-falsestart-00" ipr="trust200902">
+  <front>
+    <title abbrev="TLS False Start">
+      Transport Layer Security (TLS) False Start
+    </title>
+
+    <author fullname="Adam Langley" initials="A." surname="Langley">
+      <organization abbrev="Google">
+        Google Inc.
+      </organization>
+      <address>
+        <postal>
+          <street>1600 Amphitheatre Parkway</street>
+          <city>Mountain View</city>
+          <region>CA</region>
+          <code>94043</code>
+          <country>USA</country>
+        </postal>
+        <email>agl@google.com</email>
+      </address>
+    </author>
+
+    <author fullname="Nagendra Modadugu" initials="N." surname="Modadugu">
+      <organization abbrev="Google">
+        Google Inc.
+      </organization>
+      <address>
+        <postal>
+          <street>1600 Amphitheatre Parkway</street>
+          <city>Mountain View</city>
+          <region>CA</region>
+          <code>94043</code>
+          <country>USA</country>
+        </postal>
+        <email>nagendra@cs.stanford.edu</email>
+      </address>
+    </author>
+
+    <author fullname="Bodo Moeller" initials="B." surname="Moeller">
+      <organization abbrev="Google">
+        Google Switzerland GmbH
+      </organization>
+      <address>
+        <postal>
+          <street>Brandschenkestrasse 110</street>
+          <code>8002</code>
+          <city>Zurich</city>
+          <country>Switzerland</country>
+        </postal>
+        <email>bmoeller@acm.org</email>
+      </address>
+    </author>
+
+    <date year="2010" month="June" day="2" />
+    <area>Security</area>
+    <workgroup>TLS Working Group</workgroup>
+
+    <abstract>
+      <t>
+        This document specifies an optional behavior of TLS implementations, dubbed False Start.
+        It affects only protocol timing, not on-the-wire protocol data,
+        and can be implemented unilaterally.
+        The TLS False Start feature leads to a latency reduction of one round trip for certain
+        handshakes.
+      </t>
+    </abstract>
+  </front>
+
+  <middle>
+    <section title="Requirements Notation">
+      <t>
+        The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT",
+        "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in
+        <xref target="RFC2119">RFC 2119</xref>.
+      </t>
+    </section>
+
+    <section title="Introduction">
+      <t>
+        A full TLS handshake as specified in <xref target="RFC5246" /> requires two full protocol
+        rounds (four flights) before the handshake is complete and the protocol parties may begin to
+        send application data.
+        Thus, using TLS can add a latency penalty of two network round-trip times for application
+        protocols in which the client sends data first, such as <xref target="RFC2616">HTTP</xref>.
+        An abbreviated handshake (resuming an earlier TLS session) is complete after three flights,
+        thus adding just one round-trip time if the client sends application data first.
+      </t>
+
+      <figure>
+        <artwork><![CDATA[
+   Client                                               Server
+
+   ClientHello                  -------->
+                                                   ServerHello
+                                                  Certificate*
+                                            ServerKeyExchange*
+                                           CertificateRequest*
+                                <--------      ServerHelloDone
+   Certificate*
+   ClientKeyExchange
+   CertificateVerify*
+   [ChangeCipherSpec]
+   Finished                     -------->
+                                            [ChangeCipherSpec]
+                                <--------             Finished
+   Application Data             <------->     Application Data
+
+     Figure 1 [RFC5246].  Message flow for a full handshake
+        ]]></artwork>
+      </figure>
+
+      <t><vspace blankLines="100" /></t><!-- forced pagebreak so that we don't have one in Figure 2 -->
+
+      <figure>
+        <artwork><![CDATA[
+   Client                                                Server
+
+   ClientHello                   -------->
+                                                    ServerHello
+                                             [ChangeCipherSpec]
+                                 <--------             Finished
+   [ChangeCipherSpec]
+   Finished                      -------->
+   Application Data              <------->     Application Data
+
+  Figure 2 [RFC5246].  Message flow for an abbreviated handshake
+        ]]></artwork>
+      </figure>
+
+      <t>
+        This document describes a technique that alleviates the latency burden imposed by TLS: the TLS
+        False Start.  If certain conditions are met, application data can be sent when the handshake
+        is only partially complete -- i.e., when the sender has sent its own
+        <spanx style="verb">ChangeCipherSpec</spanx> and <spanx style="verb">Finished</spanx>
+        messages (thus having updated its TLS Record Protocol write state as negotiated in the
+        handshake), but has yet to receive the other side's
+        <spanx style="verb">ChangeCipherSpec</spanx> and <spanx style="verb">Finished</spanx>
+        messages.
+        (By section 7.4.9 of <xref target="RFC5246" />, each party would have to delay
+        sending application data until it has received and validated the other side's
+        <spanx style="verb">Finished</spanx> message.)
+        This achieves an improvement of one round-trip time
+        <list style="symbols">
+          <t>
+            for full handshakes if the client sends application data first,
+          </t>
+          <t>
+            for abbreviated handshakes if the server sends application data first.
+          </t>
+        </list>
+        Accordingly, the latency penalty for using TLS with HTTP can be kept at one round-trip time
+        regardless of whether a full handshake or an abbreviated handshake takes place.
+      </t>
+
+      <t>
+        In a False Start, when a party sends application data before it has received and verified
+        the other party's <spanx style="verb">Finished</spanx> message, there are two possible
+        outcomes:
+        <list style="symbols">
+          <t>
+            The handshake completes successfully:
+            <!-- Colon introduces multiple sentences, so continue with capital letter -->
+            Once both <spanx style="verb">Finished</spanx> messages have been received and verified,
+            this retroactively validates the handshake.  In this case, the transcript of protocol
+            data carried over the transport underlying TLS will look as usual, apart from the
+            different timing.
+          </t>
+          <t>
+            The handshake fails:
+            <!-- Colon introduces multiple sentences, so continue with capital letter -->
+            If a party does not receive the other side's <spanx style="verb">Finished</spanx>
+            message, or if the <spanx style="verb">Finished</spanx> message's contents are not
+            correct, the handshake never gets validated.  This means that an attacker may have
+            removed, changed, or injected handshake messages.  In this case, data has been sent over
+            the underlying transport that would not have been sent without the False Start.
+          </t>
+        </list>
+        The latter scenario makes it necessary to restrict when a False Start is allowed,
+        as described in this document.
+        <xref target="sec.compatibility" /> considers basic requirements for using False Start.
+        <xref target="sec.client-requirements" /> and <xref target="sec.server-requirements" />
+        specify the behavior for clients and servers, respectively, referring to important
+        security considerations in <xref target="sec.security" />.
+      </t>
+    </section>
+
+    <section anchor="sec.compatibility" title="False Start Compatibility">
+      <t>
+        TLS False Start as described in detail in the subsequent sections,
+        if implemented, is an optional feature.
+      </t>
+
+      <t>
+        A TLS implementation (not necessarily offering the False Start option itself)
+        is defined to be "False Start compatible" if it tolerates
+        receiving TLS records on the transport connection early, before the protocol
+        has reached the state to process these.
+        To successfully use False Start in a TLS connection, the other side has to be False Start
+        compatible.  Out-of-band knowledge that the peer is False Start compatible may be available,
+        e.g. if this is mandated by specific application profile standards.
+        As discussed in <xref target="app.implementation" />,
+        the requirement for False Start compatibility does not pose a hindrance in practice.
+      </t>
+    </section>
+
+    <section anchor="sec.client-requirements" title="Client-side False Start">
+      <t>
+        This section specifies a change to the behavior of TLS client implementations
+        in full TLS handshakes.
+      </t>
+
+      <t>
+        When the client has sent its
+        <spanx style="verb">ChangeCipherSpec</spanx> and <spanx style="verb">Finished</spanx>
+        messages, its default behavior following <xref target="RFC5246" />
+        is not to send application data until it has received the server's
+        <spanx style="verb">ChangeCipherSpec</spanx> and <spanx style="verb">Finished</spanx>
+        messages, which completes the handshake.
+        With the False Start protocol modification, the client MAY send application data earlier
+        (under the new Cipher Spec) if each of the following conditions is satisfied:
+        <list style="symbols">
+          <t>
+            The application layer has requested the TLS False Start option.
+          </t>
+          <t>
+            The symmetric cipher defined by the cipher suite negotiated in this handshake has been
+            whitelisted for use with False Start according to the Security Considerations in
+            <xref target="sec.security.symmetric" />.
+          </t>
+          <t>
+            The key exchange method defined by the cipher suite negotiated in this handshake,
+            has been whitelisted for use with False Start according to
+            the Security Considerations in <xref target="sec.security.keyexchange" />.
+          </t>
+          <t>
+            In the case of a handshake with client authentication,
+            the client certificate type has been whitelisted for use with False Start according to
+            the Security Considerations in <xref target="sec.security.keyexchange" />.
+          </t>
+        </list>
+        The rules for receiving application data from the server remain unchanged.
+      </t>
+
+      <t>
+        Note that the TLS client cannot infer the presence of an authenticated
+        server until all handshake messages have been received.
+        With False Start, unlike with the default handshake behavior,
+        applications are able to send data before this point has been reached:
+        from an application point of view,
+        being able to send data does not imply that an authenticated peer is present.
+        Accordingly, it is
+        recommended that TLS implementations allow the application layer to query whether the
+        handshake has completed.
+      </t>
+    </section>
+
+    <section anchor="sec.server-requirements" title="Server-side False Start">
+      <t>
+        This section specifies a change to the behavior of TLS server implementations
+        in abbreviated TLS handshakes.
+      </t>
+
+      <t>
+        When the server has sent its
+        <spanx style="verb">ChangeCipherSpec</spanx> and <spanx style="verb">Finished</spanx>
+        messages, its default behavior following <xref target="RFC5246" />
+        is not to send application data until it has received the client's
+        <spanx style="verb">ChangeCipherSpec</spanx> and <spanx style="verb">Finished</spanx>
+        messages, which completes the handshake.
+        With the False Start protocol modification, the server MAY send application data earlier
+        (under the new Cipher Spec) if each of the following conditions is satisfied:
+        <list style="symbols">
+          <t>
+            The application layer has requested the TLS False Start option.
+          </t>
+          <t>
+            The symmetric cipher defined by the cipher suite of the session being resumed has been
+            whitelisted for use with False Start according to the Security Considerations
+            in <xref target="sec.security.symmetric" />.
+          </t>
+        </list>
+        The rules for receiving application data from the client remain unchanged.
+      </t>
+
+      <t>
+        Note that the TLS server cannot infer the presence of an authenticated
+        client until all handshake messages have been received.
+        With False Start, unlike with the default handshake behavior,
+        applications are able to send data before this point has been reached:
+        from an application point of view,
+        being able to send data does not imply that an authenticated peer is present.
+        Accordingly, it is
+        recommended that TLS implementations allow the application layer to query whether the
+        handshake has completed.
+      </t>
+    </section>
+
+    <section anchor="sec.security" title="Security Considerations">
+      <t>
+        In a TLS handshake, the <spanx style="verb">Finished</spanx> messages serve to validate
+        the entire handshake.  These messages are based on a hash of the handshake so far
+        processed by a PRF keyed with the new master secret (serving as a MAC),
+        and are also sent under the new Cipher Spec with its keyed MAC,
+        where the MAC key again is derived from the master secret.
+        The protocol design relies on the assumption that
+        any server and/or client authentication done during the
+        handshake carries over to this.  While an attacker could, for example, have changed the
+        cipher suite list sent by the client to the server and thus influenced cipher suite
+        selection (presumably towards a less secure choice) or could have made other modifications
+        to handshake messages in transmission, the attacker would not be able to round off the
+        modified handshake with a valid <spanx style="verb">Finished</spanx> message:
+        every TLS cipher suite is presumed to key the PRF appropriately
+        to ensure unforgeability.  Once the handshake has been validated by verifying
+        the <spanx style="verb">Finished</spanx> messages, this confirms that the
+        handshake has not been tampered with, thus bootstrapping secure encryption
+        (using algorithms as negotiated) from secure authentication.
+      </t>
+
+      <t>
+        Using False Start interferes with this approach of bootstrapping secure encryption from
+        secure authentication, as application data may have already been sent before
+        <spanx style="verb">Finished</spanx> validation confirms that the handshake has not been
+        tampered with -- so there is generally no hope to be sure that communication with the
+        expected peer is indeed taking place during the False Start.
+        Instead, the security goal is to ensure that if anyone at all can decrypt the application
+        data sent in a False Start, this must be the legitimate peer: while an attacker could be
+        influencing the handshake (restricting cipher suite selection, modifying key exchange
+        messages, etc.), the attacker should not be able to benefit from this.
+        The TLS protocol already relies on such a security property for authentication --
+        with False Start, the same is needed for encryption.
+        This motivates the following rules.
+      </t>
+
+      <section anchor="sec.security.symmetric" title="Symmetric Cipher">
+        <t>
+          Clients and servers MUST NOT use the False Start protocol modification in a handshake
+          unless the cipher suite uses a symmetric cipher that is considered cryptographically strong.
+        </t>
+
+        <t>
+          Implementations may have their own classification of ciphers (and may additionally allow
+          the application layer to provide a classification), but generally symmetric ciphers with
+          an effective key length of 128 bits or more can be considered strong.
+          In <xref target="RFC5246" />, this allows all cipher suites except those
+          using the NULL or 3DES_EDE_CBC ciphers (specifically, it allows the cipher suites using
+          RC4_128, AES_128_CBC, or AES_256_CBC).  Implementations that support additional cipher
+          suites have to be careful to whitelist only suitable symmetric ciphers; if in doubt, False
+          Start should not be used with a given symmetric cipher.
+        </t>
+
+        <t>
+          While an attacker can change handshake messages to force a downgrade to a less secure
+          symmetric cipher than otherwise would have been chosen, this rule ensures that in such
+          a downgrade attack no application data will be sent under an insecure symmetric cipher.
+          With respect to server-side False Start, if a client has negotiated a TLS session using
+          weak symmetric cryptography, this rule prevents attackers from seeing the server
+          encrypt more data under this session than normally (if an attacker makes up a
+          <spanx style="verb">ClientHello</spanx> message asking to resume such a session,
+          no False Start will happen).
+        </t>
+      </section>
+
+      <section anchor="sec.security.keyexchange" title="Key Exchange and Client Certificate Type">
+        <t>
+          Clients MUST NOT use the False Start protocol modification in a handshake unless the
+          cipher suite uses a key exchange method that has been whitelisted for this use.
+          Furthermore, when using client authentication, clients MUST NOT use the False Start
+          protocol modification unless the client certificate type has been whitelisted for this
+          use.
+        </t>
+
+        <t>
+          Implementations may have their own whitelists of key exchange methods and client
+          certificate types (and may additionally allow the application layer to specify
+          whitelists).  Generally, out of the options from <xref target="RFC5246" />
+          and <xref target="RFC4492" />, the following whitelists are recommended:
+          <list style="symbols">
+            <t>
+              Key exchange methods: DHE_RSA, ECDHE_RSA, DHE_DSS, ECDHE_ECDSA
+            </t>
+            <t>
+              Client certificate types:
+              rsa_sign, dss_sign, ecdsa_sign (or no client authentication)
+            </t>
+          </list>
+          However, if an implementation that supports only key exchange methods from 
+          <xref target="RFC5246" /> and <xref target="RFC4492" />
+          does not support any of the above key exchange methods,
+          all of its supported key exchange methods can be whitelisted for False Start use.
+          Care is required with any additional key exchange methods or client certificate
+          types, as these may not have similar properties.
+        </t>
+
+        <t>
+          The recommended whitelists are such that
+          if cryptographic algorithms suitable for forward secrecy would
+          possibly be negotiated, no False Start will take place if the current handshake
+          fails to provide forward secrecy.
+          (Forward secrecy can be achieved using ephemeral Diffie-Hellman or ephemeral
+          Elliptic-Curve Diffie-Hellman;
+          there is no forward secrecy when a using key exchange method of
+          RSA, RSA_PSK, DH_DSS, DH_RSA, ECDH_ECDSA, or ECDH_RSA,
+          or a client certificate type of
+          rsa_fixed_dh, dss_fixed_dh, rsa_fixed_ecdh, or ecdsa_fixed_ecdh.)
+          As usual, the benefits of forward secrecy may need to be balanced against efficiency,
+          and accordingly even implementations that support the above key exchange methods
+          might whitelist further key exchange methods and client certificate types from
+          <xref target="RFC5246" /> and <xref target="RFC4492" />.
+        </t>
+      </section>
+    </section>
+
+    <section title="Contributors">
+      <t>
+        Wan-Teh Chang and Ben Laurie have contributed to this document.
+      </t>
+    </section>
+
+    <section title="Acknowledgments">
+      <t>
+        The authors wish to thank Eric Rescorla for his comments on an earlier draft.
+      </t>
+    </section>
+
+    <section title="IANA Considerations">
+      <t>
+        None.
+      </t>
+    </section>
+  </middle>
+
+  <back>
+    <references title="Normative References">
+      &RFC2119;
+      &RFC4492;
+      &RFC5246;
+    </references>
+
+    <references title="Informative References">
+      &RFC2616;
+    </references>
+
+    <section anchor="app.implementation" title="Implementation Notes">
+      <t>
+        TLS False Start is a modification to the TLS protocol, and some implementations that
+        conform to <xref target="RFC5246" /> may have problems interacting with
+        implementations that use the False Start modification.
+        If the peer uses a False Start, application data records may be received
+        directly following the peer's <spanx style="verb">Finished</spanx> message,
+        before the TLS implementation has sent its own <spanx style="verb">Finished</spanx> message.
+        False Start compatibility as defined in <xref target="sec.compatibility" />
+        ensures that these records with application data will simply
+        remain buffered for later processing.
+      </t>
+
+      <t>
+        A False Start compatible TLS implementation does not
+        have to be aware of the False Start concept, and is certainly not expected to detect whether
+        a False Start handshake is currently taking place: thanks to transport layer buffering,
+        typical implementations will be False Start compatible without having been
+        designed for it.
+      </t>
+
+      <t>
+        At the time of writing, the authors are not aware of any deployed TLS implementation
+        that is not False Start compatible
+        (with one single host still pending investigation).
+        However, if an implementation uses a strategy of receiving as many bytes as available
+        from the underlying transport during the handshake
+        (expecting to find only handshake messages),
+        achieving False Start compatibility would likely require special care.
+      </t>
+    </section>
+  </back>
+</rfc>

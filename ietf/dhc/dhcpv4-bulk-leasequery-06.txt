@@ -1,0 +1,2187 @@
+
+
+
+
+
+
+DHC Working Group                                            Kim Kinnear
+Internet Draft                                                Mark Stapp
+Intended Status: Standards Track                     Cisco Systems, Inc.
+Expires: September 12, 2012                                       D. Rao
+                                                                B. Joshi
+                                               Infosys Technologies Ltd.
+                                                            Neil Russell
+                                                      BMC Software, Inc.
+                                                          March 12, 2012
+
+
+                        Bulk DHCPv4 Lease Query
+             <draft-ietf-dhc-dhcpv4-bulk-leasequery-06.txt>
+
+Status of this Memo
+
+   This Internet-Draft is submitted to IETF in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF), its areas, and its working groups.  Note that
+   other groups may also distribute working documents as Internet-
+   Drafts.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   The list of current Internet-Drafts can be accessed at
+   http://www.ietf.org/ietf/1id-abstracts.txt.
+
+   The list of Internet-Draft Shadow Directories can be accessed at
+   http://www.ietf.org/shadow.html.
+
+Copyright Notice
+
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+
+
+
+Kinnear                  Expires September 2012                 [Page 1]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+Abstract
+
+   The Dynamic Host Configuration Protocol for IPv4 (DHCPv4) Leasequery
+   extension allows a requestor to request information about DHCPv4
+   bindings. This mechanism is limited to queries for individual
+   bindings. In some situations individual binding queries may not be
+   efficient, or even possible. This document extends the DHCPv4
+   Leasequery protocol to allow for bulk transfer of DHCPv4 address
+   binding data via TCP.
+
+Table of Contents
+
+
+    1.  Introduction................................................. 3
+    2.  Terminology.................................................. 4
+    3.  Design Goals................................................. 7
+    3.1.  Information Acquisition before Data Starts................. 7
+    3.2.  Lessen need for Caching and Negative Caching............... 7
+    3.3.  Antispoofing in 'Fast Path'................................ 8
+    3.4.  Minimize data transmission................................. 8
+    4.  Protocol Overview............................................ 8
+    5.  Interaction Between UDP Leasequery and Bulk Leasequery....... 10
+    6.  Message and Option Definitions............................... 10
+    6.1.  Message Framing for TCP.................................... 10
+    6.2.  New or Changed Options..................................... 11
+    6.3.  Connection and Transmission Parameters..................... 19
+    7.  Requestor Behavior........................................... 19
+    7.1.  Connecting and General Processing.......................... 19
+    7.2.  Forming a Bulk Leasequery.................................. 20
+    7.3.  Processing Bulk Replies.................................... 22
+    7.4.  Processing Time Values in Leasequery messages.............. 24
+    7.5.  Querying Multiple Servers.................................. 25
+    7.6.  Making Sense Out of Multiple Responses Concerning a Single. 25
+    7.7.  Multiple Queries to a Single Server over One Connection.... 26
+    7.8.  Closing Connections........................................ 27
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kinnear                  Expires September 2012                 [Page 2]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+
+    8.  Server Behavior.............................................. 27
+    8.1.  Accepting Connections...................................... 27
+    8.2.  Replying to a Bulk Leasequery.............................. 28
+    8.3.  Building a Single Reply for Bulk Leasequery................ 31
+    8.4.  Multiple or Parallel Queries............................... 32
+    8.5.  Closing Connections........................................ 33
+    9.  Security Considerations...................................... 33
+    10.  IANA Considerations......................................... 34
+    11.  Contributing Authors........................................ 36
+    12.  Acknowledgements............................................ 37
+    13.  References.................................................. 37
+    13.1.  Normative References...................................... 37
+    13.2.  Informative References.................................... 38
+
+
+1.  Introduction
+
+   The DHCPv4 protocol [RFC2131] [RFC2132] specifies a mechanism for the
+   assignment of IPv4 address and configuration information to IPv4
+   nodes.  DHCPv4 servers maintain authoritative binding information.
+
+
+      +--------+
+      | DHCPv4 |     +--------------+
+      | Server |-...-|    DSLAM     |
+      |        |     |  Relay Agent |
+      +--------+     +--------------+
+                          |        |
+                      +------+   +------+
+                      |Modem1|   |Modem2|
+                      +------+   +------+
+                         |        |    |
+                      +-----+  +-----+ +-----+
+                      |Node1|  |Node2| |Node3|
+                      +-----+  +-----+ +-----+
+
+                  Figure 1:  Example DHCPv4 configuration
+
+
+   DHCPv4 relay agents receive DHCPv4 messages and frequently append a
+   relay agent information option [RFC3046] before relaying them to the
+   configured DHCPv4 servers (see Figure 1). In this process, some relay
+   agents also glean lease information sent by the server and cache it
+   locally. This information is used for a variety of purposes.   Two
+   examples are prevention of spoofing attempts from the DHCPv4 clients,
+   and installation of routes. When a relay agent reboots, this
+   information is frequently lost.
+
+
+
+Kinnear                  Expires September 2012                 [Page 3]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   The DHCPv4 Leasequery capability [RFC4388] extends the basic DHCPv4
+   capability to allow an external entity, such as a relay agent, to
+   query a DHCPv4 server to recover lease state information about a
+   particular IP address or client in near real-time.
+
+   The existing query types in Leasequery are typically data driven; the
+   relay agent initiates the Leasequery when it receives data traffic
+   from or to the client.  This approach may not scale well when there
+   are thousands of clients connected to the relay agent or when the
+   relay agent has a need to rebuild its internal data store prior to
+   processing traffic in one direction or another.
+
+   Some applications require the ability to query the server without
+   waiting for traffic from or to clients. This query capability in turn
+   requires an underlying transport more suitable to the bulk
+   transmission of data.
+
+   This document extends the DHCPv4 Leasequery protocol to add support
+   for queries that address these additional requirements.  There may be
+   many thousands of DHCPv4 bindings returned as the result of a single
+   request, so TCP [RFC4614] is specified for efficiency of data
+   transfer.  We define several additional query types, each of which
+   can return multiple responses, in order to meet a variety of
+   requirements.
+
+
+2.  Terminology
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in RFC
+   2119 [RFC2119].
+
+   This document uses the following terms:
+
+      o "absolute time"
+
+        A 32-bit quantity containing the number of seconds since Jan 1,
+        1970.
+
+      o "access concentrator"
+
+        An access concentrator is a router or switch at the broadband
+        access provider's edge of a public broadband access network.
+        This document assumes that the access concentrator includes the
+        DHCPv4 relay agent functionality.  For example, a CMTS (Cable
+        Modem Termination System) in Cable environment or a DSLAM
+        (Digital Subscriber Line Access Multiplexer) in a DSL
+
+
+
+Kinnear                  Expires September 2012                 [Page 4]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+        environment.
+
+      o "active binding"
+
+        An IP address with an active binding refers to an IP address
+        which is currently associated with a DHCPv4 client where that
+        DHCPv4 client has the right to use the IP address.
+
+      o "Bulk Leasequery"
+
+        Requesting and receiving the existing DHCPv4 address binding
+        information in an efficient manner.
+
+      o "clock skew"
+
+        The difference between the absolute time on a DHCPv4 server and
+        the absolute time on the system where a requestor of a Bulk
+        Leasequery is executing is termed the "clock skew" for that Bulk
+        Leasequery connection.  It is not absolutely constant but is
+        likely to vary only slowly.  It is possible that, when both
+        systems run NTP, the clock skew is negligible, and this is not
+        only acceptable, but desired.
+
+        While it is easy to think that this can be calculated precisely
+        after one message is received by a requestor from a DHCPv4
+        server, a more accurate value is derived from continuously
+        examining the instantaneous value developed from each message
+        received from a DHCPv4 server and using it to make small
+        adjustments to the existing value held in the requestor.
+
+      o "Default VPN"
+
+        Indicates that the address being described belongs to the set of
+        addresses not part of any VPN.  In other words, the normal
+        address space operated on by DHCP.  This includes private
+        addresses, for example the 10.x.x.x addresses as well as the
+        other private subnets that are not routed on the open internet.
+
+      o "DHCPv4 client"
+
+        A DHCPv4 client is an Internet node using DHCPv4 to obtain
+        configuration parameters such as a network address.
+
+      o "DHCPv4 relay agent"
+
+        A DHCPv4 relay agent is a third-party agent that transfers BOOTP
+        and DHCPv4 messages between clients and servers residing on
+        different subnets, per [RFC951] and [RFC1542].
+
+
+
+Kinnear                  Expires September 2012                 [Page 5]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+      o "DHCPv4 server"
+
+        A DHCPv4 server is an Internet node that returns configuration
+        parameters to DHCPv4 clients.
+
+      o "DSLAM"
+
+        Digital Subscriber Line Multiplexer.
+
+      o "downstream"
+
+        Refers to a direction away from the central part of a network
+        and toward the edge.  In a DHCPv4 context, typically refers to a
+        network direction which is away from the DHCPv4 server.
+
+      o "Global VPN"
+
+        Another name for the "Default VPN".
+
+      o "IP address"
+
+        In this document, the term "IP address" refers to an IPv4 IP
+        address.
+
+      o "IP address binding"
+
+        The information that a DHCPv4 server keeps regarding the
+        relationship between a DHCPv4 client and an IP address.  This
+        includes the identity of the DHCPv4 client and the expiration
+        time, if any, of any lease that client has on a particular IP
+        address.  In some contexts, this may include information on IP
+        addresses that are currently associated with DHCPv4 clients, and
+        in others it may also include IP addresses with no current
+        association to a DHCPv4 client.
+
+      o "MAC address"
+
+        In the context of a DHCPv4 message, a MAC address consists of
+        the fields: hardware type "htype", hardware length "hlen", and
+        client hardware address "chaddr".
+
+      o "upstream"
+
+        Refers to a direction toward the central part of a network and
+        away from the edge.  In a DHCPv4 context, typically refers to a
+        network direction which is toward the DHCPv4 server.
+
+      o "stable storage"
+
+
+
+Kinnear                  Expires September 2012                 [Page 6]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+        Stable storage is used to hold information concerning IP address
+        bindings (among other things) so that this information is not
+        lost in the event of a failure which requires restart of the
+        network element.  DHCPv4 servers are typically expected to have
+        high speed access to stable storage, while relay agents and
+        access concentrators usually do not have access to stable
+        storage, although they may have periodic access to such storage.
+
+      o "xid"
+
+        Transaction-id.  The term "xid" refers to the DHCPv4 field
+        containing the transaction-id of the message.
+
+
+3.  Design Goals
+
+   The goal of this document is to provide a lightweight mechanism for
+   an Access Concentrator or other network element to retrieve IP
+   address binding information available in the DHCPv4 server.  The
+   mechanism should also allow an Access Concentrator to retrieve
+   consolidated IP address binding information for either the entire
+   access concentrator or a single connection/circuit.
+
+
+3.1.  Information Acquisition before Data Starts
+
+   The existing data driven approach required by [RFC4388] means that
+   the Leasequeries can only be performed after an Access Concentrator
+   receives data. To implement antispoofing, the concentrator must drop
+   messages for each client until it gets lease information from the
+   DHCPv4 server for that client. If an Access Concentrator finishes the
+   Leasequeries before it starts receiving data, then there is no need
+   to drop legitimate messages. In this way, outage time may be reduced.
+
+
+3.2.  Lessen need for Caching and Negative Caching
+
+   The result of a single Leasequery should be cached, whether that
+   results in a positive or negative cache, in order to remember that
+   the Leasequery was performed.  This caching is required to limit the
+   traffic imposed upon a DHCPv4 server by Leasequeries for information
+   already received.
+
+   These caches not only consume precious resources, they also need to
+   be managed.  Hence they should be avoided as much as possible.
+
+
+
+
+
+
+Kinnear                  Expires September 2012                 [Page 7]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+3.3.  Antispoofing in 'Fast Path'
+
+   If Antispoofing is not done in the fast path, it will become a
+   bottleneck and may lead to denial of service of the access
+   concentrator.  The Leasequeries should make it possible to do
+   antispoofing in the fast path.
+
+
+3.4.  Minimize data transmission
+
+
+   It may be that a network element is able to periodically save its
+   entire list of assigned IP addresses to some form of stable storage.
+   In this case, it will wish to recover all of the updates to this
+   information without duplicating the information it has recovered from
+   its own stable storage.
+
+   Bulk Leasequery allows the specification of a query-start-time as
+   well as a query-end-time.  Use of query-times allows a network
+   element that periodically commits information to stable storage to
+   recover just what it lost since the last commit.
+
+
+4.  Protocol Overview
+
+   The DHCPv4 Bulk Leasequery mechanism is modeled on the existing
+   individual DHCPv4 Leasequery protocol in [RFC4388] as well as related
+   work on DHCPv6 Bulk Leasequery [RFC5460]. A Bulk Leasequery requestor
+   opens a TCP connection to a DHCPv4 Server, using the DHCPv4 port 67.
+   Note that this implies that the Leasequery requestor has server IP
+   address(es) available via configuration or some other means, and that
+   it has unicast IP reachability to the DHCPv4 server.  No relaying of
+   Bulk Leasequery messages is specified.
+
+   After establishing a connection, the requestor sends a
+   DHCPBULKLEASEQUERY message over the connection.
+
+   The server uses the message type and additional data in the DHCPv4
+   DHCPBULKLEASEQUERY message to identify any relevant bindings.
+
+   In order to support some query types, servers may have to maintain
+   additional data structures or otherwise be able to locate bindings
+   that have been requested by the Leasequery requestor.
+
+   Relevant bindings are returned in DHCPv4 messages with either the
+   DHCPLEASEACTIVE message type for an IP address with a currently
+   active lease or, in some situations, a DHCPLEASEUNASSIGNED message
+   type for an IP address which is controlled by the DHCPv4 server but
+
+
+
+Kinnear                  Expires September 2012                 [Page 8]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   which is not actively leased by a DHCPv4 client at the present time.
+
+   The Bulk Leasequery mechanism is designed to provide an external
+   entity with information concerning existing DHCPv4 IPv4 address
+   bindings managed by the DHCPv4 server.  When complete, the DHCPv4
+   server will send a DHCPLEASEQUERYDONE message.  If a connection is
+   lost while processing a Bulk Leasequery, the Bulk Leasequery must be
+   retried as there is no provision for determining the extent of data
+   already received by the requestor for a Bulk Leasequery.
+
+   Bulk Leasequery supports queries by MAC address and by Client
+   Identifier in a way similar to [RFC4388].  The Bulk Leasequery
+   protocol also adds several new queries.
+
+      o Query by Relay Identifier
+
+        This query asks a server for the bindings associated with a
+        specific relay agent; the relay agent is identified by a DUID
+        carried in a Relay-ID sub-option [RelayId]. Relay agents can
+        include this sub-option while relaying messages to DHCPv4
+        servers.  Servers can retain the Relay-ID and associate it with
+        bindings made on behalf of the relay agent's clients. The
+        bindings returned are only those for DHCPv4 clients with a
+        currently active binding.
+
+      o Query by Remote ID
+
+        This query asks a server for the bindings associated with a
+        Relay Agent Remote-ID sub-option [RFC3046] value. The bindings
+        returned are only those for DHCPv4 clients with a currently
+        active binding.
+
+      o Query for All Configured IP Addresses
+
+        This query asks a server for information concerning all IP
+        addresses configured in that DHCPv4 server, by specifying no
+        other type of query. In this case, the bindings returned are for
+        all configured IP addresses, whether or not they contain a
+        currently active binding to a DHCPv4 client, since one point of
+        this type of query is to update an existing database with
+        changes after a particular point in time.
+
+   Any of the above queries can be qualified by the specification of a
+   query-start-time or a query-end-time (or both). When these timers are
+   used as qualifiers, they indicate that a binding should be included
+   if it changed on or after the query-start-time and on or before the
+   query-end-time.
+
+
+
+
+Kinnear                  Expires September 2012                 [Page 9]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   In addition, any of the above queries can be qualified by the
+   specification of a vpn-id option [VpnId] to select the VPN on which
+   the query should be processed.  The vpn-id option is also extended to
+   allow queries across all available VPNs. In the absence of any vpn-id
+   option, only the default (global) VPN is used to satisfy the query.
+
+
+5.  Interaction Between UDP Leasequery and Bulk Leasequery
+
+   Bulk Leasequery can be seen as an extension of the existing UDP
+   Leasequery protocol [RFC4388].  This section clarifies the
+   relationship between the two protocols.
+
+   Only the DHCPBULKLEASEQUERY request is supported over the Bulk
+   Leasequery connection. No other DHCPv4 requests are supported.  The
+   Bulk Leasequery connection is not an alternative DHCPv4 communication
+   option for clients seeking other DHCPv4 services.
+
+   Two of the query-types introduced in the UDP Leasequery protocol can
+   be used in the Bulk Leasequery protocol -- query by MAC address and
+   query by client-id.
+
+   The contents of the reply messages are similar between the existing
+   UDP Leasequery protocol and the Bulk Leasequery protocol, though more
+   information is returned in the Bulk Leasequery messages.
+
+   One change in behavior for these existing queries is required when
+   Bulk Leasequery is used.  [RFC4388], in sections 6.1, 6.4.1, and
+   6.4.2 specifies the use of an associated-ip option in DHCPLEASEACTIVE
+   messages in cases where multiple bindings were found.  When Bulk
+   Leasequery is used, this mechanism is not necessary; a server
+   returning multiple bindings simply does so directly as specified in
+   this document.  The associated-ip option MUST NOT appear in Bulk
+   Leasequery replies.
+
+   Implementors should note that the TCP message framing defined in
+   Section 4.1 is not compatible with the UDP message format.  If a TCP-
+   framed request is sent as a UDP message, it may not be valid, because
+   protocol fields will be offset by the message-size prefix.
+
+6.  Message and Option Definitions
+
+
+6.1.  Message Framing for TCP
+
+   The use of TCP for the Bulk Leasequery protocol permits multiple
+   messages to be sent from one end of the connection to the other
+   without requiring a request/response paradigm as does UDP DHCPv4
+
+
+
+Kinnear                  Expires September 2012                [Page 10]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   [RFC2131].  The receiver needs to be able to determine the size of
+   each message it receives.  Two octets containing the message size in
+   network byte-order are prepended to each DHCPv4 message sent on a
+   Bulk Leasequery TCP connection. The two message-size octets 'frame'
+   each DHCPv4 message.
+
+   The maximum message size is 65535 octets.
+
+   DHCPv4 message framed for TCP:
+
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |         message-size          |    op (1)     |   htype (1)   |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |   hlen (1)    |   hops (1)    |              ....             |
+      +---------------+---------------+                               +
+      |                                                               |
+      .                  remainder of DHCPv4 message,
+      .                   from Figure 1 of [RFC2131]                  .
+      .                                                               .
+      .                           (variable)                          .
+      |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+
+           message-size    the number of octets in the message that
+                           follows, as a 16-bit integer in network
+                           byte-order.
+
+           All other fields are as specified in DHCPv4 [RFC2131].
+
+
+                  Figure 2:  Format of a DHCPv4 message in TCP
+
+   The intent in using this format is that code which currently knows
+   how to deal with sending or receiving a message in [RFC2131] format
+   will easily be able to deal with the message contained in the TCP
+   framing.
+
+6.2.  New or Changed Options
+
+   The existing messages DHCPLEASEUNASSIGNED and DHCPLEASEACTIVE are
+   used as the value of the dhcp-message-type option to indicate an IP
+   address which is currently not leased or currently leased to a DHCPv4
+   client, respectively [RFC4388].
+
+
+
+
+Kinnear                  Expires September 2012                [Page 11]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   Additional options have also been defined to enable the Bulk
+   Leasequery protocol to communicate useful information to the
+   requestor.
+
+
+6.2.1.  dhcp-message-type
+
+   The dhcp-message-type option (option 53) from Section 9.6 of
+   [RFC2132] requires new values.  The values of these message types are
+   shown below in an extension of the table from Section 9.6 of
+   [RFC2132]:
+
+            Value   Message Type
+            -----   ------------
+            TBD8    DHCPBULKLEASEQUERY
+            TBD9    DHCPLEASEQUERYDONE
+
+
+6.2.2.  status-code
+
+   The status code option allows a machine readable value to be returned
+   regarding the status of a DHCPBULKLEASEQUERY request.
+
+   This option has two possible scopes when used with Bulk Leasequery,
+   depending on the context in which it appears.  It refers to the
+   information in a single Leasequery reply if the value of the dhcp-
+   message-type is DHCPLEASEACTIVE or DHCPLEASEUNASSIGNED.  It refers to
+   the message stream related to an entire request if the value of the
+   dhcp-message-type is DHCPLEASEQUERYDONE.
+
+   The code for this option is TBD1. The length of this option is a
+   minimum of 1 octet.
+
+                     Status           Status
+       Code    Len    Code            Message
+      +------+------+------+------+------+--   --+-----+
+      | TBD1 | n+1  |status|  s1  |  s2  |  ...  | sn  |
+      +------+------+------+------+------+--   --+-----+
+
+
+
+   The status-code is an octet defined in the table below.  The Status
+   Message is an optional UTF-8 encoded text string suitable for display
+   to an end user, which MUST NOT be null-terminated.
+
+
+
+
+
+
+
+Kinnear                  Expires September 2012                [Page 12]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+
+
+     Name    Status Code Description
+     ----    ----------- -----------
+     Success         000 Success.  Also signaled by absence of
+                         a status-code option.
+
+     UnspecFail      001 Failure, reason unspecified.
+
+     QueryTerminated 002 Indicates that the server is unable to
+                         perform a query or has prematurely terminated
+                         the query for some reason (which should be
+                         communicated in the text message).
+
+     MalformedQuery  003 The query was not understood.
+
+     NotAllowed      004 The query or request was understood but was
+                         not allowed in this context.
+
+
+   A status-code option MAY appear in the options field of a DHCPv4
+   message.  If the status-code option does not appear, it is assumed
+   that the operation was successful.  The status-code option SHOULD NOT
+   appear in a message which is successful unless there is some text
+   string that needs to be communicated to the requestor.
+
+6.2.3.  base-time
+
+   The base-time option is the current time the message was created to
+   be sent by the DHCPv4 server to the requestor of the Bulk Leasequery.
+   This MUST be an absolute time. All of the other time based options in
+   the reply message are relative to this time, including the dhcp-
+   lease-time [RFC2132] and client-last-transaction-time [RFC4388].
+   This time is in the context of the DHCPv4 server who placed this
+   option in a message.
+
+   This is an integer in network byte order.
+
+   The code for this option is TBD2. The length of this option is 4
+   octets.
+
+                       DHCPv4 Server
+       Code   Len        base-time
+      +-----+-----+-----+-----+-----+-----+
+      | TBD2|  4  |  t1 |  t2 |  t3 |  t4 |
+      +-----+-----+-----+-----+-----+-----+
+
+
+
+
+
+Kinnear                  Expires September 2012                [Page 13]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+6.2.4.  start-time-of-state
+
+   The start-time-of-state option allows the receiver to determine the
+   time at which the IP address made the transition into its current
+   state.
+
+   This MUST NOT be an absolute time, which is equivalent to saying that
+   this MUST NOT be an absolute number of seconds since Jan 1, 1970.
+   Instead, this MUST be the integer number of seconds from the time the
+   IP address transitioned its current state to the time specified in
+   the base-time option in the same message.
+
+   This is an integer in network byte order.
+
+   The code for this option is TBD3. The length of this option is 4
+   octets.
+
+                     Seconds in the past
+       Code   Len      from base-time
+      +-----+-----+-----+-----+-----+-----+
+      | TBD3|  4  |  t1 |  t2 |  t3 |  t4 |
+      +-----+-----+-----+-----+-----+-----+
+
+
+6.2.5.  query-start-time
+
+   The query-start-time option specifies a start query time to the
+   DHCPv4 server.  If specified, only bindings that have changed on or
+   after the query-start-time should be included in the response to the
+   query.
+
+   The requestor MUST determine the query-start-time using lease
+   information it has received from the DHCPv4 server.  This MUST be an
+   absolute time in the DHCPv4 server's context (see Section 7.4).
+
+   Typically (though this is not a requirement) the query-start-time
+   option will contain the value most recently received in a base-time
+   option by the requestor, as this will indicate the last successful
+   communication with the DHCP server.
+
+   This MUST be an absolute time.
+
+   This is an integer in network byte order.
+
+   The code for this option is TBD4. The length of this option is 4
+   octets.
+
+
+
+
+
+Kinnear                  Expires September 2012                [Page 14]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+
+                         DHCPv4 Server
+       Code   Len      query-start-time
+      +-----+-----+-----+-----+-----+-----+
+      | TBD4|  4  |  t1 |  t2 |  t3 |  t4 |
+      +-----+-----+-----+-----+-----+-----+
+
+
+6.2.6.  query-end-time
+
+   The query-end-time option specifies an end query time to the DHCPv4
+   server.  If specified, only bindings that have changed on or before
+   the query-end-time should be included in the response to the query.
+
+   The requestor MUST determine the query-end-time based on lease
+   information it has received from the DHCPv4 server.  This MUST be an
+   absolute time in the context of the DHCPv4 server.
+
+   In the absence of information to the contrary, the requestor SHOULD
+   assume that the time context of the DHCPv4 server is identical to the
+   time context of the requestor (see Section 7.4).
+
+   This is an integer in network byte order.
+
+   The code for this option is TBD5. The length of this option is 4
+   octets.
+
+                         DHCPv4 Server
+       Code   Len       query-end-time
+      +-----+-----+-----+-----+-----+-----+
+      | TBD5|  4  |  t1 |  t2 |  t3 |  t4 |
+      +-----+-----+-----+-----+-----+-----+
+
+
+6.2.7.  dhcp-state
+
+   The dhcp-state option allows greater detail to be returned than
+   allowed by the DHCPLEASEACTIVE and DHCPLEASEUNASSIGNED message types.
+
+   The code for this option is TBD6. The length of this option is 1
+   octet.
+
+
+
+
+
+
+
+
+
+
+Kinnear                  Expires September 2012                [Page 15]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+
+       0                   1                   2
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |     TBD6      |    Length     |    State      |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+        TBD6     The option code.
+
+        Length   The option length, 1 octet.
+
+        State    The State of the IP address.
+
+      Value  State
+      -----  -----
+        1   AVAILABLE   Address is available to local DHCPv4 server
+        2   ACTIVE      Address is assigned to a DHCPv4 client
+        3   EXPIRED     Lease has expired
+        4   RELEASED    Lease has been released by DHCPv4 client
+        5   ABANDONED   Server or client flagged address as unusable
+        6   RESET       Lease was freed by some external agent
+        7   REMOTE      Address is available to a remote DHCPv4 server
+        8   TRANSITIONING Address is moving between states
+
+   Note that some of these states may be transient and may not appear in
+   normal use.   A DHCPv4 server MUST implement at least the AVAILABLE
+   and ACTIVE states, and SHOULD implement at least the ABANDONED and
+   RESET states.
+
+   Note the states AVAILABLE and REMOTE are relative to the current
+   server.  An address that is available to the current server should
+   show AVAILABLE on that server, and if another server is involved with
+   that address as well, on that other server it should show as REMOTE.
+
+   The dhcp-state option SHOULD contain ACTIVE when it appears in a
+   DHCPLEASEACTIVE message.  A DHCPv4 server MAY choose to not send a
+   dhcp-state option in a DHCPLEASEACTIVE message, and a requestor
+   SHOULD assume that the dhcp-state is ACTIVE if no dhcp-state option
+   appears in a DHCPLEASEACTIVE message.
+
+   The reference to local and remote relate to possible use in an
+   environment that includes multiple servers cooperating to provide an
+   increased availability solution.  In this case, an IP address with
+   the state of AVAILABLE is available to the local server, while one
+   with the state of REMOTE is available to a remote server.  Usually,
+   an IP address which is AVAILABLE on one server would be REMOTE on any
+   remote server.  The TRANSITIONING state is also likely to be useful
+   in multiple server deployments, where sometimes one server must
+
+
+
+Kinnear                  Expires September 2012                [Page 16]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   interlock a state change with one or more other servers.  Should a
+   Bulk Leasequery need to send information concerning the state of the
+   IP address during this period, it SHOULD use the TRANSITIONING state,
+   since the IP address is likely to be neither ACTIVE or AVAILABLE.
+
+   There is no requirement for the state of an IP address to transition
+   in a well defined way from state to state.  To put this another way,
+   you cannot draw a simple state transition graph for the states of an
+   IP address and the requestor of a Leasequery MUST NOT depend on one
+   certain state always following a particular previous state.  In
+   general, every state can (at times) follow every other state.
+
+6.2.8.  data-source
+
+   The data-source option contains information about the source of the
+   data in a DHCPLEASEACTIVE or a DHCPLEASEUNASSIGNED message.  It
+   SHOULD be used when there are two or more servers who might have
+   information about a particular IP address binding.  Frequently two
+   servers work together to provide an increased availability solution
+   for the DHCPv4 service, and in these cases, both servers will respond
+   to Bulk Leasequery requests for the same IP address.  When one server
+   is working with another server and both may respond with information
+   about the same IP address, each server SHOULD return the data-source
+   option with the other information provided about the IP address.
+
+   The data contained in this option will allow an external process to
+   better discriminate between the information provided by each of the
+   servers servicing this IPv4 address.
+
+   The code for this option is TBD7. The length of this option is 1
+   octet.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kinnear                  Expires September 2012                [Page 17]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+
+         0                   1                   2
+         0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        |     TBD7      |    Length     |     Flags     |
+        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+          TBD7     The option code.
+
+          Length   The option length, 1 octet.
+
+          Flags    The Source information for this message.
+
+                      0 1 2 3 4 5 6 7
+                     +-+-+-+-+-+-+-+-+
+                     |    MBZ      |R|
+                     +-+-+-+-+-+-+-+-+
+
+                     R:  REMOTE flag
+
+                          remote = 1
+                          local = 0
+
+                     MBZ:  MUST BE ZERO (reserved for future use)
+
+   The REMOTE flag is used to indicate where the most recent change of
+   state (or other interesting change) concerning this IPv4 address took
+   place.  If the value is local, then the change took place on the
+   server from which this message was transmitted.  If the value is
+   remote, then the change took place on some other server, and was made
+   known to the server from which this message was transmitted.
+
+   If this option was requested and it doesn't appear, the requestor
+   MUST consider that the data-source was local.
+
+6.2.9.  Virtual Subnet Selection Type and Information
+
+   All of the (sub)options defined in [VpnId] carry identical payloads,
+   consisting of a type and additional VSS (Virtual Subnet Selection)
+   information.  The existing table is extended (see below) with a new
+   type 254 to allow specification of a type code which indicates that
+   all VPN's are to be used to process the Bulk Leasequery.
+
+
+
+
+
+
+
+
+
+Kinnear                  Expires September 2012                [Page 18]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+
+                Type    VSS Information format:
+                ----    -----------------------
+                0       UTF-8 ASCII VPN identifier
+                1       RFC 2685 VPN-ID
+     CHANGED -> 2-253   Not Allowed
+         NEW -> 254     All VPN's (wildcard)
+                255     Global, default VPN
+
+
+
+6.3.  Connection and Transmission Parameters
+
+   DHCPv4 servers that support Bulk Leasequery SHOULD listen for
+   incoming TCP connections on the DHCPv4 server port 67.
+   Implementations MAY offer to make the incoming port configurable, but
+   port 67 MUST be the default.  Requestors SHOULD make TCP connections
+   to port 67, and MAY offer to make the destination server port
+   configurable.
+
+   This section presents a table of values used to control Bulk
+   Leasequery behavior, including recommended defaults.  Implementations
+   MAY make these values configurable.  However, configuring too-small
+   timeout values may lead to harmful behavior both to this application
+   as well as to other traffic in the network.  As a result, timeout
+   values smaller than the default values are NOT RECOMMENDED.
+
+
+
+   Parameter             Default   Description
+   -------------------------------------------
+   BULK_LQ_DATA_TIMEOUT  300 secs  Bulk Leasequery data timeout
+                                   for both client and server
+                                   (see Sections 7 and 8)
+   BULK_LQ_MAX_CONNS     10        Max Bulk Leasequery TCP connections
+                                   at the server side (see Section 8.1)
+
+
+7.  Requestor Behavior
+
+
+7.1.  Connecting and General Processing
+
+   A Requestor attempts to establish a TCP connection to a DHCPv4 Server
+   in order to initiate a Leasequery exchange.  If the attempt fails,
+   the Requestor MAY retry.
+
+   If Bulk Leasequery is terminated prematurely by a DHCPLEASEQUERYDONE
+
+
+
+Kinnear                  Expires September 2012                [Page 19]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   with a status-code option with a status-code of QueryTerminated or by
+   the failure of the connection over which it was being submitted, the
+   requestor MAY retry the request after the creation of a new
+   connection.
+
+   Messages from the DHCPv4 server come as multiple responses to a
+   single DHCPBULKLEASEQUERY message. Thus, each DHCPBULKLEASEQUERY
+   request MUST have an xid (transaction-id) unique on the connection on
+   which it is sent.   All of the messages which come as a response to
+   that message will contain the same xid as the request. It is the xid
+   which allows the data-streams of two different DHCPBULKLEASEQUERY
+   requests to be demultiplexed by the requestor.
+
+7.2.  Forming a Bulk Leasequery
+
+   Bulk Leasequery is designed to create a connection which will
+   transfer the state of some subset (or possibly all) of the IP address
+   bindings from the DHCPv4 server to the requestor.  The DHCPv4 server
+   will send all of the requested IPv4 address bindings across this
+   connection with minimal delay after it receives the request.  In this
+   context, "all IP address binding information" means information about
+   all IPv4 addresses configured within the DHCPv4 server which meet the
+   specified query criteria.  For some query criteria, this may include
+   IP address binding information for IP addresses which may not now
+   have or ever had have an association with a specific DHCPv4 client.
+
+   To form the Bulk query, a DHCPv4 request is constructed with a dhcp-
+   message-type of DHCPBULKLEASEQUERY. The query SHOULD have a dhcp-
+   parameter-request-list to inform the DHCPv4 server which DHCPv4
+   options are of interest to the requestor sending the
+   DHCPBULKLEASEQUERY message.  The dhcp-parameter-request-list in a
+   DHCPBULKLEASEQUERY message SHOULD contain the codes for base-time,
+   dhcp-lease-time, start-time-of-state, and client-last-transaction-
+   time.
+
+   A DHCPBULKLEASEQUERY request is constructed of one primary query and
+   optionally one or more qualifiers for it.
+
+   The possible primary queries are listed below.  Each
+   DHCPBULKLEASEQUERY request MUST contain only one of these primary
+   queries.
+
+      o Query by MAC address
+
+        In a Query by MAC address, the chaddr, htype, and hlen of the
+        DHCPv4 packet are filled in with the values requested.
+
+      o Query by Client-Id
+
+
+
+Kinnear                  Expires September 2012                [Page 20]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+        In a Query by Client-Id, a dhcp-client-id option containing the
+        requested value is included in the DHCPBULKLEASEQUERY request.
+
+      o Query by Remote-Id
+
+        In a Query by Remote-Id, a remote-id sub-option containing the
+        requested value is included in the relay-agent-information
+        option of the DHCPBULKLEASEQUERY request.
+
+      o Query by Relay-Id
+
+        In a Query by Relay-Id, a relay-id sub-option [RelayId]
+        containing the requested value is included in the relay-agent-
+        information option of the DHCPBULKLEASEQUERY request.
+
+      o Query for All Configured IP Addresses
+
+        A Query for All Configured IP addresses is signaled by the
+        absence of any other primary query.
+
+   There are three qualifiers which can be applied to any of the above
+   primary queries.  These qualifiers can appear individually or
+   together in any combination, but only one of each can appear.
+
+   o Query Start Time
+
+     Inclusion of a query-start-time option specifies that only IP
+     address bindings which have changed on or after the time specified
+     in the query-start-time option should be returned.
+
+   o Query End Time
+
+     Inclusion of a query-end-time option specifies that only IP address
+     bindings which have changed on or before the time specified in the
+     query-end-time option should be returned.
+
+   o VPN Id
+
+     If no vpn-id option appears in the DHCPBULKLEASEQUERY, the default
+     (global) VPN is searched to satisfy the query specified by the
+     DHCPBULKLEASEQUERY. Using the vpn-id option [VpnId] allows the
+     requestor to specify a single VPN other than the default VPN.  In
+     addition, the vpn-id option has been extended as part of this
+     document to allow specification that all configured VPN's be
+     searched in order to satisfy the query specified in the
+     DHCPBULKLEASEQUERY.
+
+     In all cases, any message returned from a DHCPBULKLEASEQUERY
+
+
+
+Kinnear                  Expires September 2012                [Page 21]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+     request containing information about an IP address for other than
+     the default (global) VPN MUST contain a vpn-id option in the
+     message.
+
+   Use of the query-start-time or the query-end-time options or both can
+   serve to reduce the amount of data transferred over the TCP
+   connection by a considerable amount.
+
+   The TCP connection may become blocked or stop being writable while
+   the requestor is sending its query.   Should this happen, the
+   implementation's behavior is controlled by the current value of
+   BULK_LQ_DATA_TIMEOUT.  The default value is given elsewhere in this
+   document, and this value may be overridden by local configuration of
+   the operator.
+
+   If this situation is detected, the requestor SHOULD start a timer
+   using the current value of BULK_LQ_DATA_TIMEOUT.  If that timer
+   expires, the requestor SHOULD terminate the connection.
+
+7.3.  Processing Bulk Replies
+
+   The requestor attempts to read a DHCPv4 Leasequery reply message from
+   the TCP connection.
+
+   The TCP connection may stop delivering reply data (i.e., the
+   connection stops being readable).  Should this happen, the
+   implementation's behavior is controlled by the current value of
+   BULK_LQ_DATA_TIMEOUT.  The default value is given elsewhere in this
+   document, and this value may be overridden by local configuration of
+   the operator.
+
+   If this situation is detected, the requestor SHOULD start a timer
+   using the current value of BULK_LQ_DATA_TIMEOUT.  If that timer
+   expires, the requestor SHOULD terminate the connection.
+
+   A single Bulk Leasequery can and usually will result in a large
+   number of replies.  The requestor MUST be prepared to receive more
+   than one reply with an xid matching a single DHCPBULKLEASEQUERY
+   message from a single DHCPv4 server. If the xid in the received
+   message does not match an outstanding DHCPBULKLEASEQUERY message, the
+   requestor MUST close the TCP connection.
+
+   The DHCPv4 server MUST send a server-identifier option (option 54) in
+   the first response to any DHCPBULKLEASEQUERY message.   The DHCPv4
+   server SHOULD NOT send server identifier options in subsequent
+   responses to that DHCPBULKLEASEQUERY message.   The requestor MUST
+   cache the server-identifier option from the first response and apply
+   it to any subsequent responses.
+
+
+
+Kinnear                  Expires September 2012                [Page 22]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   The response messages generated by a DHCPBULKLEASEQUERY request are:
+
+      o DHCPLEASEACTIVE
+
+        A Bulk Leasequery will generate DHCPLEASEACTIVE messages
+        containing binding data for bound IP addresses which match the
+        specified query criteria. The IP address which is bound to a
+        DHCPv4 client will appear in the ciaddr field of the
+        DHCPLEASEACTIVE message.  The message may contain a non-zero
+        chaddr, htype, and hlen and possibly additional options.
+
+      o DHCPLEASEUNASSIGNED
+
+        Some queries will also generate DHCPLEASEUNASSIGNED messages for
+        IP addresses which match the query criteria.  These messages
+        indicate that the IP address is managed by the DHCPv4 server but
+        is not currently bound to any DHCPv4 client.  The IP address to
+        which this message refers will appear in the ciaddr field of the
+        DHCPLEASEUNASSIGNED message.  A DHCPLEASEUNASSGINED message MAY
+        also contain information about the last DHCPv4 client that was
+        bound to this IP address. The message may contain a non-zero
+        chaddr, htype, and hlen and possibly additional options in this
+        case.
+
+      o DHCPLEASEQUERYDONE
+
+        A response of DHCPLEASEQUERYDONE indicates that the server has
+        completed its response to the query, and that no more messages
+        will be sent in response to the DHCPBULKLEASEQUERY. More details
+        will sometimes be available in the received status-code option
+        in the DHCPLEASEQUERYDONE message. If there is no status-code
+        option in the DHCPLEASEQUERYDONE message, then the query
+        completed successfully.
+
+        Note that a query which returned no data, that is a
+        DHCPBULKLEASEQUERY request followed by a DHCPLEASEQUERYDONE
+        response, is considered a successful query in that no errors
+        occurred during the processing.  It is not considered an error
+        to have no information to return to a DHCPBULKLEASEQUERY
+        request.
+
+   The DHCPLEASEUNKNOWN message MUST NOT appear in a response to a Bulk
+   Leasequery.
+
+   The requestor MUST NOT assume that there is any inherent order in the
+   IP address binding information that is sent in response to a
+   DHCPBULKLEASEQUERY.  While the base-time will tend to increase
+   monotonically (as it is the current time on the DHCPv4 server), the
+
+
+
+Kinnear                  Expires September 2012                [Page 23]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   actual time that any IP address binding information changed is
+   unrelated to the base-time.
+
+   The DHCPLEASEQUERYDONE message always ends a successful
+   DHCPBULKLEASEQUERY request and any unsuccessful DHCPBULKLEASEQUERY
+   requests not terminated by a dropped connection. After receiving
+   DHCPLEASEQUERYDONE from a server, the requestor MAY close the TCP
+   connection to that server if no other DHCPBULKLEASEQUERY is
+   outstanding on that TCP connection.
+
+   The DHCPv4 Leasequery protocol [RFC4388] uses the associated-ip
+   option as an indicator that multiple bindings were present in
+   response to a single DHCPv4 client based query.  For Bulk Leasequery,
+   a separate message is returned for each binding, and so the
+   associated-ip option is not used.
+
+7.4.  Processing Time Values in Leasequery messages
+
+   Bulk Leasequery requests may be made to a DHCPv4 server whose
+   absolute time may not be synchronized with the local time of the
+   requestor.  Thus, there are at least two time contexts in even the
+   simplest Bulk Leasequery response, and in the situation where
+   multiple DHCPv4 servers are queried, the situation becomes even more
+   complex.
+
+   If the requestor of a Bulk Leasequery is saving the data returned in
+   some form, it has a requirement to store a variety of time values,
+   and some of these will be time in the context of the requestor and
+   some will be time in the context of the DHCPv4 server.
+
+   When receiving a DHCPLEASEACTIVE or DHCPLEASEUNASSIGNED message from
+   the DHCPv4 server, the message will contain a base-time option.  The
+   time contained in this base-time option is in the context of the
+   DHCPv4 server.  As such, it is an ideal time to save and use as input
+   to a DHCPBULKLEASEQUERY in the query-start-time or query-end-time
+   options, should the requestor need to ever issue a DHCPBULKLEASEQUERY
+   message using those options as part of a later query, since those
+   options require a time in the context of the DHCPv4 server.
+
+   In addition to saving the base-time for possible future use in a
+   query-start-time or query-end-time option, the base-time is used as
+   part of the conversion of the other times in the Leasequery message
+   to values which are meaningful in the context of the requestor.
+
+   In systems whose clocks are synchronized, perhaps using NTP, the
+   clock skew will usually be zero, which is not only acceptable, but
+   desired.
+
+
+
+
+Kinnear                  Expires September 2012                [Page 24]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+7.5.  Querying Multiple Servers
+
+   A Bulk Leasequery requestor MAY be configured to attempt to connect
+   to and query from multiple DHCPv4 servers in parallel.  The DHCPv4
+   Leasequery specification [RFC4388] includes a discussion about
+   reconciling binding data received from multiple DHCPv4 servers.
+
+   In addition, the algorithm in Section 7.6 should be used.
+
+7.6.  Making Sense Out of Multiple Responses Concerning a Single IPv4
+Address
+
+   Any requestor of an Bulk Leasequery MUST be prepared for multiple
+   responses to arrive for a particular IPv4 address from multiple
+   different DHCPv4 servers. The following algorithm SHOULD be used to
+   decide if the information just received is more up to date (i.e.,
+   better) than the best existing information.  In the discussion below,
+   the information that is received from a DHCPv4 server about a
+   particular IPv4 address is termed a "record".  The times used in the
+   algorithm below SHOULD have been converted into the requestor's
+   context and the time comparisons SHOULD be performed in a manner
+   consistent with the information in Section 7.4.
+
+      o If both the existing and the new record contain client-last-
+        transaction-time information, the record with the later client-
+        last-transaction-time is considered better.
+
+      o If one of the records contains client-last-transaction-time
+        information and the other one doesn't, then compare the client-
+        last-transaction-time in the record that contains it against the
+        other record's start-time-of-state.  The record with the later
+        time is considered better.
+
+      o If neither record contains client-last-transaction-time
+        information, compare their start-time-of-state information.  The
+        record with the later start-time-of-state is considered better.
+
+      o If none of the comparisons above yield a clear answer as to
+        which record is later, then compare the value of the REMOTE flag
+        from the data-source option for each record.
+
+        If the values of the REMOTE flag are different between the two
+        records, the record with the REMOTE flag value of local is
+        considered better.
+
+   The above algorithm does not necessarily determine which record is
+   better.  In the event that the algorithm is inconclusive with regard
+   to a record which was just received by the requestor, the requestor
+
+
+
+Kinnear                  Expires September 2012                [Page 25]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   SHOULD use additional information in the two records to make a
+   determination as to which record is better.
+
+7.7.  Multiple Queries to a Single Server over One Connection
+
+   Bulk Leasequery requestors may need to make multiple queries in order
+   to recover binding information.  A requestor MAY use a single
+   connection to issue multiple queries to a server willing to support
+   them. Each query MUST have a unique xid.
+
+   A server SHOULD allow configuration of the number of queries that can
+   be processed simultaneously over a single connection.  A server
+   SHOULD read the number of queries it is configured to process
+   simultaneously and only read any subsequent queries as current
+   queries are processed.
+
+   A server that is processing multiple queries simultaneously MUST
+   interleave replies to the multiple queries within the stream of reply
+   messages it sends.  Requestors need to be aware that replies for
+   multiple queries may be interleaved within the stream of reply
+   messages.  Requestors that are not able to process interleaved
+   replies (based on xid) MUST NOT send more than one query over a
+   single connection prior to the completion of the previous query.
+
+   Requestors should be aware that servers are not required to process
+   more than one query over a connection at a time (the limiting case
+   for the configuration described above), and that servers are likely
+   to limit the rate at which they process queries from any one
+   requestor.
+
+
+7.7.1.  Example
+
+   This example illustrates what a series of queries and responses might
+   look like.  This is only an example - there is no requirement that
+   this sequence must be followed, or that requestors or servers must
+   support parallel queries.
+
+   In the example session, the client sends four queries after
+   establishing a connection.  Query 1 returns no results; query 2
+   returns 3 messages and the stream of replies concludes before the
+   client issues any new query. Query 3 and query 4 overlap, and the
+   server interleaves its replies to those two queries.
+
+
+
+
+
+
+
+
+Kinnear                  Expires September 2012                [Page 26]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+
+      Requestor                                Server
+      ---------                                ------
+      DHCPBULKLEASEQUERY xid 1 ----->
+                               <-----       DHCPLEASEQUERYDONE xid 1
+      DHCPBULKLEASEQUERY xid 2 ----->
+                               <-----       DHCPLEASEACTIVE xid 2
+                               <-----       DHCPLEASEACTIVE xid 2
+                               <-----       DHCPLEASEACTIVE xid 2
+                               <-----       DHCPLEASEQUERYDONE xid 2
+      DHCPBULKLEASEQUERY xid 3 ----->
+      DHCPBULKLEASEQUERY xid 4 ----->
+                               <-----       DHCPLEASEACTIVE xid 4
+                               <-----       DHCPLEASEACTIVE xid 4
+                               <-----       DHCPLEASEACTIVE xid 3
+                               <-----       DHCPLEASEACTIVE xid 4
+                               <-----       DHCPLEASEUNASSIGNED xid 3
+                               <-----       DHCPLEASEACTIVE xid 4
+                               <-----       DHCPLEASEACTIVE xid 3
+                               <-----       DHCPLEASEQUERYDONE xid 3
+                               <-----       DHCPLEASEACTIVE xid 4
+                               <-----       DHCPLEASEQUERYDONE xid 4
+
+
+7.8.  Closing Connections
+
+   The requestor SHOULD close the connection after the
+   DHCPLEASEQUERYDONE message is received for the last outstanding query
+   that it has sent, if it has no more queries to send.
+
+8.  Server Behavior
+
+
+8.1.  Accepting Connections
+
+   Servers that implement DHCPv4 Bulk Leasequery listen for incoming TCP
+   connections.  Port numbers are discussed in Section 6.3.  Servers
+   MUST be able to limit the number of concurrently accepted and active
+   connections.  The value BULK_LQ_MAX_CONNS SHOULD be the default;
+   implementations MAY permit the value to be configurable.  Connections
+   SHOULD be accepted and, if the number of connections is over
+   BULK_LQ_MAX_CONNS, they SHOULD be closed immediately.
+
+   Servers MAY restrict Bulk Leasequery connections and
+   DHCPBULKLEASEQUERY messages to certain requestors.  Connections not
+   from permitted requestors SHOULD be closed immediately, to avoid
+   server connection resource exhaustion.  Servers MAY restrict some
+   requestors to certain query types.  Servers MAY reply to queries that
+
+
+
+Kinnear                  Expires September 2012                [Page 27]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   are not permitted with the DHCPLEASEQUERYDONE message with a status-
+   code option status of NotAllowed, or MAY simply close the connection.
+
+   If the TCP connection becomes blocked while the server is accepting a
+   connection or reading a query, it SHOULD be prepared to terminate the
+   connection after an BULK_LQ_DATA_TIMEOUT.  We make this
+   recommendation to allow servers to control the period of time they
+   are willing to wait before abandoning an inactive connection,
+   independent of the TCP implementations they may be using.
+
+8.2.  Replying to a Bulk Leasequery
+
+   If the connection becomes blocked while the server is attempting to
+   send reply messages, the server SHOULD be prepared to terminate the
+   TCP connection after BULK_LQ_DATA_TIMEOUT.
+
+   Every Bulk Leasequery request MUST be terminated by sending a final
+   DHCPLEASEQUERYDONE message if such a message can be sent.  The
+   DHCPLEASEQUERYDONE message MUST have a status-code option status if
+   the termination was other than successful, and SHOULD NOT contain a
+   status-code option status if the termination was successful.
+
+   If the DHCPv4 server encounters an error during processing of the
+   DHCPBULKLEASEQUERY message, either during initial processing or later
+   during the message processing, it SHOULD send a DHCPLEASEQUERYDONE
+   containing a status-code option.  It MAY close the connection after
+   this error is signaled, but that is not required.
+
+   If the server does not find any bindings satisfying a query, it MUST
+   send a DHCPLEASEQUERYDONE.  It SHOULD NOT include a status-code
+   option with a Success status unless there is a useful string to
+   include in the status-code option.  Otherwise, the server sends each
+   binding's data in a DHCPLEASEACTIVE or DHCPLEASEUNASSIGNED message.
+
+   The response to a DHCPBULKLEASEQUERY may involve examination of
+   multiple DHCPv4 IP address bindings maintained by the DHCPv4 server.
+   The Bulk Leasequery protocol does not require any ordering of the IP
+   addresses returned in DHCPLEASEACTIVE or DHCPLEASEUNASSIGNED
+   messages.
+
+   When responding to a DHCPBULKLEASEQUERY message, the DHCPv4 server
+   MUST NOT send more than one message for each applicable IP address,
+   even if the state of some of those IP addresses changes during the
+   processing of the message.   Updates to such IP address state are
+   already handled by normal protocol processing, so no special effort
+   is needed here.
+
+   If the ciaddr, yiaddr, or siaddr is non-zero in a DHCPBULKLEASEQUERY
+
+
+
+Kinnear                  Expires September 2012                [Page 28]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   request, the request must be terminated immediately by a
+   DHCPLEASEQUERYDONE message with a status-code status of
+   MalformedQuery.
+
+   Any DHCPBULKLEASEQUERY which has more than one of the following
+   primary query types specified MUST be terminated immediately by a
+   DHCPLEASEQUERYDONE message with a status-code option status code of
+   NotAllowed.
+
+   The allowable queries in a DHCPBULKLEASEQUERY message are processed
+   as follows.  Note that the descriptions of the primary queries below
+   must be constrained by the actions of any of the three qualifiers
+   described subsequently as well.
+
+   The following table discusses how to process the various queries.
+   For information on how to identify the query, see the information in
+   Section 7.2.
+
+
+      o Query by MAC address
+
+        Every IP address that has a current binding to a DHCPv4 client
+        matching the chaddr, htype, and hlen in the DHCPBULKLEASEQUERY
+        request MUST be returned in a DHCPLEASEACTIVE message.
+
+      o Query by Client-Id
+
+        Every IP address that has a current binding to a DHCPv4 client
+        matching the client-id option in the DHCPBULKLEASEQUERY request
+        MUST be returned in a DHCPLEASEACTIVE message.
+
+      o Query by Remote-Id
+
+        Every IP address that has a current binding to a DHCPv4 client
+        matching the remote-id sub-option of the relay-agent-information
+        option in the DHCPBULKLEASEQUERY request MUST be returned in a
+        DHCPLEASEACTIVE message.
+
+      o Query by Relay-Id
+
+        Every IP address that has a current binding to a DHCPv4 client
+        matching the relay-id sub-option of the relay-agent-information
+        option in the DHCPBULKLEASEQUERY request MUST be returned in a
+        DHCPLEASEACTIVE message.
+
+      o Query for All Configured IP Addresses
+
+        A Query for All Configured IP addresses is signaled by the
+
+
+
+Kinnear                  Expires September 2012                [Page 29]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+        absence of any other primary query.  That is, if there is no
+        value in the chaddr, hlen, htype, no client-id option, no
+        remote-id sub-option or relay-id sub-option of the relay-agent-
+        information option, then the request is a query for information
+        concerning all configured IP addresses. In this case, every
+        configured IP address that has a current binding to a DHCPv4
+        client MUST be returned in a DHCPLEASEACTIVE message.  In
+        addition, every configured IP address that does not have a
+        current binding to a DHCPv4 client MUST be returned in a
+        DHCPLEASEUNASSIGNED message.
+
+        In this form of query, each configured IP address MUST be
+        returned at most one time.  If the absence of qualifiers
+        restricting the number of IP addresses returned, every
+        configured IP address MUST be returned exactly once.
+
+   There are three qualifiers that can be applied to any of the above
+   primary queries.  These qualifiers can appear individually or
+   together in any combination, but only one of each can appear.
+
+   o Query Start Time
+
+     If a query-start-time option appears in the DHCPBULKLEASEQUERY
+     request, only IP address bindings that have changed on or after the
+     time specified in the query-start-time option should be returned.
+
+   o Query End Time
+
+     If a query-end-time option appears in the DHCPBULKLEASEQUERY
+     request, only IP address bindings that have changed on or before
+     the time specified in the query-end-time option should be returned.
+
+   o VPN Id
+
+     If no vpn-id option appears in the DHCPBULKLEASEQUERY, the default
+     (global) VPN is used to satisfy the query.  A vpn-id option [VpnId]
+     value other than the wildcard value (254) allows the requestor to
+     specify a single VPN other than the default VPN.  In addition, the
+     vpn-id option has been extended as part of this document to allow
+     specification of a type 254 which indicates that all configured
+     VPN's be searched in order to satisfy the primary query.
+
+     In all cases, if the information returned in a DHCPLEASEACTIVE or
+     DHCPLEASEUNASSIGNED message is for a VPN other than the default
+     (global) VPN, a vpn-id option MUST appear in the packet.
+
+   The query-start-time and query-end-time qualifiers are used to
+   constrain the amount of data returned by a Bulk Leasequery request by
+
+
+
+Kinnear                  Expires September 2012                [Page 30]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   returning only IP addresses whose address bindings have changed in
+   some way during the time window specified by the query-start-time and
+   query-end-time.
+
+   A DHCPv4 server SHOULD consider an address binding to have changed
+   during a specified time window if either the client-last-
+   transaction-time or the start-time-of-state of the address binding
+   changed during that time window.
+
+   The DHCPv4 server MAY return address binding data in any order, as
+   long as binding information for any given IP address is not repeated.
+   When all binding data for a given DHCPBULKLEASEQUERY has been sent,
+   the DHCPv4 server MUST send a DHCPBULKLEASEQUERYDONE message.
+
+8.3.  Building a Single Reply for Bulk Leasequery
+
+   The DHCPv4 Leasequery [RFC4388] specification describes the initial
+   construction of DHCPLEASEQUERY reply messages using the
+   DHCPLEASEACTIVE and DHCPLEASEUNASSIGNED message types in Section
+   6.4.2.  All of the reply messages in Bulk Leasequery are similar to
+   the reply messages for an IP address query.  Message transmission and
+   framing for TCP is described in this document in Section 6.1.
+
+   [RFC2131] and [RFC4388] specify that every response message MUST
+   contain the server-identifier option.  However, that option will be
+   the same for every response from a particular DHCPBULKLEASEQUERY
+   request.  Thus, the DHCPv4 server MUST include the server-identifier
+   option in the first message sent in response to a DHCPBULKLEASEQUERY.
+   It SHOULD NOT include the server-identifier in later messages.
+
+   The message type of DHCPLEASEACTIVE or DHCPLEASEUNASSIGNED is based
+   on the value of the dhcp-state option.  If the dhcp-state option
+   value is ACTIVE, then the message type is DHCPLEASEACTIVE, otherwise
+   the message type is DHCPLEASEUNASSIGNED.
+
+   In addition to the basic message construction described in [RFC4388],
+   the following guidelines exist:
+
+      1. If the dhcp-state option code appears in the dhcp-parameter-
+         request-list, the DHCPv4 server SHOULD include a dhcp-state
+         option whose value corresponds most closely to the state held
+         by the DHCPv4 server for the IP address associated with this
+         reply.  If the state is ACTIVE and the message being returned
+         is DHCPLEASEACTIVE, then the DHCPv4 server MAY choose to not
+         send the dhcp-state option.  The requestor SHOULD assume that
+         any DHCPLEASEACTIVE message arriving without a requested dhcp-
+         state option has a dhcp-state of ACTIVE.
+
+
+
+
+Kinnear                  Expires September 2012                [Page 31]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+      2. If the base-time option code appears in the dhcp-parameter-
+         request-list, the DHCPv4 server MUST include a base-time
+         option, which is the current time in the DHCPv4 server's
+         context and the time from which the start-time-of-state, dhcp-
+         lease-time, client-last-transaction-time, and other duration-
+         style times are based upon.
+
+      3. If the start-time-of-state option code appears in the dhcp-
+         parameter-request-list, the DHCPv4 server MUST include a
+         start-time-of-state option whose value represents the time at
+         which the dhcp-state option's state became valid.
+
+      4. If the dhcp-lease-time option code appears in the dhcp-
+         parameter-request-list, the DHCPv4 server MUST include a dhcp-
+         lease-time option for any state that has a time-out value
+         associated with it.
+
+      5. If the data-source option code appears in the dhcp-parameter-
+         request-list, the DHCPv4 server MUST include the data-source
+         option in any situation where any of the bits would be non-
+         zero.  Thus, in the absence of the data-source option, the
+         assumption is that all of the flags were zero.
+
+      6. If the client-last-transaction-time option code appears in the
+         dhcp-parameter-request-list, The DHCPv4 server MUST include the
+         client-last-transaction-time option in any situation where the
+         information is available.
+
+      7. If there is a dhcp-parameter-request-list in the initial
+         DHCPBULKLEASEQUERY request, then it should be used for all of
+         the replies generated by that request.  Some options can be
+         sent from a DHCPv4 client to the server or from the DHCPv4
+         server to a DHCPv4 client. Option 125 is such an option.  If
+         the option code for one of these options appears in the dhcp-
+         parameter-request-list, it SHOULD result in returning the value
+         of the option sent by the DHCPv4 client to the server if one
+         exists.
+
+   Note that there may be other requirements for a reply to a
+   DHCPBULKLEASEQUERY request discussed in Section 8.2.
+
+8.4.  Multiple or Parallel Queries
+
+   As discussed in Section 7.3, requestors may want to use a connection
+   that has already been established when they need to make additional
+   queries. Servers SHOULD support reading and processing multiple
+   queries from a single connection and SHOULD allow configuration of
+   the number of simultaneous queries it may process. A server MUST NOT
+
+
+
+Kinnear                  Expires September 2012                [Page 32]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   read more query messages from a connection than it is prepared to
+   process simultaneously.
+
+   This SHOULD be a feature that is administratively controlled.
+   Servers SHOULD offer configuration that limits the number of
+   simultaneous queries permitted from any one requestor, in order to
+   control resource use if there are multiple requestors seeking
+   service.
+
+8.5.  Closing Connections
+
+
+   The DHCPv4 server SHOULD start a timer for BULK_LQ_DATA_TIMEOUT
+   seconds for a particular connection after it sends a
+   DHCPLEASEQUERYDONE message over that connection and if there is no
+   current query outstanding for that connection.  It should clear this
+   timer if a query arrives over that connection.  If the timer expires,
+   the DHCPv4 server should close the connection.
+
+   The server MUST close its end of the TCP connection if it encounters
+   an error sending data on the connection.  The server MUST close its
+   end of the TCP connection if it finds that it has to abort an in-
+   process request.  A server aborting an in-process request SHOULD
+   attempt to signal that to its requestors by using the QueryTerminated
+   status code in the status-code option in a DHCPLEASEQUERYDONE
+   message, including a message string indicating details of the reason
+   for the abort.   If the server detects that the requesting end of the
+   connection has been closed, the server MUST close its end of the
+   connection.
+
+9.  Security Considerations
+
+   The "Security Considerations" section of [RFC2131] details the
+   general threats to DHCPv4.  The DHCPv4 Leasequery specification
+   [RFC4388] describes recommendations for the Leasequery protocol,
+   especially with regard to authentication of LEASEQUERY messages,
+   mitigation of packet-flooding DOS attacks, and restriction to trusted
+   requestors.
+
+   The use of TCP introduces some additional concerns.  Attacks that
+   attempt to exhaust the DHCPv4 server's available TCP connection
+   resources, such as SYN flooding attacks, can compromise the ability
+   of legitimate requestors to receive service.  Malicious requestors
+   who succeed in establishing connections, but who then send invalid
+   queries, partial queries, or no queries at all also can exhaust a
+   server's pool of available connections.  We recommend that servers
+   offer configuration to limit the sources of incoming connections,
+   that they limit the number of accepted connections and the number of
+
+
+
+Kinnear                  Expires September 2012                [Page 33]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   in-process queries from any one connection, and that they limit the
+   period of time during which an idle connection will be left open.
+
+   There are two specific issues regarding Bulk Leasequery security that
+   deserve explicit mention.  The first is preventing information that
+   Bulk Leasequery can provide from reaching clients who are not
+   authorized to receive such information.  The second is ensuring that
+   authorized clients of the Bulk Leasequery capability receive accurate
+   information from the Server (and that this information is not
+   disrupted in transit).
+
+   To prevent information leakage to unauthorized clients Servers SHOULD
+   restrict Bulk Leasequery connections and DHCPBULKLEASEQUERY messages
+   to certain requestors, either through explicit configuration of the
+   Server itself or by employing external network elements to provide
+   such restrictions.  In particular, the typical DHCPv4 client SHOULD
+   NOT be allowed to receive a response to a Bulk Leasequery request,
+   and some technique MUST exist to allow prevention of such access in
+   any environment where Bulk Leasequery is deployed.
+
+   Connections not from permitted requestors SHOULD be closed
+   immediately, to avoid server connection resource exhaustion or
+   alternatively, simply not be allowed to reach the server at all.
+   Servers SHOULD have the capability to restrict certain requestors to
+   certain query types.  Servers MAY reply to queries that are not
+   permitted with the DHCPLEASEQUERYDONE message with a status-code
+   option status of NotAllowed, or MAY simply close the connection.
+
+   To prevent disruption and malicious corruption of Bulk Leasequery
+   data flows between the server and authorized clients these data flows
+   SHOULD transit only secured networks.   These data flows are
+   typically infrastructure oriented, and there is usually no reason to
+   have them flowing over networks where such attacks are likely.  In
+   the rare cases where these data flows might need to be sent through
+   unsecured networks, they MUST sent over connections secured through
+   means external to the DHCPv4/DHCPv6 server and its client(s) (e.g.,
+   through VPN's).
+
+   Authentication for DHCP Messages [RFC3118] MUST NOT be used to
+   attempt to secure transmission of the messages described in this
+   document.  In particular, the message framing would not be protected
+   by using the mechanisms described in [RFC3118] (which was designed
+   only with UDP transport in mind).
+
+10.  IANA Considerations
+
+   IANA is requested to assign the following new DHCPv4 option codes
+   from the registry "BOOTP Vendor Extensions and DHCP Options"
+
+
+
+Kinnear                  Expires September 2012                [Page 34]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   maintained at http://www.iana.org/assignments/bootp-dhcp-parameters
+
+      1. An option code of TBD1 for status-code.
+
+      2. An option code of TBD2 for base-time.
+
+      3. An option code of TBD3 for start-time-of-state.
+
+      4. An option code of TBD4 for query-start-time.
+
+      5. An option code of TBD5 for query-end-time.
+
+      6. An option code of TBD6 for dhcp-state.
+
+      7. An option code of TBD7 for data-source.
+
+   IANA is requested to assign the following new DHCP message types from
+   the registry "DHCP Message Type 53 Values" maintained at
+   http://www.iana.org/assignments/bootp-dhcp-parameters
+
+      1. A dhcp-message-type of TBD8 for DHCPBULKLEASEQUERY.
+
+      2. A dhcp-message-type of TBD9 for DHCPLEASEQUERYDONE.
+
+   IANA is requested to create a new registry on the same assignments
+   page, titled "DHCP State TBD6 Values" (where TBD6 corresponds to the
+   assigned value of the dhcp-state option, above).  This registry will
+   have the following initial values:
+
+
+     State
+     -----
+       1     AVAILABLE
+       2     ACTIVE
+       3     EXPIRED
+       4     RELEASED
+       5     ABANDONED
+       6     RESET
+       7     REMOTE
+       8     TRANSITIONING
+
+
+   New values for this name space may only be defined by IETF Consensus,
+   as described in [RFC5226]. Basically, this means that they are
+   defined by RFCs approved by the IESG.
+
+   IANA is requested to create a new registry on the same assignments
+   page, titled "DHCP Status Code TBD1 Values" (where TBD1 corresponds
+
+
+
+Kinnear                  Expires September 2012                [Page 35]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   to the assigned value of the status-code option, above).  This
+   registry will have the following initial values:
+
+
+     Name    status-code
+     ----    -----------
+     Success         000
+     UnspecFail      001
+     QueryTerminated 002
+     MalformedQuery  003
+     NotAllowed      004
+
+
+   New values for this name space may only be defined by IETF Consensus,
+   as described in [RFC5226]. Basically, this means that they are
+   defined by RFCs approved by the IESG.
+
+   IANA is requested to revise the registry that will be created on the
+   same assignments page when the [VpnId] option is approved.  The
+   registry will be "Virtual Subnet Selection Type and Information".  It
+   should be revised to appear as follows:
+
+
+          Type     VSS Information format:
+
+           0       UTF-8 ASCII VPN identifier
+           1       RFC2685 VPN-ID
+           2-253   Not Allowed
+           254     All VPN's.  (wildcard; only allowed in
+                   DHCPBULKLEASEQUERY messages)
+           255     Global, default VPN.
+
+
+11.  Contributing Authors
+
+   The following authors were full participants in creating this
+   document.  In order to facilitate the process of approval for this
+   work, they graciously volunteered to have their names appear in this
+   section instead of on the title page.
+
+
+      Pavan Kurapati
+      Juniper Networks Ltd.
+      Embassy Prime Buildings, C.V.Raman Nagar
+      Bangalore  560 093
+      India
+
+
+
+
+
+Kinnear                  Expires September 2012                [Page 36]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+
+      Email: kurapati@juniper.net
+      URI:   http://www.juniper.net/
+
+
+
+      Bernie Volz
+      Cisco Systems
+      1414 Massachusetts Ave.
+      Boxborough, Massachusetts 01719
+
+      Phone: (978) 936-0000
+
+      EMail: volz@cisco.com
+
+
+12.  Acknowledgements
+
+   This draft is a collaboration between the authors of draft-dtv-dhc-
+   dhcpv4-bulk-leasequery-00.txt and draft-kkinnear-dhc-dhcpv4-bulk-
+   leasequery-00.txt.  Both documents acknowledged that significant text
+   as well as important ideas were borrowed in whole or in part from the
+   DHCPv6 Bulk Leasequery RFC, [RFC5460] written by Mark Stapp. Further
+   suggestions and improvements were made by participants in the DHC
+   working group, including Alfred Hoenes.
+
+
+13.  References
+
+
+13.1.  Normative References
+
+
+   [RFC2119] Bradner, S., "Key words for use in RFCs to Indicate
+      Requirement Levels", RFC 2119, March 1997.
+
+   [RFC2131] Droms, R., "Dynamic Host Configuration Protocol", RFC 2131,
+      March 1997.
+
+   [RFC2132] Alexander, S., Droms, R., "DHCP Options and BOOTP Vendor
+      Extensions", RFC 2132, March 1997.
+
+   [RFC3046] Patrick, M., "DHCP Relay Agent Information Option", RFC
+      3046, January 2001.
+
+   [RFC3118] Droms, R. "Authentication for DHCP Messages", RFC 3118,
+      June 2001.
+
+
+
+
+Kinnear                  Expires September 2012                [Page 37]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+   [RFC4388] Woundy, R., K. Kinnear, "Dynamic Host Configuration
+      Protocol (DHCP) Leasequery", RFC 4388, February 2006.
+
+   [RFC5226] Narten, T. and H. Alvestrand, "Guidelines for Writing an
+      IANA Considerations Section in RFCs", BCP 26, RFC 5226, May 2008.
+
+   [RelayId] Joshi, B., Rao, D. and M. Stapp, "The DHCPv4 Relay Agent
+      Identifier Suboption", draft-ietf-dhc-relay-id-suboption-10.txt,
+      (work in progress) January 2012.
+
+   [VpnId] Kinnear, K., R. Johnson, M. Stapp and J. Kumarasamy, "Virtual
+      Subnet Selection Options for DHCPv4 and DHCPv6" draft-ietf-dhc-
+      vpn-option-15.txt, (work in progress) January 2012.
+
+13.2.  Informative References
+
+
+   [RFC951] Croft, B., Gilmore, J., "Bootstrap Protocol (BOOTP)", RFC
+      951, September 1985.
+
+   [RFC1542] Wimer, W., "Clarifications and Extensions for the Bootstrap
+      Protocol", RFC 1542, October 1993.
+
+   [RFC4614] Duke, M., R. Braden, W. Eddy, and E. Blanton, "A Roadmap
+      for Transmission Control Protocol (TCP) Specification Documents",
+      RFC 4614, September 2006.
+
+   [RFC5460] Stapp, M., "DHCPv6 Bulk Leasequery", RFC 5460, February
+      2009.
+
+
+Authors' Addresses
+
+
+      Kim Kinnear
+      Cisco Systems
+      1414 Massachusetts Ave.
+      Boxborough, Massachusetts 01719
+
+      Phone: (978) 936-0000
+
+      EMail: kkinnear@cisco.com
+
+
+
+      Neil Russell
+      BMC Software
+      10 Maguire Rd., Bldg. 3, Ste. 320
+
+
+
+Kinnear                  Expires September 2012                [Page 38]
+
+Internet Draft          Bulk DHCPv4 Lease Query               March 2012
+
+
+      Lexington, MA 02421
+
+      Phone: (781) 257-3105
+
+      EMail: neil_russell@bmc.com
+
+
+
+      Mark Stapp
+      Cisco Systems
+      1414 Massachusetts Ave.
+      Boxborough, Massachusetts 01719
+
+      Phone: (978) 936-0000
+
+      EMail: mjs@cisco.com
+
+
+
+      Ramakrishna Rao DTV
+      Infosys Technologies Ltd.
+      44 Electronics City, Hosur Road
+      Bangalore  560 100
+      India
+
+      EMail: ramakrishnadtv@infosys.com
+      URI:   http://www.infosys.com/
+
+
+
+      Bharat Joshi
+      Infosys Technologies Ltd.
+      44 Electronics City, Hosur Road
+      Bangalore  560 100
+      India
+
+      EMail: bharat_joshi@infosys.com
+      URI:   http://www.infosys.com/
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kinnear                  Expires September 2012                [Page 39]
+

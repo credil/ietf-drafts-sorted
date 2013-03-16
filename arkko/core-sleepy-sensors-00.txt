@@ -1,0 +1,1456 @@
+
+
+
+Network Working Group                                           J. Arkko
+Internet-Draft                                               H. Rissanen
+Intended status: Informational                                 S. Loreto
+Expires: January 5, 2012                                      Z. Turanyi
+                                                                 O. Novo
+                                                                Ericsson
+                                                            July 4, 2011
+
+
+                     Implementing Tiny COAP Sensors
+                   draft-arkko-core-sleepy-sensors-00
+
+Abstract
+
+   The authors are developing COAP and IPv6-based sensor networks for
+   environments where lightweight implementations, long battery
+   lifetimes, and minimal management burden are important.  The memo
+   shows how different communication models supported by COAP affect
+   implementation complexity and energy consumption, far more so than
+   mere changes in message syntax.  Our prototype implements a
+   multicast-based IPv6, UDP, COAP, and XML protocol stack in less than
+   50 assembler instructions.  While this extremely minimal
+   implementation is suitable only for limited applications and makes a
+   number of assumptions, the general conclusions point to need for
+   further work in developing the COAP multicast and observation
+   frameworks.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on January 5, 2012.
+
+Copyright Notice
+
+   Copyright (c) 2011 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+
+
+Arkko, et al.            Expires January 5, 2012                [Page 1]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Goals  . . . . . . . . . . . . . . . . . . . . . . . . . . . .  4
+   3.  Implementing Tiny COAP-Based Sensors . . . . . . . . . . . . .  5
+     3.1.  Sleeping Nodes and Energy Use  . . . . . . . . . . . . . .  5
+     3.2.  Address Autoconfiguration  . . . . . . . . . . . . . . . .  6
+     3.3.  Using Multicast  . . . . . . . . . . . . . . . . . . . . .  7
+     3.4.  Using COAP . . . . . . . . . . . . . . . . . . . . . . . .  8
+     3.5.  Power Usage Calculation  . . . . . . . . . . . . . . . . .  8
+     3.6.  Software Construction  . . . . . . . . . . . . . . . . . .  9
+     3.7.  UDP Checksums  . . . . . . . . . . . . . . . . . . . . . . 10
+     3.8.  Evaluation . . . . . . . . . . . . . . . . . . . . . . . . 11
+   4.  Choosing a Communication Model . . . . . . . . . . . . . . . . 12
+     4.1.  End-to-End Communication and Intermediaries  . . . . . . . 13
+     4.2.  COAP Messaging . . . . . . . . . . . . . . . . . . . . . . 15
+       4.2.1.  Client Model . . . . . . . . . . . . . . . . . . . . . 15
+       4.2.2.  Server Model . . . . . . . . . . . . . . . . . . . . . 17
+       4.2.3.  Observer Model . . . . . . . . . . . . . . . . . . . . 18
+     4.3.  Resources and Data Formats . . . . . . . . . . . . . . . . 20
+     4.4.  Configuration  . . . . . . . . . . . . . . . . . . . . . . 21
+   5.  Security Considerations  . . . . . . . . . . . . . . . . . . . 22
+   6.  Conclusions  . . . . . . . . . . . . . . . . . . . . . . . . . 22
+   7.  References . . . . . . . . . . . . . . . . . . . . . . . . . . 23
+     7.1.  Normative References . . . . . . . . . . . . . . . . . . . 23
+     7.2.  Informative References . . . . . . . . . . . . . . . . . . 23
+   Appendix A.  Acknowledgments . . . . . . . . . . . . . . . . . . . 25
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 25
+
+
+
+
+
+
+
+
+
+
+
+
+Arkko, et al.            Expires January 5, 2012                [Page 2]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+1.  Introduction
+
+   The authors are developing COAP [I-D.ietf-core-coap] and IPv6-based
+   [RFC2460] sensor networks for home, building, and other consumer
+   environments.  These environments demand solutions where the sensors
+   are physically small, inexpensive, have long battery lifetimes, and
+   require minimal amount of management effort.  Our prototype sensor
+   implementation requires no configuration and runs a multicast-based
+   IPv6, UDP, COAP, and XML protocol stack and an application with
+   implementation size under 50 assembler instructions.
+
+   Small devices are naturally preferred in most applications, but for
+   some applications small enough size is a critical concern, for
+   instance, to make devices embedded in our clothing practical, to fit
+   within the space available in buildings or everyday objects, or to
+   ensure that the devices do not cause a visual distraction.  Another
+   key concern is device and battery lifetime.  Sufficient battery
+   lifetime in an application with a large number of devices can be
+   surprisingly long.  A home with hundred devices with ten year battery
+   lifetimes will result in a battery change operation every month.
+
+   The practical challenge is to increase battery lifetimes of small
+   devices by several orders of magnitude, and to enable pinhead size
+   devices connected to the Internet.  These are not unattainable goals,
+   as legacy sensor networking technology can in some cases reach these
+   goals.  For instance, networked 1-Wire temperature sensors are the
+   size of a packaged transistor.  Our aim is to replicate this model or
+   even improve it for IP-based sensors.
+
+   Another challenge is to ensure that COAP-based networks are
+   interoperable in a multi-vendor environment.  For instance, it is
+   important that proxies and servers can perform all the necessary
+   tasks without being programmed to support a sensor node manufactured
+   by a particular vendor, or perhaps even without being programmed to
+   support a particular class of a sensor.
+
+   This memo describes implementation experiences, open questions that
+   we have encountered, and areas where COAP makes it difficult to make
+   very low power implementations.  The memo discusses implementation
+   techniques that are useful in these environments and what is needed
+   for fully interoperable solutions based on COAP.
+
+   The goals for our work are described in Section 2.  Before we can
+   dwell into the high-level networking design choices, we highlight
+   some of the implications of detailed implementation strategies
+   through an example.  Section 3 discusses our specific implementation
+   strategies, and describes our experiences with these choices.  This
+   example is an extreme case, an attempt to minimize as much as
+
+
+
+Arkko, et al.            Expires January 5, 2012                [Page 3]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   possible for a limited set of applications.  However, some general
+   conclusions can still be seen.  The more general discussion of the
+   different high-level approaches to communications models can be found
+   in Section 4.  Different communication models supported by COAP
+   affect implementation complexity and energy consumption, far more so
+   than mere changes in message syntax.  The required configuration
+   effort is also directly affected by the choice of the communications
+   model.  Finally, the concluding recommendations point to need for
+   further work in developing COAP and its multicast and observation
+   frameworks [I-D.ietf-core-coap] [I-D.ietf-core-observe], as discussed
+   in Section 6.
+
+
+2.  Goals
+
+   The main focus of this draft is sensors that are deployed in large
+   quantities and have specific physical requirements.  There are
+   similar issues with other nodes such as servers and proxies, but in
+   general these nodes have better access to power and other resources,
+   and typically can also be more easily configured by humans.
+
+   As discussed in the introduction, for sensors the overall
+   requirements revolve around minimizing physical size, cost,
+   management effort and maximizing battery lifetimes.  More
+   specifically, we believe the following goals are key in achieving
+   fulfilling these requirements:
+
+   o  Natural support for sleeping nodes.  There are many aspects to
+      power usage in small devices, but we believe this one is the most
+      significant one in terms of minimizing power usage.  Many of the
+      other aspects are either dictated by the environment (such as
+      choice of radio technology in a given network) or have a
+      relatively small impact (small variations in message size, for
+      instance).
+
+   o  Communication models that fit the problem at hand.  It is
+      essential that the small nodes can engage in communication
+      exchanges that suit their needs.  Having to employ multiple
+      roundtrips, wait for nodes they have no control over, and so on
+      can have a large negative effect on the amount of power that the
+      node has to spend.
+
+   o  Good design from user perspective.  It is obviously undesirable to
+      require a lot of per-device configuration effort when deploying a
+      large set of small devices.  In addition, direct configuration
+      efforts with the device itself may be problematic, given that
+      there is no room for any type of a user interface.  For instance,
+      some of the legacy sensor devices in existing networks are just a
+
+
+
+Arkko, et al.            Expires January 5, 2012                [Page 4]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+      few millimeters across.  It is natural that some information needs
+      to be configured, but configuration should be minimized and
+      whatever configuration is necessary should take place in nodes
+      that have the necessary user interfaces and capabilities.
+
+
+3.  Implementing Tiny COAP-Based Sensors
+
+   We have implemented prototypes of small sensors and a sensor gateway
+   to pass the information onwards.  The main target of these
+   implementations is temperature, humidity, and other measurements in
+   home environments.  Our focus is primarily in sensing.  Actuators and
+   other more complex functions are outside the scope of our analysis.
+
+   Our prototype sensor implementation requires no configuration and
+   simply runs based on its own identity burned in the hardware.  The
+   complete functionality requires only a small amount of code.  Our
+   prototype platform uses a 32-bit processor architecture and the
+   hardware provides an underlying capability to send a link layer
+   frame.  In this platform, our implementation is under 50 assembler
+   instructions.  The implementation consists of a Ethernet, IPv6, UDP,
+   COAP, and XML protocol stack and the sensor application.  The sensor
+   application is based on values provided by an A/D converter; any
+   analog value can be measured.
+
+   Even this size of the implementation is not the absolute minimum.
+   One quarter of the code in our implementation relates to specific
+   initializations required for the A/D converter that we used.  Another
+   quarter relates to binary to decimal conversions on the chosen XML-
+   based payload.  On a different platform and with binary data, 25
+   instructions would be achievable.  Of course, with different link
+   layers and platforms an implementation might have to be arbitrarily
+   complex to support the intricacies of the link layer in question.
+
+   The following subsections outline the design choices that were taken
+   to create the small implementation we have.
+
+3.1.  Sleeping Nodes and Energy Use
+
+   As discussed earlier, choosing the right communication model is what
+   drives a good design from a power conservation perspective.
+
+   In our implementation, we chose to use a send-only model where the
+   device only sends messages, but never receives one.  This model can
+   be applied in specialized applications under some assumptions that
+   will be discussed further later in this memo.  In our case, the
+   sensor will periodically take a reading and send a COAP message to
+   the network with that reading.  In order to eliminate potential
+
+
+
+Arkko, et al.            Expires January 5, 2012                [Page 5]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   waiting periods where the device has to stay on, we needed to
+   eliminate the following:
+
+   o  DHCP request - response process [RFC2131].
+
+   o  Router Discovery process [RFC4861].
+
+   o  Duplicate Address Detection process [RFC4862].
+
+   o  Acting as a COAP server [I-D.ietf-core-coap].
+
+   o  Waiting for COAP observation subscriptions
+      [I-D.ietf-core-observe].
+
+3.2.  Address Autoconfiguration
+
+   Eliminating DHCP is easy, as we can simply use IPv6 and stateless
+   address autoconfiguration.  Eliminating router discovery is harder,
+   however.  To avoid having to wait for a Router Advertisement to carry
+   a prefix, we chose to employ a link-local source adress.  These
+   addresses can be constructed from the well-known prefix FE80::0 and a
+   link layer hardware address burned to the hardware [RFC4862].
+
+   Eliminating Duplicate Address Detection is a matter of choice.  We
+   chose to behave as if DupAddrDetectTransmits had been set to zero, in
+   other words not performing any Duplicate Address Detection.  It may
+   be debatable whether this is a violation of [RFC4862], but it is
+   certainly against its spirit.  This choice seems to be the right
+   technical action, however, on a number of grounds:
+
+   o  As the node is not receiving any packets, nor sending Neighbor
+      Advertisement messages, any effects of possible duplication would
+      be limited to some additional traffic in the network.  No other
+      traffic would be impacted.  Application-level collection of sensor
+      information can proceed even in this situation.
+
+   o  [RFC4862] requires that upon detecting a duplicated address,
+      "autoconfiguration stops and manual configuration of the interface
+      is required".  However, it is obvious that no such action is
+      possible on a small device.  The device has no user interface.
+      The only interface that the device has is the network, and if the
+      network cannot be brought up, there's very little that can be
+      done.  As a result, the ability to not stop in a duplication case
+      may actually be better than what is recommended by [RFC4862].
+
+   o  These devices are manufactured with hardware identities that are
+      expected to be unique.  There are obviously no guarantees about
+      this succeeding in all cases, but non-unique identifiers would
+
+
+
+Arkko, et al.            Expires January 5, 2012                [Page 6]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+      represent a major failure of the manufacturing process.
+
+   Elimination of Duplicate Address Detection also eliminates the need
+   for the node to implement Multicast Listener Detection (MLD) protocol
+   [RFC2710] [RFC3810].  This is because it now no longer needs to
+   listen for messages to the solicited node multicast address, so there
+   is no need to send out MLD messages.
+
+3.3.  Using Multicast
+
+   To further eliminate configuration or protocol exchanges for
+   discovery, we chose to employ a multicast model where the sensor
+   sends COAP POST requests to a well-known multicast address.  While
+   the type of sensors targeted here send information very infrequently,
+   one of our goals was to ensure that the architecture would scale to
+   more frequent information distribution and far larger groups of
+   sensors.  As a result, it was important to ensure that the multicast
+   messages do not lead to multicast storms or unnecessary waking up
+   many nodes due to frequent messages.
+
+   We chose to employ an interest-based generated multicast group
+   address.  These addresses are similar to those used in IPv6 Neighbor
+   Discovery [RFC4861] for sending messages to solicited node addresses
+   (FF02:0:0:0:0:1:FFXX:XXXX) [RFC4291].  The idea is that some bits
+   from the object of interest are reflected in the multicast address,
+   making it statistically likely that someone interested in a specific
+   object only has to receive packets relating to that object, and not
+   all packets.
+
+   We employ FF02:0:0:0:1:FEXX:XXXX, where XX:XXXX is a 6-byte value
+   representing the type of sensor.  (This address is currently reserved
+   by IANA, but could be allocated for this purpose if needed.)  The
+   sensor type represents a classification of different sensor to types.
+   For instance, we could let 00:0001 stand for temperature sensors.
+   Each temperature sensor would send information to the multicast
+   address FF02:0:0:0:1:FE00:0001, and only those devices that are
+   interested in temperature measurements would subscribe to this
+   multicast group.  Techniques such as MLD/IGMP snooping can be used in
+   the network to ensure that multicast messages are physically
+   transmitted only in those parts of the network that actually care
+   about those messages [RFC4541].  In practice, this would mean that in
+   a star topology network with a large number of sensors and a few
+   central nodes, none of the sensors would receive any messages from
+   each other.
+
+   Finally, randomization of actual transmission times for the periodic
+   transmissions ensures that transmissions from different sensors are
+   not synchronized.
+
+
+
+Arkko, et al.            Expires January 5, 2012                [Page 7]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   When sensors send multicast messages with link-local source and
+   destination addresses, all communication is confined to a single
+   network.  We expect that there is a node in the network that listens
+   to the multicast messages, collects the data from them, and is
+   capable of relaying the information to other parties.  Such a node
+   might store the latest information related to each sensor, and allow
+   other nodes in the Internet to query the latest information on a per-
+   sensor or an aggregate basis.
+
+3.4.  Using COAP
+
+   Our implementation uses non-confirmable requests at the messaging
+   layer of COAP, and sends a POST message that carries an XML payload
+   for a well-known URI.  The implementation sends a message and does
+   not wait for a message at this layer.  We have used a gateway to
+   store the information received from the sensors, making the gateway
+   act as a server, storing everything posted to it.  The stored
+   information can be fetched from the gateway, for instance, with a
+   COAP or HTTP GET.
+
+   Per Section 2.8.2 of [I-D.ietf-core-coap], POST methods normally
+   generate a response at the request/response layer.  If the server
+   sends a response, the sensor is already asleep and will not respond
+   to Neighbor Discovery messages or receive the actual message.  The
+   message is therefore lost, but it is fine in our case given that the
+   information was already stored in the server.
+
+   Reliable transmission is achieved through assuming a sufficiently
+   high periodic transmission rate to account for randomly occurring
+   message loss.
+
+   There are several areas of concern with the above arrangements,
+   discussed further in Section 3.8 and Section 4.2.
+
+3.5.  Power Usage Calculation
+
+   Our communication model is now complete.  Its effectiveness can be
+   calculated by determining what fraction of time the device would have
+   to be awake.  Lets assume periodic messages once per minute, a 10
+   Mbit/s link layer interface, and a CPU running at 1 Mhz. With the
+   given link layer, sending one message takes theoretically 100
+   microseconds.  Constructing the message takes 50 instructions and if
+   we for simplicity assume that each instruction takes two clock
+   cycles, the CPU needs to run for an additional 100 microseconds.
+   Since our device is only sending messages, it only has to wake up to
+   send the message.  Ratio of sleeping versus being awake is now 200
+   microseconds versus 60 seconds, i.e., 300.000.  Even if we assume
+   that it takes an additional 800 microseconds to power the device up
+
+
+
+Arkko, et al.            Expires January 5, 2012                [Page 8]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   and let the A/D converter stabilize, the ratio is still 1000
+   microseconds vs. 60 seconds, i.e., 60.000.
+
+   We can compare this to some other possible implementations.  A node
+   that stays awake and participates in Neighbor Discovery, Duplicate
+   Address Detection, and ARP processes would consume 60.000 times more
+   energy.  One could assume that listening is less power consuming than
+   sending, however.  On some link layers today this ratio can be as
+   high as listening consuming 2.500 time less power, though practical
+   implementations (talk vs. standby times) seem to be more in the range
+   of a 100-fold difference.  If we assume an optimistic 1.000 time
+   difference, our implementation would still consume 60 times less
+   energy than one that stays on all the time.
+
+   Another possible implementation is that a node stays awake for a
+   short period of time to listen for possible messages.  Some COAP
+   implementations do this to enable discovery and observe subscriptions
+   to work.  If we assume one second awake time during one minute, then
+   the power consumption difference to our implementation is somewhere
+   between 1.000 and 2 times, depending on whether send/receive power
+   requirements differences are factored in.
+
+   While these comparisons have produced wildly different numbers, it is
+   clear that our implementation strategy is far superior to the
+   simplistic always-on model.  The situation is less clear with the
+   comparison to the periodically listening approach, but even there it
+   is clear that not listening consumes less energy than listening.
+   While the actual numbers depend highly on the characteristics of the
+   link layer, even with the most optimistic assumptions for the
+   alternative approach it uses twice as much energy.  This may not
+   sound like a significant difference, but if it means a ten year
+   battery lifetime instead of five year battery lifetime, it can make
+   or break a business case for building some types of sensors.
+
+3.6.  Software Construction
+
+   When memory and processing power is at a premium, the detailed
+   software design approach needs to suit the platform that the software
+   runs on.  That being said, for simple send-only applications we have
+   found that a packet template-based approach works well.  In this
+   approach an image of the message sent by the application is burned
+   into the read-only memory of the device, as a part of the overall
+   software image.  When the device powers up, the message image is
+   copied to random access memory, necessary changes are applied, and
+   the underlying link layer hardware or the CPU emits it on the
+   outgoing interface bit by bit.
+
+   In case of COAP and simple sensors that output a numerical value
+
+
+
+Arkko, et al.            Expires January 5, 2012                [Page 9]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   transmitted in an XML [W3C.REC-xml-19980210] or JSON [RFC4627]
+   payload, only the following changes are applicable:
+
+   o  16-bit COAP Message ID field (see Section 3.1 in
+      [I-D.ietf-core-coap]).  This field should be set to a random
+      value, a rarely repeating value.  We have found that using a
+      suitably shifted value of a real-time clock is the most convenient
+      way to generate a good value for this field.  On many small
+      platforms, a real-time clock can be kept counting with a very
+      small amount of power.  Note that it does not matter what value
+      the real-time clock is initially initialized to; the only thing
+      that matters for the Message ID field is that it keeps changing.
+      If a sensor sends a value every minute, shifting a seconds-from-
+      epoch counter by five bit positions is a good way to generate a
+      unique value.
+
+      Note that using a different value may not actually be required,
+      though it is certainly helpful for understanding network traces
+      and debugging.  According to Section 4.1 of [I-D.ietf-core-coap],
+      Message IDs only have to be unique within RESPONSE_TIMEOUT *
+      RESPONSE_RANDOM_FACTOR * (2 ^ MAX_RETRANSMIT - 1) or 45 seconds,
+      so a sensor sending messages every minute would be allowed to send
+      them with the same Message ID.
+
+   o  The actual sensor reading.  In both XML and JSON, values can be
+      padded with leading zeros or spaces, so the overall size of the
+      packet can be kept the same in all circumstances.  This greatly
+      simplifies the construction of the packet.
+
+      Note that binary or hexadecimal formats would make this even
+      simpler, but the savings are in the order of few instructions; the
+      difference is not big.  Of course, a message that carries a text
+      is longer than a pure binary message.  However, the format is not
+      so important as is avoiding including a lot of extraneous
+      information.  Some XML schemas can be problematic.  We advocate
+      simplicity and restraint in XML schema design for sensor data.
+
+   o  16-bit UDP checksum field.  For computing this field, see
+      Section 3.7.
+
+   Note this small set of changes is only applicable when it can be
+   assumed that both source and destination IP addresses are known
+   beforehand.
+
+3.7.  UDP Checksums
+
+   Both IPv4 and IPv6 have some form of mandatory checksums, either in
+   the IP header (IPv4) or as part of upper layer protocols such as UDP
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 10]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   (IPv6).  Computing the checksum is not difficult, but requires
+   looping through all the 16-bit words in a packet.  Fortunately, for a
+   simple application the checksum calculation is actually very simple.
+   Following the algorithm in [RFC1624], there is no need to calculate
+   the checksum for the entire packet.  The checksum can be precomputed
+   on the packet template with zero words filled in for the variable
+   parts.  Lets call this precomputed checksum value C. Let NC be its
+   negation, i.e.,
+
+     NC = ~C
+
+   Once the actual values are filled in the packet, the true checksum C'
+   needs to be calculated as follows:
+
+     T = NC + W1 + W2 + ... + Wn
+     C' = ~(T + (T >> 16))
+
+   where T is a temporary variable and Wi, i = 0, 1, ..., n are the
+   words that got changed from the template.  Naturally, this approach
+   makes sense only when the number of changed words is small.  We have
+   found that suitable placement of spaces and string values in an XML
+   object, for instance, is helpful in aligning the changed parts to
+   word boundaries, and in sensor implementations n = 3.
+
+3.8.  Evaluation
+
+   This type of an implementation is obviously an extreme example.  This
+   level of optimization may not be needed in all cases.  Nevertheless,
+   it is interesting to see that COAP can be used in such small
+   implementations.
+
+   In general, our implementation satisfies the requirements set for the
+   special environment that it was designed for: power usage is
+   minimized, individual sensor devices do not require configuration,
+   existing legacy networks can migrate to general-purpose IP-based
+   networks, and all the necessary information can be passed in the
+   messages.
+
+   That being said, there are also some issues with this implementation
+   approach.  The first issue is that information delivery frequency is
+   hardwired into the sensors.  The chosen frequency may be sufficient
+   for a given application, but the same sensors cannot be used by
+   another application that would require a faster delivery of
+   measurements.
+
+   Related but more serious concern is that reliability is achieved
+   through randomized message intervals and multiple transmissions; it
+   is considered unlikely that a very large number of messages in
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 11]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   sequence are lost from the same sensor.  The message transmission
+   frequency needs to be set high enough to accommodate some packet
+   loss.  There is no way to actively request retransmission.  We
+   believe that this is a small problem in well-designed networks and
+   for most applications that are not real-time critical, such as home,
+   weather, maintenance, and energy monitoring.  However, this approach
+   may not be suitable for real-time or safety-critical applications.
+
+   The third and obvious limitation is that there is an assumption of a
+   network node in the same network that is capable of storing
+   information.  We believe that there is little that can be done about
+   this assumption; it is fundamental for the nature of low-power
+   devices that they have to be able to sleep periodically, and there
+   are very few other options beyond implementing a time-shifting device
+   such as a cache.  The location of the cache node could be outside the
+   sensor network in some other designs, however.
+
+
+4.  Choosing a Communication Model
+
+   COAP is a specialized web transfer protocol designed to be used in
+   various ways.  The communication model of COAP is flexible and the
+   application developer has to decide the best way to use it.  This
+   involves
+
+   o  deciding which parties are in server/client roles,
+
+   o  determining whether to use end-to-end communication or employ
+      intermediary nodes,
+
+   o  deciding whether to use base COAP operations or the observation
+      framework,
+
+   o  deciding whether a discovery process is required,
+
+   o  specifying how COAP maps to lower layers, including choice of
+      source and destination addresses, and
+
+   o  agreeing about commonly understood methods, resource identifiers
+      and data representation.
+
+   Note that the number of these choices alone makes it hard to achieve
+   interoperability, as we should strive for application
+   interoperability at the semantic level [arkko.iab], rather than mere
+   ability to transport correctly formed COAP packets.
+
+   Nevertheless, the main focus of this memo is to determine the power
+   efficiency implications for the different communications models, and
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 12]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   to identify areas where COAP limits this efficiency.  The rest of
+   this section is structured as follows.  Section 4.1 discusses which
+   nodes are involved.  Section 4.2 discusses the specific COAP
+   messaging alternatives.  Section 4.3 discusses resources and data
+   formats.  Section 4.4 discusses configuration issues.
+
+4.1.  End-to-End Communication and Intermediaries
+
+   In most applications, user interactions and information requests can
+   come at any time.  Some form of an intermediary that can buffer such
+   requests between a possibly sleeping device and the end user seems
+   therefore useful to provide "time-shifting" capability.  Similarly,
+   an intermediary can be useful to reduce the number of transactions
+   that one has to do with the low-power device to a minimum; the
+   intermediary can answer on behalf of the device should a large number
+   of information requests be placed.
+
+   In its simplest form, the intermediary is a part of the application
+   server.  For instance, a web-based application server is capable of
+   serving web clients at any time, but will only place a periodic
+   request to the sensor in order to take a reading.  There are
+   virtually no downsides to this arrangement, and it is generally
+   recommended practice.
+
+   What is perhaps more controversial and interesting is the placement
+   of intermediaries elsewhere, such as requiring an intermediary in the
+   same network as the sensor devices are in.  In our example
+   implementation, such an intermediary was used for both time-shifting
+   purposes and to bridge the gap between addressing domains, as the
+   sensor was only capable of sending messages to nearby devices with
+   link-local multicast addressing.  For obvious reasons, sending
+   traffic to well-known multicast groups works only on the local scale.
+   Other possible reasons for using a local intermediary include
+   protocol conversion and providing TCP-based congestion control for
+   traffic passing through the Internet.  Where mechanisms for dealing
+   with packet loss are limited, such as in the case of our
+   implementation, an intermediary can also shield the sensors from
+   having to deal with networks that have not been engineered for this
+   purpose.
+
+   There are also downsides to having to place a local intermediary.
+   The obvious downside is that such a device must now exist in the
+   local network.
+
+   The use of COAP intermediaries is not fully specified, however.  Some
+   of the issues we have encountered include:
+
+
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 13]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   o  COAP defines the roles for clients, servers, caches, and proxies,
+      but while the specification allows an intermediary to act as
+      server that stores all information sent to it, it is by no means
+      specified as something that all implementations should do.  The
+      desirable behavior from the point of low-power sensors would be
+      that the local server would store the information from every POST
+      sent to it for a period of time specified in the Max-Age option
+      [I-D.ietf-core-coap], and then be able provide access to the
+      information using GET and HTTP/COAP.  It would be useful to define
+      such a new server role, along with specifying the necessary
+      security and operational conditions for this practice.
+
+   o  If designed badly, the intermediary may also limit the type of
+      communications it can relay.  For instance, a gateway that is only
+      built for a particular types of sensors might only accept very
+      specific COAP messages.  In particular, intermediaries need to
+      support any type of resource identifiers and data formats.
+      Further discussion of this can be found in Section 4.3.
+
+   o  In several CoAP applications the user is interested in the latest
+      value of a resource, but historical values are also interesting in
+      several use cases, e.g. tracking the movements of a truck during
+      the day.  Thus, the information stored in the cache/gateway should
+      not expire.  Even if a new value is received every minute, old
+      values should be accessible and new value should not overwrite the
+      old value.  For this kind of cases, schemas for representing also
+      historical values of the sensor would be useful for
+      interoperability.  Of course, simple schemas are easy to implement
+      even if there did not exist any standards or recommendations, but
+      again, there will not be interoperability.
+
+   o  If the information is such that it should expire after some time,
+      Max-Age option can be used as defined [I-D.ietf-core-coap].
+      However, [I-D.ietf-core-coap] discusses Max-Age option only in the
+      context of responses.  In the multicast use case (sensor the one
+      sending requests), Max-Age option would be needed to be supported
+      in requests, too.
+
+   o  Multicast requests, particiularly GETs, might be forwarded by
+      several proxies and possibly even to further multicast addresses,
+      causing a storm of messages.  The COAP specification does not
+      describe when the forwarding of multicast requests is appropriate
+      and when it is not.
+
+
+
+
+
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 14]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+4.2.  COAP Messaging
+
+   The interaction model of COAP is similar to the client/server model
+   in HTTP.  A sensor can act either as a client that sends requests
+   containing updated measurement information to a server, or as a
+   server that responds to requests from others.  If the sensor is a
+   server, it can either employ the basic communication model from
+   [I-D.ietf-core-coap] or use the observation framework
+   [I-D.ietf-core-observe].  This section looks at the energy efficiency
+   implications of these models.
+
+   It is important to make this analysis not merely based on the data
+   transmission phase, but also based on what discovery actions and
+   related signaling may be necessary.
+
+4.2.1.  Client Model
+
+   In this model, a sensor acts as a client that periodically sends POST
+   requests containing updated measurement information to a server.
+   This is the model that we used in our example implementation.
+
+
+      User or                Sensor
+    Intermediary            (Client)
+      (Server)                 .
+         |                     .
+         |                     .
+         |                  wake-up
+         |                     |
+         |     NON/POST        |
+         |     content         |
+         +<--------------------|
+         |                     |
+         |                power-down
+         |                     .
+         |     NON/RSP         .
+         |----------------/    .
+         |                     .
+
+    Figure 1. Send-only client model
+
+   In its simplest form, this model can be reduced to sending a single
+   message per observation period, however this comes at the cost of:
+
+   o  Limited support for reliable transmission.  Messages may arrive
+      out of order and they may go missing without notice.  While
+      periodic retransmissions do provide a statistical likelihood that
+      the transmission eventually succeeds, they do not guarantee it.
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 15]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   o  Possible spurious diagnostic or other problems caused by not being
+      able to receive the REST level response to the POST message that
+      the server will send (see Section 3.4).
+
+   Both of these problems can be addressed by forcing the device to wait
+   for a response, incurring the cost of having to be awake for 1 RTT
+   for each observation period.  Using the assumptions from Section 3.5
+   and a 2 ms RTT for a local intermediary to respond, the power usage
+   of this model would be either two times more or 0.2% more, depending,
+   again, on whether the send/receive power differences are factored in.
+
+
+      User or                Sensor
+    Intermediary            (Client)
+      (Server)                 .
+         |                     .
+         |                     .
+         |                  wake-up
+         |                     |
+         |     CON/POST        |
+         |     content         |
+         +<--------------------|
+         |                     |
+         |     ACK/RSP         |
+         |-------------------->|
+         |                     |
+         |                power-down
+         |                     .
+         |                     .
+
+   Figure 2. Send-and-confirm client model
+
+   (Interestingly, a similar model could be implemented even with HTTP.
+   With TCP, one additional roundtrip and one additional message would
+   be necessary to start the communications.  This model would be
+   roughly twice as power hungry as the COAP alternative.  Note at least
+   in the implementation strategy that was used in our example
+   implementation, the format differences between COAP and HTTP would
+   make little difference for implementation complexity, as messages are
+   created based on pre-filled packet templates.  Supporting TCP would
+   require some complexity, however.)
+
+   In addition, there is an added factor, having to discover the right
+   peer to send messages to.  In our example implementation this was
+   simply a well-known multicast address, in which case no additional
+   power is spent.  The downside is that this can easily be done only
+   with local multicast, necessitating the existence of suitable
+   intermediary in the same network.  Alternatively, the sensor could
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 16]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   run a discovery phase at installation time to find the addresses of
+   the peers wishing to receive the information.  This discovery would
+   have to repeated in order to account for changes and new equipment.
+   Nevertheless, if discovery is run once a day and uses the same amount
+   of power as sending one data observation, the increased power
+   requirements are in the order of 0.1%, i.e., negligible.
+
+4.2.2.  Server Model
+
+   In the basic server model as defined in [I-D.ietf-core-coap], the
+   sensor waits for requests from a client.  The power requirements for
+   this model have been analyzed in Section 3.5 and are substantially
+   higher than in any other model, even if one takes into account that
+   listening is less power intensive than sending.
+
+
+      User or                Sensor
+    Intermediary            (Server)
+      (Client)
+         |                     |
+         |     CON/GET         |
+         +-------------------->|
+         |                     |
+         |     ACK/RSP         |
+         |     content         |
+         |<--------------------+
+         |                     |
+
+         Figure 3. Server model.
+
+   There may be an additional discovery exchange where the sensor
+   responds to requests sent for the well-known resources defined in
+   [I-D.ietf-core-link-format].  However, these additional exchanges do
+   not change power requirements significantly, as the sensor already
+   has to be awake at all times.  A more relevant concern is perhaps
+   unwanted or accidental traffic to the sensor or one of the multicast
+   addresses it belongs to (such as all-nodes [RFC4291]).  Such traffic
+   may have to be replied to or ICMP error messages may have to be sent,
+   consuming additional energy.
+
+   The server model is not recommended.  Variations of the model may be
+   a little bit more efficient, however.  For instance, a local server
+   could send multiple requests in an effort to randomly hit a period
+   when the sensor is powered up.  However, such practices would still
+   generate a lot of traffic in the network, which might not be
+   desirable.  For instance, if the network involves low-powered RPL
+   routers [I-D.ietf-roll-rpl], extra traffic would be harmful.
+
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 17]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+4.2.3.  Observer Model
+
+   The observer model [I-D.ietf-core-observe] allows clients to decide
+   what information they want and servers to decide when to send that
+   information.  The model involves an initial registration, followed by
+   the server sending periodic notifications.  These notifications can
+   be timed appropriately, so that the sensor only needs to wake up at
+   suitable times.
+
+
+      User or                  Sensor
+    Intermediary              (Server)
+      (Client)
+         |                       |
+         |  NON/GET              |
+         |  observe registration |
+         +---------------------->|
+         |                       |
+         |                  power-down
+         |                       .
+         |                       .
+         |                       .
+         |  NON/RSP           wake-up
+         |  content              |
+         |<----------------------+
+         |                       |
+         |                  power-down
+         |                       .
+         |                       .
+         |                       .
+         |  NON/RSP           wake-up
+         |  content              |
+         |<----------------------+
+         |                       |
+         |                  power-down
+         |                       .
+         |                       .
+
+        Figure 4. Observer model.
+
+   On the face of it, this is a very efficient model.  Unfortunately,
+   one has to take into account the registration phase.  For this model
+   to work, the sensor has to first be able to receive a registration
+   request, and later be able to receive further requests in case there
+   are changes or additional clients that want information.  As a
+   result, a straightforward implementation of the observe framework
+   would appear to save no energy at all compared to the server model.
+   The sensor would still have to stay awake all the time.  Again, this
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 18]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   model is not recommended.
+
+   Optimizations of the observer model are of course possible.
+   Transmitting multiple registration requests is less damaging than
+   transmitting multiple data requests, as the registration is only a
+   one-time event.  Nevertheless, for interoperability, it would be
+   useful to understand what timelines and retransmission counts should
+   be followed by both servers and clients.  For instance, a sensor
+   could assume that it has to be up one second out of every minute.
+   This would increase power consumption compared to the send-only model
+   as described in Section 3.5.  Users or intermediaries interested in
+   subscribing to the information from the sensor would on the average
+   have to re-transmit registration requests thirty times to randomly
+   hit the period that a particular sensor is awake.
+
+   Another possible optimization would be the definition of implicit
+   subscriptions where for some application a certain subscription would
+   always be assumed so that a sensor can start sending periodic
+   notifications immediately to a well-known address.  With such a model
+   the notifications are carried as responses and an intermediary can
+   act as a COAP cache, avoiding most of the issues from the above
+   paragraphs.
+
+   In addition, we have found a few more specific issues with the
+   observer model:
+
+   o  There is no well-defined termination period.  The consumer of the
+      information can observe that information is still flowing to it as
+      expected.  However, when non-confirmable messages are used, the
+      sensor sending the notifications has no knowledge if the receiver
+      is still even in the network.  As a result, a simple
+      implementation that keeps sending information until an explicit
+      unsubscription is not desirable, as the sensor may have to send
+      more messages than is necessary.
+
+   o  Section 3.2 of [I-D.ietf-core-observe] specifies that a
+      registration request from the same source address but a different
+      port is considered a new, additional request.  This can be
+      problematic if the client reboots and assigns a different port
+      number for its communication with the server.
+
+   o  Section 3.3 of [I-D.ietf-core-observe] makes it optional for a
+      server to terminate the observation request when a GET request is
+      sent without the Observe option.  This makes it hard for a client
+      to indicate to the server that it is no longer interested in the
+      resource.
+
+
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 19]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   o  Section 3.3 of [I-D.ietf-core-observe] specifies that a
+      subscription can be terminated using a RST message.  This makes it
+      impossible to know if the receiver rejects a confirmable
+      notification because some context was missing or because the
+      receiver wants to terminate the subscription.
+
+4.3.  Resources and Data Formats
+
+   The choice of resource identifiers (URIs) and data formats is
+   important to achieve semantic interoperability between a sensor and
+   an application using it.  It is not enough to transport some data for
+   some object, the parties involved in the application have to
+   understand that the information comes from, say, a particular
+   temperature sensor and that the information contains a temperature
+   value encoded in a particular way.
+
+   The choice of URIs is clear as far as COAP transport is concerned in
+   the server model.  Here the Link Format [I-D.ietf-core-link-format]
+   can be used by clients to find out what URIs exist.  Nevertheless,
+   there are two remaining concerns:
+
+   o  The authors of this memo found it desirable to implement a new URI
+      type to represent device identities, such as MAC addresses or
+      1-wire device identifiers.  While UUIDs [RFC4122] can also be used
+      for this purpose, they are more complex for no additional value
+      from the point of view of our application.  UUIDs are required to
+      contain a time component, which would cause both additional
+      implementation complexity, as well as make it more difficult to
+      correlate identifiers from a manufacturer's list or printed on the
+      outside of the sensor to the ones actually sent in the network.
+      (Such correlation is often required in order to configure the
+      real-world location of various sensors.).  The new URI type is
+      simply of the form "device:ID", where ID is the hardware address
+      associated with the device.  Such an URI could have uses not only
+      in sensor networks, but also in cataloging network equipment, etc.
+
+   o  While the Link Format provides a way to determine what resources
+      exist, the semantics of those resources and data formats still
+      require standardization.  Some work regarding such standardization
+      is ongoing, e.g. in ZigBee IP Smart Energy 2.0 Profile, but it
+      remains to be seen how much work is needed overall.  This problem
+      might become even more real when sensors from particular
+      application areas, such as electrical cars or lightning, are being
+      implemented.  Without any common schemas or data models no
+      interoperability can be provided.
+
+   o  It is also important to care about the size and complexity of the
+      data models developed for low-power applications.  Even if moving
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 20]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+      from HTTP to COAP and some form of compression saves some number
+      of bytes, complicated XML models can easily consume the savings
+      and more.  The authors have found [I-D.jennings-senml] a workable,
+      simple model.
+
+   In addition, in the client model it becomes important that the server
+   (local intermediary) is capable of storing information about any
+   resource when it receives a POST request.  This is not necessarily
+   the case.  First, it is unclear what resource identifiers the client
+   should use, particularly when multicast is used.  Our example
+   implementation employed a well-known URI "/publish" and placed the
+   identity of the device sending the request inside the payload part of
+   the request along with the sensor readings.  But it is not clear that
+   this is the best approach, and furthermore, such an approach has not
+   been standardized so it may not work with all devices.  As an
+   example, in one of the COAP stacks that we tried, it is only possible
+   to generate resources by a user under a root resource called
+   "storage".  This requirement makes it incompatible with other
+   implementations we tried.
+
+4.4.  Configuration
+
+   One overriding concern in networks with large number of sensors is
+   configuration effort.  In addition, the sensors are typically
+   deployed in homes and other environments where the necessary skills
+   for installation and operational tasks cannot be assumed.  As a
+   result, it is important that at installation of individual sensors
+   leads to little or no configuration effort.  Furthermore, given the
+   small physical size and lack of user interfaces, it is essential that
+   any configuration be doable on other devices on behalf of the
+   sensors.
+
+   A good model for configuration is that the sensors are fully factory-
+   configured with respect to their identities and capable of operating
+   autonomously in any IP network with suitable network interfaces.
+   Typically, some configuration information is required but this can be
+   provided as additional information associated with a particular
+   sensor identity, and configured in the application server or
+   intermediary.  For instance, the physical location of a sensor can be
+   configured in this manner.
+
+   From the point of view of the COAP protocol and its communication
+   model, this means that the sensors should operate as much as possible
+   based on autoconfigured addresses, well-known destinations and/or
+   resource discovery [I-D.ietf-core-link-format]
+   [I-D.shelby-core-resource-directory].  COAP should also allow
+   configuration and passing of additional information in
+   intermediaries.
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 21]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+5.  Security Considerations
+
+   Support for authentication of sensors, integrity of messages sent by
+   sensors, or protection of the data objects carried by the messages
+   would be useful in some environments, while physical security and
+   link-layer protection may be sufficient in others.  Mechanisms for
+   these security mechanisms are for further study.
+
+
+6.  Conclusions
+
+   This memo has analyzed the power requirements for sensor applications
+   through an example implementation that runs on absolute minimum power
+   and through an analysis of various different more general
+   communications models.
+
+   The general conclusion is that the chosen communications model and
+   overall system and network architecture is far more important for low
+   power usage than details of the message formats.  Much of the work in
+   COAP has focused on the latter rather than the former.  Even the
+   difference between COAP and HTTP transactions is small compared to
+   the difference between choosing the optimal and worst communications
+   model.
+
+   In particular, we would like to draw attention to system-level
+   analysis to ensure that nodes can stay asleep for as long as
+   necessary.  This is particularly important when designing power-
+   efficient data transmission models such as the observe framework.  It
+   is not enough for the data transmission itself to be efficient if the
+   device needs to stay awake or communicate for other reasons
+   (Section 4.2.3).  Several other more detailed observations about the
+   COAP specifications were also noted in Section 3.3, Section 4.1,
+   Section 4.2, Section 4.3, and Section 4.4.
+
+   The communication model is also not just about finding the most
+   efficient sequence of messages.  It is very much also an
+   architectural decision.  The authors believe that an information-
+   centric or delay-tolerant networking model is appropriate for
+   collecting information from sensor networks.  These models allow
+   communications based on identities, support intermittent
+   connectivity, focus on data rather than the location of the data, and
+   have the natural ability for nodes to aggregate, store, and process
+   data.  Some of the tasks for ensuring that such models can be
+   employed with COAP include
+
+   o  Definition of URI types suitable to be used in sensor networks.
+
+
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 22]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   o  Accurate specification of multicast support.
+
+   o  Specifications for intermediary behavior so that they can store
+      and process data from sensors.
+
+   o  Further standardization of data formats and application semantics.
+
+   Finally, it should be noted that the conclusions in this memo should
+   not be interpreted to apply too widely.  Actuators and other, non-
+   sensor low-power device implementations have likely very different
+   requirements and may require different solutions.
+
+
+7.  References
+
+7.1.  Normative References
+
+   [I-D.ietf-core-coap]
+              Shelby, Z., Hartke, K., Bormann, C., and B. Frank,
+              "Constrained Application Protocol (CoAP)",
+              draft-ietf-core-coap-06 (work in progress), May 2011.
+
+   [I-D.ietf-core-link-format]
+              Shelby, Z., "CoRE Link Format",
+              draft-ietf-core-link-format-05 (work in progress),
+              May 2011.
+
+   [I-D.ietf-core-observe]
+              Hartke, K. and Z. Shelby, "Observing Resources in CoAP",
+              draft-ietf-core-observe-02 (work in progress), March 2011.
+
+   [RFC1624]  Rijsinghani, A., "Computation of the Internet Checksum via
+              Incremental Update", RFC 1624, May 1994.
+
+   [RFC2460]  Deering, S. and R. Hinden, "Internet Protocol, Version 6
+              (IPv6) Specification", RFC 2460, December 1998.
+
+   [RFC4291]  Hinden, R. and S. Deering, "IP Version 6 Addressing
+              Architecture", RFC 4291, February 2006.
+
+7.2.  Informative References
+
+   [RFC2131]  Droms, R., "Dynamic Host Configuration Protocol",
+              RFC 2131, March 1997.
+
+   [RFC2710]  Deering, S., Fenner, W., and B. Haberman, "Multicast
+              Listener Discovery (MLD) for IPv6", RFC 2710,
+              October 1999.
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 23]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   [RFC3810]  Vida, R. and L. Costa, "Multicast Listener Discovery
+              Version 2 (MLDv2) for IPv6", RFC 3810, June 2004.
+
+   [RFC4122]  Leach, P., Mealling, M., and R. Salz, "A Universally
+              Unique IDentifier (UUID) URN Namespace", RFC 4122,
+              July 2005.
+
+   [RFC4541]  Christensen, M., Kimball, K., and F. Solensky,
+              "Considerations for Internet Group Management Protocol
+              (IGMP) and Multicast Listener Discovery (MLD) Snooping
+              Switches", RFC 4541, May 2006.
+
+   [RFC4627]  Crockford, D., "The application/json Media Type for
+              JavaScript Object Notation (JSON)", RFC 4627, July 2006.
+
+   [RFC4861]  Narten, T., Nordmark, E., Simpson, W., and H. Soliman,
+              "Neighbor Discovery for IP version 6 (IPv6)", RFC 4861,
+              September 2007.
+
+   [RFC4862]  Thomson, S., Narten, T., and T. Jinmei, "IPv6 Stateless
+              Address Autoconfiguration", RFC 4862, September 2007.
+
+   [W3C.REC-xml-19980210]
+              Sperberg-McQueen, C., Bray, T., and J. Paoli, "XML 1.0
+              Recommendation", World Wide Web Consortium
+              FirstEdition REC-xml-19980210, February 1998,
+              <http://www.w3.org/TR/1998/REC-xml-19980210>.
+
+   [I-D.shelby-core-resource-directory]
+              Shelby, Z. and S. Krco, "CoRE Resource Directory",
+              draft-shelby-core-resource-directory-00 (work in
+              progress), June 2011.
+
+   [I-D.ietf-roll-rpl]
+              Winter, T., Thubert, P., Brandt, A., Clausen, T., Hui, J.,
+              Kelsey, R., Levis, P., Pister, K., Struik, R., and J.
+              Vasseur, "RPL: IPv6 Routing Protocol for Low power and
+              Lossy Networks", draft-ietf-roll-rpl-19 (work in
+              progress), March 2011.
+
+   [I-D.jennings-senml]
+              Jennings, C., "Media Type for Sensor Markup Language
+              (SENML)", draft-jennings-senml-05 (work in progress),
+              March 2011.
+
+   [arkko.iab]
+              Arkko, J., "Interoperability Concerns in the Internet of
+              Things", Position paper at the IAB workshop on Smart
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 24]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+              Objects , March 2011, <http://www.arkko.com/publications/
+              IAB-IOT-WS-Interoperability.pdf>.
+
+
+Appendix A.  Acknowledgments
+
+   The authors would like to thank to Magnus Westerlund, Ari Keranen,
+   Stig Venaas, Zach Shelby, Cullen Jennings, Vlasios Tsiatsis, Jan
+   Holler, Anders Eriksson, and Joel Halpern for their help and for
+   interesting discussions in this problem space.
+
+
+Authors' Addresses
+
+   Jari Arkko
+   Ericsson
+   Jorvas  02420
+   Finland
+
+   Email: jari.arkko@piuha.net
+
+
+   Heidi-Maria Rissanen
+   Ericsson
+   Jorvas  02420
+   Finland
+
+   Email: heidi-maria.rissanen@ericsson.com
+
+
+   Salvatore Loreto
+   Ericsson
+   Jorvas  02420
+   Finland
+
+   Email: salvatore.loreto@ericsson.com
+
+
+   Zoltan Turanyi
+   Ericsson
+   Irinyi Jozsef u. 4-20.
+   Budabest
+   Hungary
+
+   Email: zoltan.turanyi@ericsson.com
+
+
+
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 25]
+
+Internet-Draft              Tiny COAP Sensors                  July 2011
+
+
+   Oscar Novo
+   Ericsson
+   Jorvas  02420
+   Finland
+
+   Email: oscar.novo@ericsson.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Arkko, et al.            Expires January 5, 2012               [Page 26]
+

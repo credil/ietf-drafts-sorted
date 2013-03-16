@@ -1,0 +1,531 @@
+Network Working Group                                      J. Sigurdsson
+Internet-Draft                                                    Google
+Intended status: Standards Track                            October 2011
+Expires: April 6, 2012
+
+          Anti-DDoS Throttling of HTTP Requests by User-Agent
+             draft-sigurdsson-anti-ddos-http-throttling-00
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on April 6, 2012.
+
+Copyright Notice
+
+   Copyright (c) 2011 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document. Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+Abstract
+
+   Describes a throttling mechanism User-Agents can implement that
+   limits the ability of websites and browser extensions to perpetrate a
+   DDoS (Distributed Denial of Service) attack.
+
+
+
+
+
+
+
+
+
+
+
+
+Sigurdsson                Expires April 6, 2012                 [Page 1]
+
+Internet-Draft            Anti-DDoS Throttling              October 2011
+
+1. Introduction
+
+   This Internet-Draft specifies an anti-DDoS mechanism that can be
+   built into the HTTP stack of User-Agents and is intended to limit the
+   impact of DDoS attacks perpetrated by web pages or browser
+   extensions.
+
+   The anti-DDoS mechanism is primarily to make the User-Agent throttle
+   requests based on randomized exponential backoff when a web server
+   sends status codes that indicate overload. This causes the aggregate
+   traffic from a multitude of User-Agents that have this mechanism to
+   decrease to a level the web server can sustain. Additionally, we have
+   implemented a couple of custom HTTP response headers that help
+   servers further control their traffic. The goal is to provide DDoS
+   protection for all web servers on the Internet without requiring them
+   to be modified in any way, but allowing for better DDoS prevention
+   and traffic management for web servers that are aware of the anti-
+   DDoS mechanism.
+
+   In an existing implementation, discrete time simulation was used to
+   validate the approach before rolling out experiments to a user
+   population. Those experiments confirmed our beliefs about how the
+   approach would behave in the wild. At the time of writing, the
+   approach is live for a large user population without issues.
+
+2. Requirement Levels
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC 2119.
+
+3. Background
+
+   The rationale for adding an anti-DDoS mechanism to the HTTP stack
+   goes something like this:
+
+   a) DDoS attacks have become common.
+
+   b) More and more application software (e.g. HTML5 applications) is
+      being written using HTTP as its lingua franca, the only networking
+      protocol available to browser-based applications without
+      requesting non-default privileges.
+
+   c) Web-only computing devices have started to appear, and it.s
+      reasonable to expect that low-level networking will be completely
+      unavailable to application software on an increasing number of
+      devices, and therefore less available to malicious attackers.
+
+   d) Since only the User-Agent and not the application software running
+      on top of it can affect how the HTTP stack is implemented,
+      building anti-DDoS behaviors into the User-Agent makes sense.
+
+   Intentional, malicious attacks are often discussed. Another type of
+   attack that we want to protect against, that may be becoming more
+
+Sigurdsson                Expires April 6, 2012                 [Page 3]
+
+Internet-Draft            Anti-DDoS Throttling              October 2011
+
+   frequent, is the unintentional DDoS attack. Consider for example a
+   hypothetical web site A using Cross-Origin Resource Sharing (CORS) to
+   communicate with web site B. Now imagine that a new version of web
+   site A is rolled out, which accidentally increases the frequency of
+   requests to site B from once every 5 minutes to once every 5 seconds.
+   Assuming that site A has a non-trivial number of users compared to
+   site B, what you could have on your hands is an unintentional DDoS
+   attack, one where you may not want to completely block the attackers
+   but rather rate-limit them.
+
+   Other potential attackers in this kind of scenario could be popular
+   browser extensions that are updated to a version with a similar bug,
+   or your own website making AJAX requests to itself. The Anti-DDoS
+   mechanism we describe in this RFC can help deal with these
+   unintentional attacks in addition to malicious attacks.
+
+   It should be noted that DDoS attacks by software not running on top
+   of a User-Agent are not affected by this mechanism; native software
+   or other application software with low-level network access could
+   always bypass any mechanisms put in place by the User-Agent. However,
+   reducing the number of possibilities an attacker has is still a
+   defense in depth in the worst case.
+
+4. Overview of Anti-DDoS Throttling Mechanism
+
+   The anti-DDoS mechanism described here has these basic components:
+
+   o It observes HTTP response codes on a per throttling target basis. A
+     throttling target is demarcated as a URL minus its query
+     parameters.
+
+   o Once a few HTTP response codes in a row for a given throttling
+     target have indicated that the web server is too busy (e.g. a 503
+     response), block off an exponentially increasing (with some
+     randomization) "no contact" period for this throttling target.
+
+   o Disallow further requests made for the throttling target during the
+     "no contact" period.
+
+   o Use exponential backoff parameters that are fairly conservative, so
+     as not to block contact with a web server for too long, but at the
+     same time are proven to reduce traffic to an overloaded web server
+     quite quickly.
+
+   Backing off exponentially, with some randomization to avoid large
+   numbers of clients retrying at the same time, causes the aggregate
+   traffic of clients to fairly quickly decrease to the threshold where
+   the web server is not overloaded, or only slightly overloaded, and so
+   is able to mostly stop responding with 5xx status codes. This is easy
+   to demonstrate through simulation. However, it is important that a
+   large percentage of clients perform exponential backoff, and for this
+   reason we hope that other browser projects will adopt the mechanism.
+
+
+
+Sigurdsson                Expires April 6, 2012                 [Page 4]
+
+Internet-Draft            Anti-DDoS Throttling              October 2011
+
+   In addition to exponential backoff, there are various behaviors that
+   make this mechanism less likely to cause false positives for web
+   developers, less likely to block requests explicitly made by a user,
+   provide more control to web servers that are aware of the mechanism,
+   and provide better DDoS prevention in the face of a malicious attack:
+
+   o Requests to localhost are never blocked.
+
+   o Requests are not blocked if they occur in the first 3.5 seconds
+     after an explicit user gesture, i.e. clicking with the mouse or
+     typing on the keyboard and thereby causing input to a web page. In
+     a DDoS situation, this will tend to let some malicious requests
+     through, but this should be worth it to favor actual user actions.
+     The percentage of time malicious requests would go through would be
+     0% of the time the user is not using the browser, and some
+     percentage considerably less than 100% of the time the user is
+     active.
+
+   o An HTTP response header lets web servers opt out of the anti-DDoS
+     mechanism. The name and value for this header is "Exponential-
+     Throttling: disable" and its effect is to opt out the host the
+     request was sent to. The opt-out must last for the remainder of the
+     browsing session, but multiple opt-outs must be idempotent.
+
+   o The "Retry-After" response header gets slightly different
+     semantics, in that it can now be used for any status code, not just
+     a 503 status code, e.g. on a 200 success response. It could
+     therefore be used e.g. to optimize AJAX applications, where the
+     client by default pings the server very frequently, and the server
+     then controls the actual rate of pings by using this header.
+
+   o An HTTP response header is provided that lets the web server
+     indicate how to bucket the current throttling target in the anti-
+     DDoS mechanism. By default, the mechanism observes HTTP response
+     codes on a per throttling target basis, i.e. by looking at the URL
+     being requested, minus the query parameters. This header could be
+     used by the web server to state that all URLs on the server
+     starting with a given path (the current response being a match for
+     this path) should be observed and blocked together as a single
+     throttling target. The header name is "DDoS-Bucket-With" and the
+     value is the same format as the value of the path=foo part of a
+     Set-Cookie response header. The header need only be set on
+     responses that may be considered an indication of a DDoS attack,
+     e.g. 500, 503 and 509 responses.
+
+   It should be noted that even with the anti-DDoS mechanism in place, a
+   malicious DDoS attack could be perpetrated on a web server not using
+   the "DDoS-Bucket-With" header, since the malicious attack could craft
+   multiple URLs that each are considered a new throttling target. This
+   could have been avoided by using the hostname and port number as the
+   throttling target, rather than the URL minus query parameters, but
+   this would have made it hard to roll the mechanism out to the entire
+   web without opt-in, as there are many web servers that operate many
+   different independent sites or services off the same host name. As it
+
+Sigurdsson                Expires April 6, 2012                 [Page 5]
+
+Internet-Draft            Anti-DDoS Throttling              October 2011
+
+   stands, without opt-in, some malicious attacks and all or most non-
+   malicious (unintentional) attacks are mitigated, and with opt-in via
+   the "DDoS-Bucket-With" header, all are mitigated. Future research may
+   look at whether automatic clustering of throttling targets could be
+   done, but this is outside of the scope of the current document.
+
+5. Details
+
+   There are two parts to exponential backoff - the backoff algorithm
+   and the backoff policy. The components of the backoff policy are as
+   follows:
+
+   o num_errors_to_ignore: The number of successive failures to ignore
+     before starting to backoff. The suggested value is 2, to be
+     conservative and avoid false positives caused by very short server
+     downtime or by the typical build/debug/restart server cycle of a
+     web developer.
+
+   o initial_backoff_ms: The initial length of the backoff period.
+     Suggested value: 700 ms.
+
+   o multiply_factor: The exponential factor that the backoff period is
+     increased by on each successive failure. Suggested value: 1.4.
+
+   o jitter_factor: The jitter, or randomization, factor. A factor of
+     0.1 (10%) will cause the backoff period to be chosen as a uniform
+     random distribution between 90-100% of the calculated backoff
+     period. Suggested value: 0.1.
+
+   o maximum_backoff_ms: The maximum length of the backoff period.
+     Suggested value: 15 minutes.
+
+   o Which status codes we consider indicators of a server being
+     possibly under a DDoS attack, or at least benefiting from a
+     reduction in aggregate traffic. Status code 503 MUST be interpreted
+     as an indicator, and status codes 500 and 509 MAY be interpreted as
+     an indicator, for the following reasons:
+
+      o 500 is the generic error when no better message is suitable, and
+        as such does not necessarily indicate a temporary state, but
+        other status codes cover most of the permanent error states so
+        it.s fairly reasonable to consider this a temporary error.
+
+      o 503 is explicitly documented as a temporary state where the
+        server is either overloaded or down for maintenance.
+
+      o 509 is the (non-standard) Bandwidth Limit Exceeded status code,
+        which might indicate DDoS.
+
+   Details of the algorithm are as follows:
+
+   o For each throttling target, a failure_count and a release_time is
+     maintained.
+
+
+Sigurdsson                Expires April 6, 2012                 [Page 6]
+
+Internet-Draft            Anti-DDoS Throttling              October 2011
+
+   o failure_count is increased by one for each failure (as defined by
+     the backoff policy) and decreased by one (to no less than 0) for
+     each success.
+
+   o release_time is the earliest absolute time when a request to the
+     throttling target should be allowed. In the default state when a
+     throttling target does not have errors, this time is either past or
+     exactly present, but in an error state it is a future time.
+
+   o hen a response is received, and failure_count has been established
+     by either incrementing it or decrementing it if greater than zero,
+     an effective failure count is calculated: effective_failure_count =
+     failure_count - num_errors_to_ignore
+
+   o Otherwise, release_time is calculated in steps as follows:
+
+      a) delay =
+         initial_backoff_ms*multiply_factor^effective_failure_count
+
+      b) delay -= rand[0,1) * jitter_factor * delay
+
+      c) delay = min(delay, maximum_backoff_ms)
+
+      d) release_time = max(now + delay, release_time)
+
+   o A special case makes delay == 0 for effective_failure_count.
+
+   o Additional logic ensures that release_time is never set to a time
+     earlier than its previous value. This is done to never override a
+     release_time set using the Retry-After header.
+
+6. Simulations and Experiments Performed
+
+   An initial implementation of most of this standard was undertaken in
+   the Chromium project and rolled out in the Google Chrome browser.
+   This has helped work out many practical issues.
+
+   The existing implementation of both the policy and the algorithm for
+   exponential backoff may be found in the Chromium project in the
+   source files net/base/backoff_entry.cc and
+   net/url_request/url_request_throttler_entry.cc.
+
+   An initial attempt to turn an early version of the mechanism on in
+   the Google Chrome .dev. (early adopter) channel was met with a
+   backlash from web developers, who were getting false positives fairly
+   frequently when testing their websites. After this, we proceeded with
+   much more caution as the desire was to be able to roll the mechanism
+   out to all users with practically zero disruption, without requiring
+   sites to opt in to protection.
+
+   A couple of discrete time simulations were coded up. The goals for
+   these simulations were to validate that the mechanism would be likely
+   to behave the way we expected, and to help decide on an optimal set
+   of parameters for the backoff algorithm that would prevent as many
+
+Sigurdsson                Expires April 6, 2012                 [Page 7]
+
+Internet-Draft            Anti-DDoS Throttling              October 2011
+
+   false positives as possible and keep the perceived downtime of
+   servers as close as possible to what it would be without this
+   mechanism, while at the same time providing actual benefits in a DDoS
+   scenario.
+
+   The simulations are available in the Chromium source file
+   net/url_request/url_request_throttler_simulation_unittest.cc. They
+   validate the following assumptions:
+
+   o That a server experiencing overload will actually benefit from the
+     anti-DDoS throttling logic, i.e. that its traffic spike will
+     subside and be distributed over a longer period of time;
+
+   o That "well-behaved" clients of a server under DDoS attack actually
+     benefit from the anti-DDoS throttling logic in that they are more
+     likely to receive service; and
+
+   o That the approximate increase in perceived downtime introduced by
+     anti-DDoS throttling for various different actual downtimes is what
+     we expect it to be, i.e. 8-15% on average for a mixture of
+     scenarios.
+
+   Following the simulations, we pushed the mechanism as an experiment
+   to a portion of the Google Chrome .dev. channel. This experiment
+   showed that anti-DDoS throttling blocked around 1 out of every
+   40-50,000 requests, and that the increase in perceived downtime was
+   within the noise of the experiment.
+
+   The mechanism has since been rolled out to a significant portion of
+   the Google Chrome user population, all of the .dev. channel and the
+   .beta. channel, and is expected to go live soon as part of release 15
+   of Chrome on the .stable. channel (the bulk of the user population).
+
+7. Acknowledgments
+
+   Thanks to Adam Barth for reviewing and handholding.
+
+8. Security Considerations
+
+   Security should not be impacted by this mechanism. The worst an
+   attacker could do in a hypothetical attack on the mechanism would be
+   to cause it to falsely believe that a web server was under DDoS
+   attack and requests to it should be throttled, effectively blocking
+   the user or e.g. a JavaScript client from communicating with the
+   server. To fool the mechanism in this way, the attacker would need to
+   be able to modify HTTP responses coming from the web server. In order
+   to do so, the attacker would already need to have a means of
+   modifying the web server's HTTP responses, and would therefore even
+   without the anti-DDoS mechanism in place be able to block users or
+   other clients from communicating with the server.
+
+9. Internationalization Considerations
+
+   This memo raises no new internationalization considerations.
+
+Sigurdsson                Expires April 6, 2012                 [Page 8]
+
+Internet-Draft            Anti-DDoS Throttling              October 2011
+
+10. IANA Considerations
+
+   This memo adds no new IANA considerations.
+
+Author's Address
+
+   Joi Sigurdsson
+   Google
+   Stigahlid 68a
+   105 Reykjavik
+   Iceland
+
+   Telephone: +354 897-9781
+   Fax: +1 866 336-5958
+   Email: joi@google.com
+   URL: http://www.google.com/
+
+Acknowledgment
+
+   Funding for the RFC Editor function is currently provided by the
+   Internet Society.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Sigurdsson                Expires April 6, 2012                 [Page 9]
+
+Internet-Draft            Anti-DDoS Throttling              October 2011
+
+Table of Contents
+
+   1. Introduction.................................................... 3
+   2. Requirement Levels.............................................. 3
+   3. Background...................................................... 3
+   4. Overview of Anti-DDoS Throttling Mechanism...................... 4
+   5. Details......................................................... 6
+   6. Simulations and Experiments Performed........................... 7
+   7. Acknowledgments................................................. 8
+   8. Security Considerations......................................... 8
+   9. Internationalization Considerations............................. 8
+   10. IANA Considerations............................................ 9
+   Author's Address................................................... 9
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Sigurdsson                Expires April 6, 2012                 [Page 2]
+

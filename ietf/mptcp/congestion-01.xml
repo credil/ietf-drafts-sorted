@@ -1,0 +1,445 @@
+<?xml version="1.0" encoding="US-ASCII"?>
+<!-- Convert to HTML and Text with xml2rfc: http://xml.resource.org. -->
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" [
+  <!ENTITY RFC2119 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.2119.xml">
+  <!ENTITY RFC0793 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.0793.xml">
+  <!ENTITY RFC5681 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.5681.xml">
+  <!ENTITY RFC3465 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.3465.xml">
+
+<!--  <!ENTITY I-D.ford-mptcp-multiaddressed SYSTEM "http://xml.resource.org/public/rfc/bibxml3/reference.I-D.draft-ford-mptcp-multiaddressed-01.xml">-->
+]>
+<?xml-stylesheet type='text/xsl' href='rfc2629.xslt' ?>
+<?rfc strict="yes" ?>
+<?rfc toc="yes"?>
+<?rfc tocdepth="4"?>
+<?rfc symrefs="yes"?>
+<!-- use symbolic references tags, i.e, [RFC2119] instead of [1] -->
+<?rfc sortrefs="yes" ?>
+<?rfc compact="yes" ?>
+<?rfc subcompact="no" ?>
+
+<rfc category="exp" docName="draft-ietf-mptcp-congestion-00" ipr="trust200902">
+  <front>
+    <title abbrev="MPTCP Congestion Control">Coupled Multipath-Aware Congestion Control</title>
+
+    <author fullname="Costin Raiciu" initials="C." surname="Raiciu">
+      <organization>University College London</organization>
+      <address>
+        <postal>
+          <street>Gower Street</street>
+          <city>London</city>
+          <code>WC1E 6BT</code>
+          <country>UK</country>
+        </postal>
+        <email>c.raiciu@cs.ucl.ac.uk</email>
+      </address>
+    </author>
+
+    <author fullname="Mark Handley" initials="M." surname="Handley">
+      <organization>University College London</organization>
+      <address>
+        <postal>
+          <street>Gower Street</street>
+          <city>London</city>
+          <code>WC1E 6BT</code>
+          <country>UK</country>
+        </postal>
+        <email>m.handley@cs.ucl.ac.uk</email>
+      </address>
+    </author>
+
+    <author fullname="Damon Wischik" initials="D." surname="Wischik">
+      <organization>University College London</organization>
+      <address>
+        <postal>
+          <street>Gower Street</street>
+          <city>London</city>
+          <code>WC1E 6BT</code>
+          <country>UK</country>
+        </postal>
+        <email>d.wischik@cs.ucl.ac.uk</email>
+      </address>
+    </author>
+
+    <date day="06" month="July" year="2010" />
+
+    <area>General</area>
+    <workgroup>Internet Engineering Task Force</workgroup>
+    <keyword>multipath tcp congestion control</keyword>
+    <abstract>
+      <t>Often endpoints are connected by multiple paths, but communications are 
+usually restricted to a single path per connection. Resource usage within the network 
+would be more efficient were it possible for these multiple paths to be used concurrently. 
+Multipath TCP is a proposal to achieve multipath transport in TCP.</t>
+
+      <t>New congestion control algorithms are needed for multipath transport protocols 
+such as Multipath TCP, as single path algorithms have a series of issues in the multipath context. 
+One of the prominent problems is that running existing algorithms such 
+as TCP New Reno independently on each path would give the multipath flow 
+more than its fair share at a bottleneck link traversed by more than one of its subflows. 
+Further, it is desirable that 
+a source with multiple paths available will transfer more traffic using the least congested of the paths, 
+hence achieving resource pooling. This would increase the overall utilization of the network and also its 
+robustness to failure.</t>
+
+      <t>This document presents a congestion control algorithm which couples the congestion control
+algorithms running on different subflows by linking their increase functions, and dynamically controls 
+the overall aggresiveness of the multipath flow. The result is a practical algorithm
+that is fair to TCP at bottlenecks while moving traffic away from congested links. </t>
+    </abstract>
+  </front>
+
+  <middle>
+      <section title="Requirements Language">
+        <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+        "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+        document are to be interpreted as described in <xref
+        target="RFC2119">RFC 2119</xref>.</t>
+      </section>
+
+
+    <section title="Introduction" anchor="sec_intro">
+      <t>Multipath TCP (MPTCP, <xref target="I-D.ford-mptcp-multiaddressed"/>) is a set of extensions to regular TCP 
+<xref target="RFC0793"/> that allows one TCP connection to be spread across multiple paths. MPTCP distributes load 
+through the creation of separate "subflows" across potentially disjoint paths.</t>
+
+<t>How should congestion control be performed for multipath TCP? First, each subflow must have its own
+congestion control state (i.e. cwnd) so that capacity on that path is matched by offered load. 
+The simplest way to achieve this goal is to simply run TCP New Reno congestion control <xref target="RFC5681"/> 
+on each subflow. However this solution is unsatisfactory as it gives the multipath flow an unfair share
+when the paths taken by its different subflows share a common bottleneck.</t>
+
+<t>Bottleneck fairness is just one requirement multipath congestion control should meet. The 
+following three goals capture the desirable properties of a practical multipath congestion control algorithm:
+<list style="symbols">
+<t>Goal 1 (Improve Throughput) A multipath flow should perform at least as well as a single path flow would on the best 
+of the paths available to it. </t>
+<t>Goal 2 (Do no harm) A multipath flow should not take up more capacity on any one of its paths than if it was a single
+path flow using only that route. This guarantees it will not unduly harm other flows. </t>
+<t>Goal 3 (Balance congestion) A multipath flow should move as much traffic as possible off its most congested paths, 
+subject to meeting the first two goals.</t>
+</list>
+</t>
+
+<t>Goals 1 and 2 together ensure fairness at the bottleneck. Goal 3 captures the concept of resource pooling 
+<xref target="WISCHIK"/>: if each multipath flow sends more data through its least congested path, the traffic in the
+network will move away from congested areas. This improves robustness and overall throughput, among other things. 
+The way to achieve resource pooling is to effectively "couple" the congestion control loops for 
+the different subflows. 
+</t>
+
+<t>We propose an algorithm that couples only the additive increase function of the subflows,
+and uses unmodified TCP New Reno behavior in case of a drop. The algorithm relies on the traditional
+TCP mechanisms to detect drops, to retransmit data, etc.</t>
+
+<t>Detecting shared bottlenecks reliably is quite difficult, but is just one part of a bigger question.
+This bigger question is how much bandwidth a multipath user should use in total, even if there is no shared
+bottleneck.</t>
+
+<t>Our solution sets the multipath flow's aggregate bandwidth to be the same bandwidth a regular
+TCP flow would get on the best path available to the multipath flow. To estimate the bandwidth of a
+regular TCP flow, the multipath flow estimates loss rates and round trip times and computes the target 
+rate. Then it adjusts the overall aggresiveness (parameter alpha) to achieve the desired rate. 
+</t>
+
+<t>We note that in cases with low statistical multiplexing (where
+the multipath flow influences the loss rates on the path) the multipath throughput will be strictly
+higher than a single TCP would get on any of the paths. In particular, if using two idle paths, 
+multipath throughput will be sum of the two paths' throughput.</t>
+
+<t>This algorithm ensures bottleneck fairness and fairness in the broader, network sense. 
+We acknowledge that current TCP fairness criteria are far from
+ideal, but a multipath TCP needs to be deployable in the current 
+Internet. If needed, new fairness criteria can be implemented by 
+the same algorithm we propose by appropriately scaling the overall aggressiveness.</t>
+
+      <t>It is intended that the algorithm presented here can be applied to other multipath transport protocols, 
+such as alternative multipath extensions to TCP, or indeed any other congestion-aware transport protocols. However, 
+for the purposes of example this document will, where appropriate, refer to the MPTCP protocol.</t>
+
+      <t>It is foreseeable that different congestion controllers will be implemented for Multipath transport, 
+each aiming to achieve different properties in the resource pooling/fairness/stability design space. In 
+particular, solutions that give better resource pooling may be proposed. This algorithm is conservative 
+from this point of view, sacrificing resource pooling for stability.</t>
+
+</section>
+
+<section title="Coupled Congestion Control Algorithm" anchor="sec_cc">
+
+<t>The algorithm we present only applies to the increase phase of the congestion avoidance 
+state specifying how the window inflates upon receiving an ack. 
+The slow start, fast retransmit, and fast 
+recovery algorithms, as well as the multiplicative decrease of the congestion avoidance state
+ are the same as in TCP <xref target="RFC5681"/>.</t>
+
+<t>Let cwnd_i be the congestion window on the subflow i. Let tot_cwnd be the sum of the congestion windows of all
+subflows in the connection.
+Let p_i, rtt_i and mss_i be the loss rate, 
+round trip time (i.e. smoothed round trip time estimate) 
+and maximum segment size on subflow i. </t>
+
+<t>We assume throughout this document that the congestion window is maintained 
+in bytes, unless otherwise specified. We briefly describe the algorithm for
+packet-based implementations of cwnd in section <xref target="sec_impl_packet"/>. 
+</t>
+
+<t>Our proposed "Linked Increases" algorithm MUST:
+<list style="symbols">
+<t>For each ack received on subflow i, increase cwnd_i by min (alpha*bytes_acked*mss_i/tot_cwnd , bytes_acked*mss_i/cwnd_i )</t>
+<!--<t>For each drop event on subflow i, decrease set ssthresh_i to max(cwnd_i/2,2*mss_i), and
+set cwnd_i to ssthresh_i + 3*mss_i. A drop
+event is one or more packet drops experienced by a subflows in the same round trip time. </t>-->
+</list>
+</t>
+
+<!--<t>The decrease function is the
+same as in TCP New Reno, so we will not discuss it further in the remainder of this document.</t>-->
+
+<t>The increase formula takes the minimum between the computed increase for the multipath 
+subflow (first argument to min), and the increase TCP would get in the same scenario (the second argument).
+In this way, we ensure that any multipath subflow cannot be more aggressive than a TCP flow in the same circumstances,
+hence achieving goal 2 (do no harm).
+</t> 
+
+<t>"alpha" is a parameter of the algorithm that describes the aggresiveness of the multipath flow.
+To meet Goal 1 (improve throughput), the value of alpha 
+is chosen such that the aggregate throughput of the multipath flow is equal to the rate a TCP flow would get if it ran on 
+the best path. </t>
+
+<t>To get an intuition of what the algorithm is trying to do, let's take the case where all the 
+subflows have the same round trip time and MSS. In this case the algorithm will grow the total 
+window by approximately alpha*MSS per RTT. 
+This increase is distributed to the individual flows according to their instantaneous window size. 
+Subflow i will increase by alpha*cwnd_i/tot_cwnd segments per RTT.</t> 
+
+<t>Note that, as in standard TCP, when tot_cwnd is large the increase may be 0. In this case 
+the increase MUST be set to 1. We discuss how to implement this formula in 
+practice in the next section. </t>
+
+<t>We assume appropriate byte counting (ABC, <xref target="RFC3465"/>) is used, 
+hence the bytes_acked variable records the number of bytes newly acknowledged. If ABC is not used, bytes_acked 
+SHOULD be set to mss_i.</t>
+
+<t>To compute tot_cwnd, it is an easy mistake to sum up cwnd_i across all subflows: when a flow is in fast retransmit,
+its cwnd is typically inflated and no longer represents the real congestion window. The correct behavior is to use 
+the ssthresh value for flows in fast retransmit whe computing tot_cwnd. To cater for connections that are app limited,
+the computation should consider the minimum between flight_size_i and cwnd_i, and flight_size_i and ssthresh_i where 
+appropriate.
+</t>
+
+<t>The total throughput of a multipath flow depends on the value of alpha and the loss rates, maximum segment sizes 
+and round trip times of its paths. Since we require
+that the total throughput is no worse than the throughput a single TCP would get on the best path, it is 
+impossible to choose a-priori a single value of alpha that achieves the desired throughput in every ocasion. Hence, alpha
+must be computed for each multipath flow, based on the observed properties of the paths. </t>
+
+<t>
+The formula to compute alpha is:
+</t>
+
+<figure>
+           <artwork align="left"><![CDATA[
+	                                         2
+	                           cwnd_i * mss_i
+	                      max ---------------
+			       i           2
+			              rtt_i
+	  alpha = tot_cwnd * -------------------------
+	                    /      cwnd_i * mss_i \ 2
+	                    | sum ----------------|
+			    \  i        rtt_i     /
+
+            ]]></artwork>
+</figure>
+
+<t>The formula is derived by equalizing the rate of the multipath flow with the 
+rate of a TCP running on the best path, and solving for alpha.
+</t>
+
+</section>
+
+<section title="Implementation Considerations">
+<t>
+  The formula for alpha above implies that alpha is a floating point value. This would require 
+performing costly floating point operations whenever an ACK is received, Further, in many kernels
+floating point operations are disabled. There is an easy way to approximate the above calculations
+using integer arithmetic. 
+</t>
+
+<t>Let alpha_scale be an integer. When computing alpha, use alpha_scale * tot_cwnd instead of tot_cwnd, and
+do all the operations in integer arithmetic. </t>
+
+<t>Then, scale down the increase per ack by alpha_scale. The algorithm is:
+<list style="symbols">
+<t>For each ack received on subflow i, increase cwnd_i by min ( alpha*bytes_acked*mss_i/tot_cwnd/alpha_scale , bytes_acked*mss_i/cwnd_i )</t>
+</list>
+</t>
+
+<t>
+Observe that the error in computing the numerator or the
+denominator in the formula for alpha are quite small, as both the mss and cwnd are typically much larger than the RTT
+(measured in ms). Then, alpha scale denotes the precision we want for computing alpha.
+</t>
+
+<t>With these two changes, all the operations can now be done using integer arithmetic. We propose alpha_scale be 
+a small power of two, to allow using faster shift operations instead of multiplication and division. 
+Our experiments show that using alpha_scale=512 works well in a wide range of scenarios. 
+Increasing alpha_scale increases precision, but also increases the risk of overflow when computing alpha. 
+Using 64bit operations would solve this issue. Another option is to dynamically adjust alpha_scale when 
+computing alpha; in this way we avoid overflow and
+obtain maximum precision.
+</t>
+
+<t>
+It is possible to implement our algorithm by calculating tot_cwnd on each ack, however this would be costly
+especially when the number of subflows is large. To avoid this overhead the implementation MAY choose to 
+ maintain a new per connection state variable called tot_cwnd. If it does so, the implementation will update 
+tot_cwnd value whenever the individual subflows' windows are updated.
+Updating only requires one more addition 
+or subtraction operation compared to the regular, per subflow congestion control code, so its performance impact 
+should be minimal. </t>
+
+<t>Computing alpha per ack is also costly. We propose alpha be a per connection variable, 
+computed whenever there is a drop and once per RTT otherwise. More specifically, let cwnd_new be the
+new value of the congestion window after it is inflated or after a drop. 
+Update alpha only if cwnd_i/mss_i != cwnd_new_i/mss_i. 
+</t>
+
+<t>In certain cases with small RTTs, computing alpha can still be expensive. We observe that if RTTs were constant, 
+it is sufficient to compute alpha once per drop, as alpha does not change between drops (the insight here is that 
+cwnd_i/cwnd_j = constant as long as both windows increase). Experimental 
+results show that even if round trip times are
+not constant, using average round trip time instead of instantaneous round trip time 
+gives good precision for computing alpha. Hence, it is possible to compute  
+alpha only once per drop according to the formula above, by replacing rtt_i with rtt_avg_i. 
+</t>
+
+<t>If using average round trip time, rtt_avg_i will be computed by sampling 
+the rtt_i whenever the window can accomodate one more packet, i.e.
+when cwnd / mss &lt; (cwnd+increase)/mss. The samples are averaged once per sawtooth into rtt_avg_i. 
+This sampling ensures that there is no sampling bias for larger windows.</t>
+
+<t>Given tot_cwnd and alpha, the congestion control algorithm is run for each subflow 
+independently, with similar complexity to the standard TCP increase code
+<xref target="RFC5681"/>. </t>
+
+<section title="Implementation Considerations when CWND is Expressed in Packets" anchor="sec_impl_packet">
+
+<t>When the congestion control algorithm maintains cwnd in packets rather than bytes, 
+the code to compute tot_cwnd remains unchanged. </t>
+
+<t>To compute the increase when an ack is received, the implementation for multipath
+congestion control is a simple extension of the TCP New Reno code.  
+In TCP New Reno cwnd_cnt is an additional state variable that tracks the number of 
+bytes acked since the last cwnd increment; cwnd is incremented only 
+when cwnd_cnt > cwnd; then cwnd_cnt is set to 0. </t>
+
+<t>In the multipath case, cwnd_cnt_i is maintained for each 
+subflow as above, and cwnd_i is increased by 1 when 
+cwnd_cnt_i > alpha_scale * tot_cwnd / alpha . 
+</t>
+
+</section>   
+
+</section>
+
+<section title="Discussion">
+
+<t>To achieve perfect resource pooling, one must couple both increase and decrease of congestion windows across subflows,
+as in <xref target="KELLY"/>. Yet this tends to exhibit "flappiness": when the paths have similar levels of 
+congestion, the congestion controller will tend to allocate all the window to one random subflow, and allocate zero window
+to the other subflows. The controller will perform random flips between these stable points. This doesn't seem desirable 
+in general, and is particularly bad when the achieved rates depend on the RTT (as in the current Internet): in such a case,
+the resulting rate with fluctuate unpredictably depending on which state the controller is in, hence violating Goal 1. </t>
+
+<t>By only coupling increases our proposal removes flappiness but also reduces the extent of 
+resource pooling the protocol achieves.
+
+The algorithm will allocate window to the subflows such that p_i * cwnd_i = constant, for all i. Thus, 
+when the loss rates of the subflows are equal, each subflow will get an equal window, removing flappiness.  
+When the loss rates differ, progressively more window will be allocated to the flow with the lower loss rate. 
+In contrast, perfect resource pooling requires that all the window should be allocated on the path with the lowest
+loss rate.
+</t>
+
+</section>
+
+
+    <section title="Security Considerations" anchor="sec_security">
+      <t>None.</t>
+      <t>Detailed security analysis for the Multipath TCP protocol itself is included in <xref target="I-D.ford-mptcp-multiaddressed"/> and [REF]</t>
+    </section>
+
+    <section anchor="Acknowledgements" title="Acknowledgements">
+      <t>The authors are supported by Trilogy (http://www.trilogy-project.org), a research project (ICT-216372) partially funded by the European Community under its Seventh Framework Program.  The views expressed here are those of the author(s) only.  The European Commission is not liable for any use that may be made of the information in this document.</t>
+    </section>
+
+    <!-- Possibly a 'Contributors' section ... -->
+
+    <section anchor="IANA" title="IANA Considerations">
+      <t>None.</t>
+    </section>
+  </middle>
+
+  <!--  *****BACK MATTER ***** -->
+
+  <back>
+    <!-- References split into informative and normative -->
+
+    <!-- There are 2 ways to insert reference entries from the citation libraries:
+     1. define an ENTITY at the top, and use "ampersand character"RFC2629; here (as shown)
+     2. simply use a PI "less than character"?rfc include="reference.RFC.2119.xml"?> here
+        (for I-Ds: include="reference.I-D.narten-iana-considerations-rfc2434bis.xml")
+
+     Both are cited textually in the same manner: by using xref elements.
+     If you use the PI option, xml2rfc will, by default, try to find included files in the same
+     directory as the including file. You can also define the XML_LIBRARY environment variable
+     with a value containing a set of directories to search.  These can be either in the local
+     filing system or remote ones accessed by http (http://domain/dir/... ).-->
+
+    <references title="Normative References">
+    &RFC2119;
+    </references>
+
+    <references title="Informative References">
+      &RFC0793;
+
+      &RFC3465;
+
+      &RFC5681;
+
+      &I-D.ford-mptcp-multiaddressed; 
+
+      <reference anchor='WISCHIK' target="http://ccr.sigcomm.org/online/files/p47-handleyA4.pdf">
+        <front>
+          <title abbrev="The Resource Pooling Principle">The Resource Pooling Principle</title>
+          <author initials='D.' surname='Wischik' fullname='Damon Wischik'>
+            <organization>University College London</organization>
+          </author>
+          <author initials='M.' surname='Handley' fullname='Mark Handley'>
+            <organization>University College London</organization>
+          </author>
+          <author initials='M.' surname='Bagnulo Braun' fullname='Marcelo Magnulo Braun'>
+            <organization>UC3M, Madrid</organization>
+          </author>
+          <date month="October" year="2008"/>
+        </front>
+        <seriesInfo name="ACM SIGCOMM CCR" value="vol. 38 num. 5, pp. 47-52"/>
+      </reference>
+
+      <reference anchor='KELLY' target="http://portal.acm.org/citation.cfm?id=1064415">
+        <front>
+          <title abbrev="Stability of end-to-end algorithms for joint routing and rate control">Stability of end-to-end algorithms for joint routing and rate control</title>
+          <author initials='F.' surname='Kelly' fullname='Frank Kelly'>
+            <organization>University of Cambridge</organization>
+          </author>
+          <author initials='T.' surname='Voice' fullname='Thomas Voice'>
+            <organization>University of Cambridge</organization>
+          </author>
+          <date year="2005"/>
+        </front>
+        <seriesInfo name="ACM SIGCOMM CCR" value="vol. 35 num. 2, pp. 5-12"/>
+      </reference>
+    </references>
+  </back>
+</rfc>

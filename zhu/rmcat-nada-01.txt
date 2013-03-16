@@ -1,0 +1,616 @@
+ 
+
+
+
+Network Working Group                                             X. Zhu
+Internet Draft                                                    R. Pan
+Intended Status: Informational                             Cisco Systems
+Expires: September 13, 2013                               March 12, 2013
+
+
+     NADA: A Unified Congestion Control Scheme for Real-Time Media
+                        draft-zhu-rmcat-nada-01
+
+
+Abstract
+
+   This document describes a scheme named network-assisted dynamic
+   adaptation (NADA), a novel congestion control approach for
+   interactive real-time media applications, such as video conferencing.
+   In the proposed scheme, the sender regulates its sending rate based
+   on either implicit or explicit congestion signaling, in a unified
+   approach. The scheme can benefit from explicit congestion
+   notification (ECN) markings from network nodes. It also maintains
+   consistent sender behavior in the absence of such markings, by 
+   reacting to queuing delays and packet losses instead.  
+
+   We present here the overall system architecture, recommended
+   behaviors at the sender and the receiver, as well as expected network
+   node operations. Results from extensive simulation studies of the
+   proposed scheme are available upon request.
+
+Status of this Memo
+
+   This Internet-Draft is submitted to IETF in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF), its areas, and its working groups.  Note that
+   other groups may also distribute working documents as
+   Internet-Drafts.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   The list of current Internet-Drafts can be accessed at
+   http://www.ietf.org/1id-abstracts.html
+
+   The list of Internet-Draft Shadow Directories can be accessed at
+   http://www.ietf.org/shadow.html
+
+ 
+
+
+Zhu & Pan              Expires September 13, 2013               [Page 1]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+Copyright and License Notice
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors. All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document. Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document. Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+
+Table of Contents
+
+   1. Introduction  . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2. Terminology . . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   3. System Model  . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   4. Network Node Operations . . . . . . . . . . . . . . . . . . . .  4
+     4.1 Default behavior of drop tail  . . . . . . . . . . . . . . .  4
+     4.2 ECN marking  . . . . . . . . . . . . . . . . . . . . . . . .  4
+     4.3 PCN marking  . . . . . . . . . . . . . . . . . . . . . . . .  5
+     4.4 Comments and Discussions . . . . . . . . . . . . . . . . . .  6
+   5. Receiver Behavior . . . . . . . . . . . . . . . . . . . . . . .  6
+     5.1 Monitoring per-packet statistics . . . . . . . . . . . . . .  6
+     5.2 Calculating time-smoothed values . . . . . . . . . . . . . .  6
+     5.3 Sending periodic feedback  . . . . . . . . . . . . . . . . .  7
+   6. Sender Behavior . . . . . . . . . . . . . . . . . . . . . . . .  7
+     6.1 Encoder rate control . . . . . . . . . . . . . . . . . . . .  8
+     6.2 Rate shaping buffer  . . . . . . . . . . . . . . . . . . . .  8
+     6.3 Target rate calculator . . . . . . . . . . . . . . . . . . .  8
+       6.3.1 Slow-start behavior  . . . . . . . . . . . . . . . . . .  9
+     6.4 Sending rate calculator  . . . . . . . . . . . . . . . . . .  9
+   7. Incremental Deployment  . . . . . . . . . . . . . . . . . . . . 10
+   8. IANA Considerations . . . . . . . . . . . . . . . . . . . . . . 10
+   9. References  . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+     9.1  Normative References  . . . . . . . . . . . . . . . . . . . 10
+     9.2  Informative References  . . . . . . . . . . . . . . . . . . 11
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 11
+
+
+
+
+
+ 
+
+
+Zhu & Pan              Expires September 13, 2013               [Page 2]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+1. Introduction
+
+   Interactive real-time media applications introduce a unique set of
+   challenges for congestion control. Unlike TCP, the mechanism used for
+   real-time media needs to adapt fast to instantaneous bandwidth
+   changes, accommodate fluctuations in the output of video encoder rate
+   control, and cause low queuing delay over the network. An ideal
+   scheme should also make effective use of all types of congestion
+   signals, including packet losses, queuing delay, and explicit
+   congestion notification (ECN) markings. 
+
+   Based on the above considerations, we present a scheme named network-
+   assisted dynamic adaptation (NADA). The proposed design benefits from
+   explicit congestion control signals (e.g., ECN markings) from the
+   network, and remains compatible in the presence of implicit signals
+   (delay or loss) only. In addition, it supports weighted bandwidth
+   sharing among competing video flows. 
+
+   This documentation describes the overall system architecture,
+   recommended designs at the sender and receiver, as well as expected
+   network nodes operations. The signaling mechanism consists of
+   standard RTP timestamp [RFC3550] and standard RTCP feedback reports. 
+
+2. Terminology
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC 2119 [RFC2119].
+
+
+3. System Model
+
+   The system consists of the following elements: 
+
+        * Incoming media stream, in the form of consecutive raw video
+        frames and audio samples;
+
+        * Media encoder with rate control capabilities. It takes the
+        incoming media stream and encodes it to an RTP stream at a
+        target bit rate R_o. Note that the actual output rate from the
+        encoder R_v may fluctuate randomly around R_o. Also, the encoder
+        can only change its rate at rather coarse time intervals, on the
+        order of seconds. 
+
+        * RTP sender, responsible for calculating the target bit rate
+        R_o based on network congestion signals (delay or ECN marking
+        reports from the receiver), and for regulating the actual
+        sending rate R_s accordingly. A rate shaping buffer is employed
+ 
+
+
+Zhu & Pan              Expires September 13, 2013               [Page 3]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+        to absorb the instantaneous difference between video encoder
+        output rate R_v and sending rate R_s. The buffer size L_s,
+        together with R_o, influences the calculation of R_s. The RTP
+        sender also generates RTP timestamp in outgoing packets.
+
+        * RTP receiver, responsible for measuring and estimating end-to-
+        end delay d based on sender RTP timestamp. In the presence of
+        packet losses and ECN markings, it also records the individual
+        loss and marking events, and calculates the equivalent delay
+        d_tilde that accounts for queuing delay, ECN marking, and packet
+        losses. The receiver feeds such statistics back to the sender
+        via periodic RTCP reports. 
+
+        * Network node, with several modes of operation. The system can
+        work with the default behavior of a simple drop tail queue.  It
+        can also benefit from advanced AQM features such as RED-based
+        ECN marking, and PCN marking using a token bucket algorithm. 
+
+In the following, we will elaborate on the respective operations at the
+network node, the receiver, and the sender.
+
+4. Network Node Operations
+
+We consider three variations of queue management behavior at the network
+node, leading to either implicit or explicit congestion signals. 
+
+4.1 Default behavior of drop tail
+
+In conventional network with drop tail or RED queues, congestion is
+inferred from the estimation of end-to-end delay. No special action is
+required at network node.
+
+Packet drops at the queue are detected at the receiver, and contributes
+to the calculation of the equivalent delay d_tilde. 
+
+4.2 ECN marking
+
+In this mode, the network node randomly marks the ECN field in the IP
+packet header following the Random Early Detection (RED) algorithm
+[RFC2309]. Calculation of the marking probability involves the following
+steps:
+
+    * upon packet arrival, update smoothed queue size q_avg as: 
+
+                  q_avg = alpha*q + (1-alpha)*q_avg. 
+
+    The smoothing parameter alpha is a value between 0 and 1. A value of
+    alpha=1 corresponds to performing no smoothing at all. 
+ 
+
+
+Zhu & Pan              Expires September 13, 2013               [Page 4]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+    * calculate marking probability p as: 
+
+        p = 0, if q < q_lo; 
+
+                   q_avg - q_lo
+        p = p_max*--------------, if q_lo <= q < q_hi; 
+                   q_hi - q_lo
+
+        p = 1, if q >= q_hi. 
+
+Here, q_lo and q_hi corresponds to the low and high thresholds of queue
+occupancy. The maximum parking probability is p_max. 
+
+The ECN markings events will contribute to the calculation of an
+equivalent delay d_tilde at the receiver. No changes are required at the
+sender.
+
+4.3 PCN marking
+
+As a more advanced feature, we also envision network nodes which support
+PCN marking based on virtual queues. In such a case, the marking
+probability of the ECN bit in the IP packet header is calculated as
+follows:
+
+    * upon packet arrival, meter packet against token bucket (r,b); 
+
+    * update token level b_tk; 
+
+    * calculate the marking probability as: 
+
+        p = 0, if b-b_tk < b_lo; 
+
+                    b-b_tk-b_lo
+        p = p_max* --------------, if b_lo<= b-b_tk <b_hi; 
+                     b_hi-b_lo
+
+        p = 1, if b-b_tk>=b_hi. 
+
+Here, the token bucket lower and upper limits are denoted by b_lo and
+b_hi, respectively. The parameter b indicates the size of the token
+bucket. The parameter r is chosen as r=gamma*C, where gamma<1 is the
+target utilization ratio and C designates link capacity. The maximum
+marking probability is p_max. 
+
+The ECN markings events will contribute to the calculation of an
+equivalent delay d_tilde at the receiver. No changes are required at the
+sender. The virtual queuing mechanism from the PCN marking algorithm
+will lead to additional benefits such as zero standing queues. 
+ 
+
+
+Zhu & Pan              Expires September 13, 2013               [Page 5]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+4.4 Comments and Discussions
+
+In all three flavors described above, the network queue operates with
+the simple first-in-first-out (FIFO) principle. There is no need to
+maintain per-flow state. Such a simple design ensures that the system
+can scale easily with large number of video flows and high link
+capacity.
+
+The sender behavior stays the same in the presence of all types of
+congestion signals: delay, loss, ECN marking due to either RED/ECN or
+PCN algorithms. This unified approach allows a graceful transition of
+the scheme as the level of congestion in the network shifts dynamically
+between different regimes. 
+
+5. Receiver Behavior
+
+The role of the receiver is fairly straightforward. It is in charge of
+four steps: a) monitoring end-to-end delay/loss/marking statistics on a
+per-packet basis; b) aggregating all forms of congestion signals in
+terms of the equivalent delay; c) calculating time-smoothed value of the
+congestion signal; and d) sending periodic reports back to the sender. 
+
+5.1 Monitoring per-packet statistics
+
+The receiver observes and estimates one-way delay d_n for the n-th
+packet, ECN marking event 1_M, and packet loss event 1_L. Here, 1_M and
+1_L are binary indicators: the value of 1 corresponding to a marked or
+lost packet and value of 0 indicates no marking or loss. 
+
+The equivalent delay d_tilde is calculated as follows: 
+
+                  d_tilde = d_n + 1_M d_M + 1_M d_L, 
+
+where d_M is a prescribed fictitious delay value corresponding to the
+ECN marking event (e.g., d_M = 200 ms), and d_L is a prescribed
+fictitious delay value corresponding to the packet loss event (e.g., d_L
+= 1 second). By introducing a large fictitious delay penalty for ECN
+marking and packet losses, our proposed scheme leads to low end-to-end
+actual delays in the presence of such events. 
+
+
+5.2 Calculating time-smoothed values
+
+The receiver smoothes its observations via  exponential averaging: 
+
+                 x_n = alpha*d_tilde + (1-alpha)*x_n. 
+
+The weighting parameter alpha adjusts the level of smoothing.
+ 
+
+
+Zhu & Pan              Expires September 13, 2013               [Page 6]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+5.3 Sending periodic feedback 
+
+Periodically, the receiver sends back the updated value of x in RTCP
+messages, to aid the sender in its calculation of target rate.  The size
+of acknowledgement packets are typically on the order of tens of bytes,
+and are significantly smaller than average video packet sizes.
+Therefore, the bandwidth overhead of the receiver acknowledgement stream
+is sufficiently low.
+
+
+6. Sender Behavior
+
+As illustrated in Fig. 1, the sender comprises four modules: a) encoder
+rate control; b) rate shaping buffer; c) encoder target rate calculator,
+and d) sending rate calculator. 
+
+The following sections describe these modules in further details, and
+explain how they interact with each other.  
+
+
+    ------------               
+    |          |        R_v      --------------
+    |          |---------------->     | | | | | -------------->     
+    |  Encoder |                      | | | | |        / \
+    |          |                 --------------         |
+    ------------              Rate Shaping Buffer       |
+        / \                             |               |
+         |                              |               |
+         |                              |               | R_s
+         | R_o                          |               |
+         |                         L_s  |               |
+         |                              |               |  
+    -----------------                   |      -----------------
+    |               |                   |      |               |
+    |  Target Rate  |       R_o         |----->| Sending Rate  |
+    |  Calculator   |------------------------> | Calculator    |
+    |               |                          -----------------
+    ----------------
+         / \
+          |
+          |
+          --------------- RTCP report (loss/delay/marking)
+
+
+                       Figure 1 Sender Structure
+
+
+
+ 
+
+
+Zhu & Pan              Expires September 13, 2013               [Page 7]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+6.1 Encoder rate control
+
+The encoder rate control procedure has the following characteristics: 
+
+    * Rate changes can happen only at large intervals, on the order of
+    seconds.
+
+    * Given a target rate R_o, the encoder output rate may randomly
+    fluctuate around it. 
+
+    * The encoder output rate is further constrained by video content
+    complexity. The range of the final rate output is [R_min, R_max].
+    Note that it's content-dependent, and may change over time. 
+
+
+6.2 Rate shaping buffer
+
+A rate shaping buffer is employed to absorb any instantaneous mismatch
+between encoder rate output R_v and regulated sending rate R_s. The size
+of the buffer evolves from time t-tau to time t as: 
+
+             L_s(t) = max [0, L_s(t-tau)+R_v*tau-R_s*tau]. 
+
+
+A large rate shaping buffer contributes to higher end-to-end delay,
+which may harm the performance of real-time media communications.
+Therefore, the sender has a strong incentive to constrain the size of
+the shaping buffer. It can either deplete it faster by increasing the
+sending rate R_s, or limit its growth by reducing the target rate for
+the video encoder rate control. On the other hand, the sender still
+needs to regulate its outgoing rate R_s so as not to incur excessive
+congestion over the network. We will describe in Section 6.2 how to
+balance between these two conflicting goals. 
+
+6.3 Target rate calculator
+
+
+The sender calculates the target rate R_o based on network congestion
+information from receiver RTCP reports. It first compensates the effect
+of delayed observation by one round-trip time (RTT) via a linear
+predictor:
+
+
+                        x_n - x_n-1          
+        x_hat = x_n + ---------------*tau_o       (1)
+                            delta
+
+
+ 
+
+
+Zhu & Pan              Expires September 13, 2013               [Page 8]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+In (1), the arrival interval between the (n-1)-th the n-th packets is
+designated by delta. The parameter tau_o indicates the reference round-
+trip-time, hence the prediction step size. 
+
+The target rate is then calculated as: 
+
+
+                          R_max-R_min           
+        R_o = R_min + w*---------------*x_ref     (2) 
+                            x_hat
+
+
+Here, R_min and R_max denote the content-dependent rate range the
+encoder can produce. The weight of priority level is w. The reference
+congestion signal x_ref is chosen so that the maximum rate of R_max can
+be achieved when x_hat = w*x_ref. Note that the combination of w and
+x_ref determines how sensitive the rate adaptation scheme is in reaction
+to fluctuations in observed signal x. The final target rate R_o is
+clipped within the range of [R_min, R_max].
+
+Note that the sender does not need to differentiate whether the network
+node operates with drop tail, RED-based ECN marking, or token-bucket-
+level-based PCN marking. It reacts to the aggregated congestion signal
+information from the receiver in exactly the same manner. 
+
+
+6.3.1 Slow-start behavior
+
+In addition, the initial sending rate of a stream is regulated to grow
+linearly, no more than R_ss at time t: 
+
+                           t-t_0
+        R_ss(t) = R_min + -------(R_max-R_min).
+                             T
+
+The start time of the stream is t_0, and T represents the time horizon
+over which the slow-start mechanism is effective. The encoder target
+rate is chosen to be the minimum of R_o and R_ss in the first T
+seconds.
+
+
+6.4 Sending rate calculator
+
+Finally, the actual outgoing rate over the network is R_s. Its value is
+calculated based on both the encoder target rate R_o and the rate
+shaping buffer size L_s in the following manner: 
+
+
+ 
+
+
+Zhu & Pan              Expires September 13, 2013               [Page 9]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+                             L_s
+        R_s = R_o + beta * -------. 
+                            tau_v
+
+
+The first term indicates the rate calculated from network congestion
+feedback alone.  The second term indicates the additional pressure to
+send out more packets by the rate shaping buffer, if it is building up.
+The scaling factor beta can be tuned to balance between these two
+competing goals. The parameter tau_v is a reference latency value, to
+keep beta dimensionless.
+
+7. Incremental Deployment
+
+One nice property of proposed design is the consistent behavior of video
+end points regardless of variations in network node operations. This
+facilitates gradual, incremental adoption of the scheme. 
+
+To start off with, the proposed encoder congestion control mechanism can
+be implemented without any explicit support from the network, and react
+to observed congestion signals both in terms of delay and loss. 
+
+When ECN is enabled at the network nodes with RED-based marking, the
+receiver can fold its observations of ECN markings into the calculation
+of the equivalent delay. The sender can react to these explicit
+congestion signals without any modification.
+
+Ultimately, networks equipped with proactive marking based on token
+bucket level metering can reap the additional benefits of zero standing
+queues and lower end-to-end delay and work seamlessly with existing
+senders and receivers. 
+
+8. IANA Considerations
+
+There are no actions for IANA.
+
+9. References
+
+9.1  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC3550]  Schulzrinne, H., Casner, S., Frederick, R., and V.
+              Jacobson, "RTP: A Transport Protocol for Real-Time
+              Applications", STD 64, RFC 3550, July 2003.
+
+
+ 
+
+
+Zhu & Pan              Expires September 13, 2013              [Page 10]
+
+INTERNET DRAFT                    NADA                    March 12, 2013
+
+
+9.2  Informative References
+
+   [RFC3168]  Ramakrishnan, K., Floyd, S., and D. Black, "The Addition
+              of Explicit Congestion Notification (ECN) to IP",
+              RFC 3168, September 2001.
+
+   [RFC2309]  Braden, B., Clark, D., Crowcroft, J., Davie, B., Deering,
+              S., Estrin, D., Floyd, S., Jacobson, V., Minshall, G.,
+              Partridge, C., Peterson, L., Ramakrishnan, K., Shenker,
+              S., Wroclawski, J., and L. Zhang, "Recommendations on
+              Queue Management and Congestion Avoidance in the
+              Internet", RFC 2309, April 1998.
+
+
+
+
+Authors' Addresses
+
+
+   Xiaoqing Zhu
+   Cisco Systems, 
+   510 McCarthy Blvd, 
+   Milpitas, CA 95134, USA
+   EMail: xiaoqzhu@cisco.com
+
+   Rong Pan
+   Cisco Systems
+   510 McCarthy Blvd, 
+   Milpitas, CA 95134, USA
+   Email: ropan@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Zhu & Pan              Expires September 13, 2013              [Page 11]

@@ -1,0 +1,426 @@
+<?xml version="1.0" encoding="US-ASCII"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+<!--
+To format this document:
+make in google3/platforms/host/cidr/PRRid/
+-->
+<?rfc toc="yes"?>
+<?rfc compact="yes"?>
+<?rfc subcompact="yes"?>
+<?rfc tocdepth="6"?>
+<rfc ipr="trust200902" category="exp" docName="draft-mathis-tcpm-proportional-rate-reduction-01.txt">
+ <front>
+  <title abbrev="Proportional Rate Reduction"> Proportional Rate Reduction for TCP  </title>
+  <author fullname="Matt Mathis" initials="M." surname="Mathis">
+   <organization>Google, Inc</organization>
+   <address>
+   <postal>
+     <street>1600 Amphitheater Parkway</street>
+     <city>Mountain View</city> <code>93117</code>  <region>California</region> <country>USA</country>
+   </postal>
+   <email> mattmathis@google.com </email>
+   </address>
+  </author>
+    <author fullname="Nandita Dukkipati" initials="N." surname="Dukkipati">
+   <organization>Google, Inc</organization>
+   <address>
+   <postal>
+     <street>1600 Amphitheater Parkway</street>
+     <city>Mountain View</city> <code>93117</code>  <region>California</region> <country>USA</country>
+   </postal>
+   <email>nanditad@google.com </email>
+   </address>
+  </author>
+<author fullname="Yuchung Cheng" initials="Y." surname="Cheng">
+   <organization>Google, Inc</organization>
+   <address>
+   <postal>
+     <street>1600 Amphitheater Parkway</street>
+     <city>Mountain View</city> <code>93117</code>  <region>California</region> <country>USA</country>
+   </postal>
+   <email> ycheng@google.com </email>
+   </address>
+  </author>
+<date month="July" year="2011"/>
+  <area> Transport Area </area>
+  <workgroup> TCP Maintenance Working Group </workgroup>
+   
+<!-- 
+-->
+
+
+<abstract>
+<t>
+This document describes an experimental algorithm, Proportional Rate Reduction (PPR) and related algorithms to improve the accuracy of the amount of data sent by TCP during loss recovery.
+Standard Congestion Control requires that TCP and other protocols reduce their congestion window in response to losses.   This window reduction naturally occurs in the same round trip as the data retransmissions to repair the losses, and is implemented by choosing not to transmit any data in response to some ACKs arriving from the receiver.  Two widely deployed algorithms are used to implement this window reduction: Fast Recovery and Rate Halving.   Both algorithms are needlessly fragile under a number of conditions, particularly when there is a burst of losses that such that the number of ACKs returning to the sender is so small that the effective window falls below the target congestion window chosen by the congestion control algorithm.  Proportional Rate Reduction avoids these excess window reductions such that at the end of recovery the actual window size will be as close as possible to the window size determined by the congestion control algorithm.   It is patterned after rate halving, but using the fraction that is appropriate for target window chosen by the congestion control algorithm.   In addition we propose two slightly different algorithms to bound the total window reduction due to all mechanisms, including application stalls, the losses themselves and inhibit further window reductions when possible.
+</t>
+   </abstract>        
+ </front>
+<middle>
+
+
+<section title="Introduction">
+
+
+<t>This document describes an experimental algorithm, Proportional Rate Reduction (PPR) and two slightly different reduction bound algorithms to improve the accuracy of the amount of data sent by TCP during loss recovery.</t>
+
+
+<t>Standard Congestion Control [RFC 5681] requires that TCP (and other protocols) reduce their congestion window in response to losses.   Fast Recovery, described in the same document, is the reference algorithm for making this adjustment.  It's stated goal is to recover TCP's self clock by relying on returning ACKs during recovery to clock more data into the network.  Fast Recovery adjusts the window by waiting for one half RTT of ACKs to pass before sending any data.   It is fragile because it can not compensate for the implicit window reduction caused by the losses themselves, and is exposed to timeouts.   For example if half of the data or ACKs are lost, Fast Recovery's expected behavior would be to reduce the window by not sending in response to the first half window of ACKs, but then it would not receive any additional ACKs and would timeout because it failed to send anything at all.
+</t>
+
+
+<t>The rate-halving algorithm improves  this situation by sending data on alternate ACKs during recovery, such that after one RTT the window has been halved.   Rate-having is implemented in Linux after only being informally published [RHweb], including from an uncompleted Internet-Draft[RHID].  Rate-halving also does not adequately compensate for the implicit window reduction caused by the losses and also assumes a 50% window reduction, which was completely standard at the time it was written (several modern congestion control algorithms, such as Cubic[CUBIC], can sometimes reduce the window by much less than 50%.).  As a consequence rate-halving often allows the window to fall further than necessary, reducing performance and increasing the risk of timeouts if there are any additional losses.</t>
+ 
+
+
+<t>Proportional Rate Reduction (PPR) avoids these excess window reductions such that at the end of recovery the actual window size will be as close as possible to the window size determined by the congestion control algorithm.   It is patterned after Rate Halving, but using the fraction that is appropriate for target window chosen by the congestion control algorithm.    During PRR one of two additional reduction bound algorithms monitors the total window reduction due to all mechanisms, including application stalls, the losses themselves and attempts to inhibit further window reductions.</t>
+
+
+<t>We describe two slightly different reduction bound algorithms: conservative reduction bound (CRB), which meets a strict segment conserving correctness critera; and a slow start reduction bound (SSRB), which is more aggressive than CRB by at most one segment per ACK.   CRB meets a conservative, philosophically pure and aesthetically appealing notion of correct, however in real networks it does not perform as well as the algorithms described in RFC 3517, which prove to be non-conservative in a statistically significant number of cases.   SSRB offers a compromise by allowing TCP to send one additional segment per ACK relative to CRB in some situations. Although SSRB is less aggressive than RFC 3517 (transmitting fewer segments or transmitting them later) it slightly outperforms it, due to slightly lower probability of additional losses during recovery.</t>
+
+
+<t>All three algorithms are based on common design principles, derived from Van Jacobson's packet conservation principle: segments delivered to the receiver are used as the clock to trigger sending additional segments into the network.   As much as possible Proportional Rate Reduction and the reduction bound rely on this self clock process, and are only slightly affected by the accuracy of other estimators, such as pipe[RFC 3517] and cwnd.   This is what gives the algorithms their precision in the presence of events that cause uncertainty in other estimators.</t>
+
+
+<t>
+In <xref target="measurements"></xref>, we summarize a companion paper[Recovery] with some measurement experiments: PRR+SSRB outperforms both RFC 3517 and PRR+CRB under authentic network traffic.
+</t>
+
+
+<t>The algorithms are described as modifications to RFC 5681, TCP Congestion Control, using concepts drawn from the pipe algorithm [RFC 3517].  They are most accurate and more easily implemented with SACK[RFC 2018], but they do not require SACK.</t>
+
+
+</section>
+<section title="Definitions">
+
+
+<t>The following terms, parameters and state variables are used as they are defined in earlier documents:</t>
+<t>RFC 3517: covered (as in "covered sequence numbers")</t>
+<t>RFC 5681: duplicate ACK, FlightSize, Sender Maximum Segment Size (SMSS)</t>
+
+
+<t>Voluntary Window Reductions: choosing not to send data in response to some ACKs, for the purpose of reducing the sending window size or data rate.</t>
+
+
+<t>We define some additional variables:</t>
+
+
+<t>SACKd: The total number of bytes that the scoreboard indicates has been delivered to the receiver.  This can be computed by scanning the scoreboard and counting the total number of bytes covered by all sack blocks.</t>
+
+
+<t>DeliveredData: The total number of bytes that the current ACK indicates have been delivered to the receiver, relative to all past ACKs.   When not in recovery, DeliveredData is the change in snd.una.  With SACK, DeliveredData is not an estimator and can be computed precisely as the change in snd.una plus the change in SACKd.  Note that if there are SACK blocks and snd.una advances, the change in SACKd is typically negative.    In recovery without SACK, DeliveredData is estimated to be 1 SMSS on duplicate acknowledgements, and on a subsequent partial or full ACK, DeliveredData is estimated to be the change in snd.una, minus one SMSS for each preceding duplicate ACK.</t>
+
+
+<t>Note that DeliveredData is robust: for TCP using SACK, DeliveredData can be precisely computed anywhere in the network just by inspecting the returning ACKs.   The consequence of missing ACKs is that later ACKs will show a larger DeliveredData.  Furthermore, for any TCP (with or without SACK) the sum of DeliveredData must agree with the forward progress over the same time interval. </t>
+
+
+<t>We introduce a local variable "sndcnt", which indicates exactly how many bytes should be sent  in response to each ACK.     Note that the decision of which data to send (e.g. retransmit missing data or send more new data) is out of scope for this document.</t>
+
+
+</section>
+
+
+<section title="Algorithms">
+<t>Summary: If pipe (the estimated data is in flight) is larger than ssthresh (the target cwnd at the end of recovery) then Proportional Rate Reduction spreads the the voluntary window reductions across a full RTT, such that as prr_delivered approaches RecoverFS (at the end of recovery) prr_out approaches ssthresh, the target value for cwnd.   If there are excess losses such that pipe falls below ssthresh, the selected reduction bound algorithm tries to hold pipe at ssthresh by sending at most "limit" segments per ACK to catch up.   For both reduction bound algorithms the limit is first set to past voluntary window reductions (prr_delivered - prr_out) permitting single ACKs to trigger sending multiple segments.   With PRR+CRB (conservative==True) and if there are too many losses then prr_delivered - prr_out will be exactly the same as DeliveredData for the current ACK, resulting in sndcnt=DeliveredData.  Therefore there will be no further Voluntary Window Reductions.  With PRR+SSRB (conservative==False) the same situation results in sndcnt=DeliveredData+1, which ultimately causes TCP to slowstart up to ssthresh.</t>
+
+
+<t>
+At the beginning of recovery initialize PRR state.  This assumes a modern congestion control algorithm, CongCtrlAlg(), that might set ssthresh to something other than FlightSize/2:
+<artwork><![CDATA[
+   ssthresh = CongCtrlAlg() // Target cwnd after recovery
+   prr_delivered = 0         // Total bytes delivered during recov
+   prr_out = 0              // Total bytes sent during recovery
+   RecoverFS = snd.nxt-snd.una // Flightsize at the start of recov
+]]></artwork></t>
+<t>
+On every ACK during recovery compute:
+<artwork><![CDATA[
+   DeliveredData = delta(snd.una) + delta(SACKd)
+   prr_delivered += DeliveredData
+   pipe = (RFC 3517 pipe algorithm)
+   if (pipe > ssthresh) {
+      // Proportional Rate Reduction
+      sndcnt = CEIL(prr_delivered * ssthresh / RecoverFS) - prr_out
+   } else {
+      // Two version of the reduction bound
+      if (conservative) {    // PRR+CRB
+        limit = prr_delivered - prr_out        
+      } else {               // PRR+SSRB
+        limit = MAX(prr_delivered - prr_out, DeliveredData) + 1
+      }
+      sndcnt = MIN(ssthresh - pipe, limit)
+   }
+   sndcnt = MAX(sndcnt, 0)                    // positive
+]]></artwork></t>
+
+
+<t>On any data transmission or retransmission:
+<artwork><![CDATA[
+      prr_out += (data sent) // strictly less than or equal to sndcnt
+]]></artwork></t>
+
+
+<t>The following examples will make these algorithms much clearer.</t>
+
+
+<section title="Examples">
+<t>We illustrate these algorithms by showing their different behaviors for two scenarios: TCP experiencing either a single loss or a burst of 15 consecutive losses.     In all cases we assume bulk data, standard AIMD congestion control (the ssthresh is set to Flight Size/2) and cwnd = FlightSIze = pipe = 20 segments, so ssthresh will be set to 10 at the beginning of recovery.   We also assume standard Fast Retransmit and Limited Transmit, so we send two new segments followed by one retransmit on the first 3 duplicate ACKs after the losses.</t>
+
+
+<t>Each of the diagrams below shows the per ACK response to the first round trip for the various recovery algorithms when the zeroth segment is lost.   The top line indicates the transmitted segment number triggering the ACKs, with an X for the lost segment.  "cwnd" and "pipe" indicate the values of these algorithms after processing each returning ACK.  "Sent" indicates how much "N"ew or "R"etransmitted data would be sent.  Note that the algorithms for deciding which data should be sent are out of scope of this document.</t>
+
+
+<t>When there is a single loss, PRR with either of the reduction bound algorithms has the same behavior.     We show "RB", a flag indicating which reduction bound subexpression ultimately determined the value of sndcnt.   When there is minimal losses "limit" (both algorithms) will always be larger than ssthresh - pipe, so the sndcnt will be ssthresh - pipe indicated by "s" in the "RB" row. PRR does not use cwnd during recovery.</t>
+
+
+<artwork><![CDATA[
+RFC 3517
+ack#   X  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
+cwnd:    20 20 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11
+pipe:    19 19 18 18 17 16 15 14 13 12 11 10 10 10 10 10 10 10 10
+sent:     N  N  R                          N  N  N  N  N  N  N  N
+
+
+Rate halving (Linux)
+ack#   X  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
+cwnd:    20 20 19 18 18 17 17 16 16 15 15 14 14 13 13 12 12 11 11
+pipe:    19 19 18 18 17 17 16 16 15 15 14 14 13 13 12 12 11 11 10
+sent:     N  N  R     N     N     N     N     N     N     N     N
+
+
+PRR
+ack#   X  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
+pipe:    19 19 18 18 18 17 17 16 16 15 15 14 14 13 13 12 12 11 10
+sent:     N  N  R     N     N     N     N     N     N        N  N
+RB:                                                          s  s
+]]></artwork>
+
+
+<t>Note that all three algorithms send same total amount of data.  RFC 3517 experiences a "half-window of silence", while the Rate Halving and PRR spread the voluntary window reduction across an entire RTT.</t>
+
+
+<t>Next we consider the same initial conditions when the first 15 packets (0-14) are lost.   During the remainder of the lossy RTT, only 5 ACKs are returned to the sender.   We examine each of these algorithms in succession.
+</t>
+
+
+<artwork><![CDATA[
+RFC 3517
+ack#   X  X  X  X  X  X  X  X  X  X  X  X  X  X  X 15 16 17 18 19
+cwnd:                                              20 20 11 11 11
+pipe:                                              19 19  4 10 10
+sent:                                               N  N 7R  R  R
+
+
+Rate Halving (Linux)
+ack#   X  X  X  X  X  X  X  X  X  X  X  X  X  X  X 15 16 17 18 19
+cwnd:                                              20 20  5  5  5
+pipe:                                              19 19  4  4  4
+sent:                                               N  N  R  R  R
+
+
+PRR-CRB
+ack#   X  X  X  X  X  X  X  X  X  X  X  X  X  X  X 15 16 17 18 19
+pipe:                                              19 19  4  4  4
+sent:                                               N  N  R  R  R
+RB:                                                       f  f  f
+
+
+PRR-SSRB
+ack#   X  X  X  X  X  X  X  X  X  X  X  X  X  X  X 15 16 17 18 19
+pipe:                                              19 19  4  5  6
+sent:                                               N  N 2R 2R 2R
+RB:                                                       d  d  d
+
+
+]]></artwork>
+
+
+<t>In this situation, RFC 3517 is very non-conservative, because once fast retransmit is triggered (on the ACK for segment 17) TCP immediately retransmits sufficient data to bring pipe up to cwnd.  Our measurement data (see <xref target="measurements"></xref>) indicates that RFC 3517 significantly outperforms Rate Halving, PRR-CRB and some other similarly conservative algorithms that we tested, suggesting that it is significantly common for the actual losses to exceed the window reduction determined by the congestion control algorithm.</t>
+
+
+<t>The Linux implementation of Rate Halving includes an early version of the conservative reduction bound[RHweb].  In this situation each of the five ACKs trigger exactly 5 transmissions (2 new data, 3 old data), and cwnd is set to 5.   At a window size of 5, it takes three round trips to retransmit 15 lost segments.  Rate Halving does not raise the window during recovery, so when recovery finally completes, TCP will slowstart cwnd from 5 up to 10.   In this example, TCP operates at half of the window chosen by the congestion control for  more than three RTTs, increasing the elapsed time and exposing it to timeouts if there are additional losses.</t>
+
+
+<t>PRR-CRB implements conservative reduction bound.   Since the total losses bring pipe below ssthresh, data is sent such that the total data transmitted, prr_out,  follows the total data delivered to the receiver as reported by returning ACKs.   Transmission are controlled by the sending limit, which was set to prr_delivered - prr_out.  This is indicated by the RB:f tagging in the figure.   In this case PRR-CRB is exposed to exactly the same problems as Rate Halving, taking excessively long to recover from the losses and being exposed to additional timeouts.</t>
+
+
+<t>PRR-SSRB increases the window by exactly 1 segment per ACK until pipe rises to sshthresh during recovery.  This is accomplished by setting limit to one greater than the data reported to have been delivered to the receiver on this ACK, effectively implementing a slowstart during recovery, and indicated by RB:d tagging in the figure.   Although increasing the window during recovery seems to be ill advised, it is important to remember that this actually less aggressive than the current standard which permits sending the same quantity of extra data as a single burst in response to the ACK that triggered Fast Retransmit</t>
+
+
+<t>
+Under less extreme conditions, when the total losses are smaller than the difference between Flight Size and ssthresh, PRR-CRB and PRR-SSRB have identical behaviours.</t>
+
+
+</section>
+
+
+
+
+</section>
+
+
+<section title="Properties">
+
+
+<t>The following properties are common to both PRR-CRB and PRR-SSRB:</t>
+
+
+<t>Normally Proportional Rate Reduction will spread Voluntary Window reductions out evenly across a full RTT.  This has the potential to generally reduce the burstiness of Internet traffic, and could be considered to be a type of soft pacing.   Theoretically any pacing increases the probability that different flows are interleaved, reducing the opportunity for ACK compression and other phenomena that increase traffic burstiness. However these effects have not been quantified.</t>
+
+
+<t>If there are minimal losses, Proportional Rate Reduction will converge to exactly the target window chosen by the congestion control algorithm. Note that as TCP approaches the end of recovery prr_delivered will approach RecoverFS and sndcnt will be computed such that prr_out approaches ssthresh.</t>
+
+
+<t>Implicit window reductions due to multiple isolated losses during recovery cause later Voluntary Reductions to be skipped.  For small numbers of losses the window size ends at exactly the window chosen by the congestion control algorithm.</t>
+
+
+<t>For burst losses, earlier Voluntary Window Reductions can be undone by sending extra segments in response to ACKs arriving later during recovery.    Note that as long as some Voluntary Window Reductions are not undone, the final value for pipe will be the same as ssthresh, the target cwnd value chosen by the congestion control algorithm.</t>
+
+
+
+<t>Proportional Rate Reduction with either reduction round improves the situation when there are application stalls (e.g. when the sending application does not queue data for transmission quickly enough or the receiver stops advancing rwnd).  When there is a application stall early during recovery prr_out will fall behind the sum of the transmissions permitted by sndcnt.   The missed opportunities to send due to stalls are treated like banked Voluntary Window Reductions: specifically they cause prr_delivered-prr_out to be significantly positive.  If the application catches up while TCP is still in recovery,  TCP will send a partial window burst to catch up to exactly where it would have been, had the application never stalled.   Although this burst might be viewed as being hard on the network, this is exactly what happens every time there is a partial RTT application stall while not in recovery.   We have made the partial RTT stall behavior uniform in all states.  Changing this behavior is out of scope for this document.</t>
+
+
+<t>Proportional Rate Reduction with Reduction Bound is significantly less sensitive to errors of the pipe estimator.  While in recovery, pipe is intrinsically an estimator, using incomplete information to guess if un-SACKed segments are actually lost or out-of-order in the network.   Under some conditions pipe can have significant errors, for example when a burst of reordered data is presumed to be lost and is retransmitted, but then the original data arrives before the retransmission.  If the transmissions are regulated directly by pipe as they are in RFC 3517, then errors and discontinuities in the value of the pipe estimator can cause significant errors in the amount of data sent.   With Proportional Rate Reduction with Reduction Bound, pipe merely determines how sndcnt is computed from DataDelivered.   Since short term errors in pipe are smoothed out across multiple ACKs and both Proportional Rate Reduction and the reduction converge to the same final window, errors in the pipe estimator have less impact on the final outcome (This needs to be tested better).</t>
+
+
+<t>Under all conditions and sequences of events during recovery, PRR-CRB strictly bounds the data transmitted to be equal to or less than the amount of data delivered to the receiver.   We claim that this packet conservation bound is the most aggressive algorithm that does not lead to additional forced losses in some environments.   It has the property that if there is a standing queue at a bottleneck that is carrying no other traffic, the queue will maintain exactly constant length for the entire recovery duration (except for +1/-1 fluctuation due to differences in packet arrival and exit times) .  See  <xref target="conservative"></xref> for a detailed discussion of this property.</t>
+
+
+<t>Although the packet Packet Conserving Bound in very appealing for a number of reasons, our measurements summarized in <xref target="measurements"></xref> demonstrate that it is less aggressive and does not perform as well as RFC3517, which permits large bursts of data when there are bursts of losses.   PRR-SSRB is a compromise that permits TCP to send one extra segment per ACK as compared to the packet conserving bound.  From the< perspective of the packet conserving bound, PRR-SSRB does indeed open the window during recovery, however it is significantly less aggressive than RFC3517 in the presence of burst losses.</t>
+</section>
+
+
+<section anchor="measurements" title="Measurements">
+
+
+<t>In a (to be published) companion paper[Recovery] we describe some measurements comparing the various strategies for reducing the window during recovery. The results presented in that paper are summarized here.</t> 
+
+
+<t>The various window reduction algorithms and extensive instrumentation were all implemented in a modified Linux 2.6.34 kernel. For all experiments we used a uniform subset of the non-standard algorithms present in the base Linux implementation. Specifically we disabled threshold retransmit [FACK], which triggers Fast Retransmit earlier than the standard algorithm. We left enabled CUBIC [CUBIC], limited transmit [LT], and lost retransmission detection algorithms. This subset was a compromise chosen such that the behaviors of both Rate Halving (the Linux default) and RFC 3517 mode were authentic to their respective specifications while at the same time the performance and features were comparable to the kernels in production use. The different window reduction algorithms were all present in the same kernel and could be selected with a sysctl, such that we had an absolutely uniform baseline for comparing RFC 3517, Rate Halving, and PRR with various reduction bounds.</t> 
+
+
+<t> Our experiments included an additional algorithm, PRR with an unlimited bound (PRR-UB), which sends ssthresh-pipe bursts when pipe falls below ssthresh. This behavior parallels RFC 3517. </t> 
+
+
+<t>An important detail of this configuration is that CUBIC only reduces the window by %, as opposed to the 50% reduction used by traditional congestion control algorithms. This, in conjunction with using only standard algorithms to trigger Fast Retransmit, accentuates the tendency for RFC 3517 and PRR-UB to send a burst at the point when Fast Retransmit gets triggered if pipe is already below ssthresh.</t> 
+ 
+
+
+<t>All experiments were performed on servers carrying production traffic for multiple Google services.</t> 
+
+
+<t>In this configuration is is observed that for 32% of the recovery events, pipe falls below ssthresh before Fast Retransmit is triggered, thus the various PRR algorithms start in the reduction bound phase, and both PRR-UB and RFC 3517 send bursts of segments with the fast retransmit.</t> 
+ 
+
+
+<t>In the companion paper we observe that PRR-SSRB spends the least time in recovery of all the algorithms tested, largely because it experiences fewer timeouts once it is already in recovery.</t> 
+
+
+<t>RFC 3517 experiences 29% more detected lost retransmissions and 2.6% more timeouts (presumably due to undetected lost retransmissions) than PRR-SSRB.  These results are representative of PRR-UB and other algorithms that send bursts when pipe falls below ssthresh.</t> 
+ 
+
+
+<t>Rate Halving experiences 5% more timeouts and significantly smaller final cwnd values at the end of recovery. The smaller cwnd sometimes causes the recovery itself to take extra round trips. These results are representative of PRR-CRB and other algorithms that implement strict packet conservation during recovery.</t> 
+ 
+
+
+</section>
+
+
+<section title="Conclusion and Recommendations">
+<t>[This text assumes standards track.  Experimental status would be somewhat more reserved.]</t>
+
+
+<t>Although the packet conserving bound in very appealing for a number of reasons, our measurements summarized in <xref target="measurements"></xref> demonstrate that it is less aggressive and does not perform as well as RFC3517, which permits large bursts of data when there are bursts of losses.   PRR-SSRB is a compromise that permits TCP to send one extra segment per ACK as compared to the packet conserving bound.  From the perspective of the packet conserving bound, PRR-SSRB does indeed open the window during recovery, however it is significantly less aggressive than RFC3517 in the presence of burst losses.</t>
+
+
+<t>All TCP implementations SHOULD implement both PRR-CRB and PRR-SSRB, with a control to select which algorithm is used.   It is RECOMMENDED that PRR-SSRB is the default algorithm.</t>
+
+
+</section>
+
+
+<section title="Acknowledgements">
+<t>This draft is based in part on previous incomplete work by Matt Mathis, Jeff Semke and Jamshid Mahdavi[RHID] and influenced by several discussion with John Heffner.</t>
+
+
+<t>Monia Ghobadi and Sivasankar Radhakrishnan helped analyze the experiments. </t>
+
+
+</section>
+
+
+<section title="Security Considerations">
+<t>Proportional Rate Reduction does not change the risk profile for TCP.</t>
+
+
+<t>Implementers that change PRR from counting bytes to segments have to be cautious about the effects of ACK splitting attacks[SPLIT], where the receiver acknowledges partial segments for the purpose of confusing the sender's congestion accounting.</t>
+
+
+</section>
+<section title="IANA Considerations">
+
+
+<t>This document makes no request of IANA.</t>
+<t>Note to RFC Editor: this section may be removed on publication as an RFC.</t>
+
+
+</section>
+
+
+<section title="References">
+<t>TODO: A proper reference section. </t>
+
+
+<t>[RFC 3517] "A Conservative Selective Acknowledgment (SACK)-based Loss Recovery Algorithm for TCP". E. Blanton, M. Allman, K. Fall, L. Wang. April 2003.</t>
+
+
+<t>[RFC 5681] "TCP Congestion Control". M. Allman, V. Paxson, E. Blanton. September 2009.</t>
+
+
+<t>[RHweb] "TCP Rate-Halving with Bounding Parameters". M. Mathis, J. Madavi, http://www.psc.edu/networking/papers/FACKnotes/971219/, Dec 1997.</t>
+
+
+<t>[RHID] "The Rate-Halving Algorithm for TCP Congestion Control". M. Mathis, J. Semke, J. Mahdavi, K. Lahey.  http://www.psc.edu/networking/ftp/papers/draft-ratehalving.txt, Work in progress, last updated June 1999.</t>
+
+
+<t>[CUBIC] "CUBIC: A new TCP-friendly high-speed TCP variant". I. Rhee, L. Xu, PFLDnet, Feb 2005.</t>
+
+
+<t>[FACK] M. Mathis, J. Mahdavi, "Forward Acknowledgment: Refining TCP Congestion Control", Proceedings of SIGCOMM'96, August, 1996, Stanford, CA.</t>
+
+
+<t>[Recovery] N. Dukkipati, M. Mathis, Y Cheng, "Improving TCP loss recovery",  to be published 2011.
+</t>
+
+</section>
+
+
+</middle>
+<back>
+<section anchor="conservative" title="Packet Conservation Bound">
+
+
+ <t>Under all conditions and sequences of events during recovery, PRR-CRB strictly bounds the data transmitted to be equal to or less than the amount of data delivered to the receiver.   We claim that this packet conservation bound is the most aggressive algorithm that does not lead to additional forced losses in some environments.   It has the property that if there is a standing queue at a bottleneck that is carrying no other traffic, the queue will maintain exactly constant length for the entire recovery duration (except for +1/-1 fluctuation due to differences in packet arrival and exit times) .    Any less aggressive algorithm will result in a declining queue at the bottleneck.  Any more aggressive algorithm will result in an increasing queue or additional losses at the bottleneck.</t>
+
+
+<t>We demonstrate this property with a little thought experiment:</t>
+
+
+<t>
+Imagine a network path that has insignificant delays in both directions, except the processing time and queue at a single bottleneck in the forward path.  By insignificant delay, I mean when a packet is "served" at the head of the bottleneck queue, the following events happen in much less than one packet time at the bottleneck: the packet arrives at the receiver; the receiver sends an ACK; which arrives at the sender; the sender processes the ACK and sends some data; the data is queued at the bottleneck.  </t>
+
+
+<t>
+If sndcnt is set to DataDelivered and nothing else is inhibiting sending data, then clearly the data arriving at the bottleneck queue will exactly replace the data that was served at the head of the queue, so the queue will have a constant length.  If queue is drop tail and full then the queue will stay exactly full, even in the presence of losses or reordering on the ACK path, and independent of whether the data is in order or out-of-order (e.g. simple reordering or loss recovery from an earlier RTT).  Any more aggressive algorithm sending additional data will cause a queue overflow and loss.  Any less aggressive algorithm will under fill the queue.  Therefore setting sndcnt to DataDeliverd is the most aggressive algorithm that does not cause forced losses in this simple network.  Relaxing the assumptions (e.g. making delays more authentic and adding more flows, delayed ACKs, etc) increases the noise (jitter) in the system but does not change it's basic behavior.</t>
+
+
+<t>Note that the congestion control algorithm implements a broader notion of optimal that includes appropriately sharing of the network.  PRR-CRB will choose to send the lessor of the data permitted by this packet conserving bound  and as determined by the congestion control algorithm as PRR brings TCP's actual window down to ssthresh.</t>
+</section>
+
+
+
+
+</back>
+</rfc>

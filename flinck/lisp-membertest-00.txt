@@ -1,0 +1,673 @@
+
+
+
+LISP                                                           H. Flinck
+Internet-Draft                                   Nokia  Siemens Networks
+Intended status: Informational                             March 1, 2010
+Expires: September 2, 2010
+
+
+          Membership test for Mapping Information optimization
+                    draft-flinck-lisp-membertest-00
+
+Abstract
+
+   This document defines how a membership test can be used to convey all
+   or some of the EID-to-RLOC mappings from an Egress Tunnel Router to
+   requesting Ingress Tunnel Router.  This draft proposes that an
+   authoritative ETR MAY return a group membership test in the LISP Map-
+   Reply Message that indicates if a given EID is served by the ETR.
+   The membership test is implemented as a Bloom filter.  A Bloom filter
+   is compact data structure to represent a set of elements.  The
+   membership test "aggregates" EIDs beyond prefix based aggregation.
+   Membership test decreases the load of the mapping system and
+   distributes the EID-to-RLOC resolution between an ITR and an ETR.
+
+Status of this Memo
+
+   This Internet-Draft is submitted to IETF in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF), its areas, and its working groups.  Note that
+   other groups may also distribute working documents as Internet-
+   Drafts.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   The list of current Internet-Drafts can be accessed at
+   http://www.ietf.org/ietf/1id-abstracts.txt.
+
+   The list of Internet-Draft Shadow Directories can be accessed at
+   http://www.ietf.org/shadow.html.
+
+   This Internet-Draft will expire on September 2, 2010.
+
+Copyright Notice
+
+   Copyright (c) 2010 IETF Trust and the persons identified as the
+
+
+
+Flinck                  Expires September 2, 2010               [Page 1]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the BSD License.
+
+
+1.  Introduction
+
+   LISP [I-D.ietf-lisp] architecture divides the IP address space into
+   two separate name spaces: Endpoint IDs (EIDs), used within sites, and
+   Routing Locators (RLOCs), used on the transit network (the Internet)
+   that connect the sites.  Communication across the transit network
+   requires a mapping between these two spaces.  To achieve this
+   mapping, LISP architecture assumes the existence of a database to
+   store and propagate those mappings globally between gateway devices
+   at the name space boundary.  Several of such databases have been
+   proposed, among them: LISP-CONS [CONS], LISP-NERD [NERD], and LISP+
+   ALT [I-D.ietf-lisp-alt], together with a network based API called
+   LISP Map-Server [I-D.ietf-lisp-ms].
+
+   As defined currently by the LISP protocol [I-D.ietf-lisp], a host
+   that wants to communicate with an other host in another domain needs
+   to first resolve the FQDN of the destination to a destination EID.
+   The packet is then sent to through an Ingress Tunnel Router (ITR) to
+   the destination.  If the Ingress Tunnel Router acting as a gateway
+   between the two name spaces doesn't have a mapping for the
+   destination EID to destination RLOC that is needed for tunnelling
+   across the transit network, the ITR needs to resolve the EID-to-RLOC
+   mapping from a mapping system possibly using a map resolver.  The
+   current implementation approach is to drop the first packet of the
+   flow that didn't have a matching map entry.  An alternative is to
+   buffer the first packet.  However, buffering adds complexity to the
+   design in terms of buffer management and a delay component to the
+   delivery of the first packet.  In both cases whether the first packet
+   is dropped or buffered map resolution has a cost in terms of
+   decreased service experience (by causing a longer and varying service
+   start-up time of sessions) or cost of equipment, or both.  Map
+   resolution is a costly operation and therefore its gain should be
+   maximized and utilization should be minimized.  The default behaviour
+   of an ITR is to resolve a destination EID to a (set of) locator(s)
+   (RLOCs) and cache the mapping in order to improve usability and to
+
+
+
+Flinck                  Expires September 2, 2010               [Page 2]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+   avoid the delay impact of the resolution process to session set up
+   times.  The resolved mapping of EID-to-RLOC set can be either per
+   host EID or per an EID-prefix if EID aggregates into a prefix served
+   by the Egress Tunnel Router (ETR).
+
+   This draft proposes a method to increase the gain of a successful
+   mapping resolution.  The idea is to retrieve more mappings by the
+   same Map-Reply message rather than just the missing EID-to-RLOC
+   mapping information.  The proposed solution is complementing the
+   caching of mappings where an earlier resolved EID-to-RLOC mapping can
+   be shared with the other flows passing the same ITR.  The cost of
+   caching of mapping information has been previously studied in [cost]
+   where it has been found to be beneficial by reducing the mapping
+   resolution signalling.  Our approach complements caching by
+   increasing the information that is returned to the ingress tunnel
+   router.
+
+   The gain of the map resolution can be improved by providing the
+   requestor more mapping information than the very specific mapping
+   that was originally queried for.  The ETR or its proxy that is
+   authoritative for a given EID-to-RLOC mapping could in one extreme
+   case return all of its mappings, or just the some subset, maybe the
+   most requested ones.  The number of the mappings could easily be
+   overwhelming if the EIDs do not aggregate, so a compressed expression
+   is required.  For example, if we have EIDs that do not aggregate
+   under a EID-prefix, and ETR is servicing small businesses of size of
+   100 host, we would need to send 100 * (EID-to-RLOC) mapping
+   information, that is at least 3200 bytes.  For an enterprise with
+   1000 host with unaggregatable EIDs it would be 32 Kbytes.
+   Enterprises larger than 1000 hosts are likely to have their EID-
+   prefixes, but because the number of different prefixes will be so
+   small the use of the membership test is not meaningful.
+
+   This draft proposes that the authoritative ETR MAY return a group
+   membership test that indicates if a given EID is served by the ETR in
+   addition to the specific mapping information that is returned in the
+   LISP Map-Reply Message.
+
+
+2.  Terminology
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in [RFC2119].
+
+
+
+
+
+
+
+Flinck                  Expires September 2, 2010               [Page 3]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+    Endpoint ID (EID):
+
+      A 32-bit (for IPv4) or 128-bit (for IPv6) value used in the source
+      and destination address fields of the first (most inner) LISP
+      header of a packet.  The host obtains a destination EID the same
+      way it obtains an destination address today, for example through a
+      DNS lookup or SIP exchange.  Defined in [I-D.ietf-lisp].
+
+    EID-prefix:
+
+      A power-of-2 block of EIDs which are allocated to a site by an
+      address allocation authority.  EID-prefixes are associated with a
+      set of RLOC addresses which make up a "database mapping".  EID-
+      prefix allocations can be broken up into smaller blocks when an
+      RLOC set is to be associated with the smaller EID- prefix.  As in
+      [I-D.ietf-lisp].
+
+    Ingress Tunnel Router (ITR):
+
+      A router which accepts an IP packet with a single IP header (more
+      precisely, an IP packet that does not contain a LISP header).  The
+      router treats this "inner" IP destination address as an EID and
+      performs an EID-to-RLOC mapping lookup.  The router then prepends
+      an "outer" IP header with one of its globally-routable RLOCs in
+      the source address field and the result of the mapping lookup in
+      the destination address field.  Note that this destination RLOC
+      may be an intermediate, proxy device that has better knowledge of
+      the EID-to-RLOC mapping closer to the destination EID.  In
+      general, an ITR receives IP packets from site end-systems on one
+      side and sends LISP-encapsulated IP packets toward the Internet on
+      the other side.  Defined in [I-D.ietf-lisp].
+
+   Egress Tunnel Router (ETR):
+
+      A router that accepts an IP packet where the destination address
+      in the "outer" IP header is one of its own RLOCs.  The router
+      strips the "outer" header and forwards the packet based on the
+      next IP header found.  In general, an ETR receives LISP-
+      encapsulated IP packets from the Internet on one side and sends
+      decapsulated IP packets to site end-systems on the other side.
+      ETR functionality does not have to be limited to a router device.
+      A server host can be the endpoint of a LISP tunnel as well.
+      Defined in [I-D.ietf-lisp].
+
+   EID-to-RLOC Cache:
+
+      A short-lived, on-demand table in an ITR that stores, tracks, and
+      is responsible for timing-out and otherwise validating EID-to-RLOC
+
+
+
+Flinck                  Expires September 2, 2010               [Page 4]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+      mappings.  This cache is distinct from the full "database" of EID-
+      to-RLOC mappings, it is dynamic, local to the ITR(s), and
+      relatively small while the database is distributed, relatively
+      static, and much more global in scope.  Defined in [I-D.ietf-
+      lisp].
+
+   Routing Locator (RLOC):
+
+      The IPv4 or IPv6 address of an egress tunnel router (ETR).  It is
+      the output of a EID-to-RLOC mapping lookup.  An EID maps to one or
+      more RLOCs.  Typically, RLOCs are numbered from topologically-
+      aggregatable blocks that are assigned to a site at each point to
+      which it attaches to the global Internet; where the topology is
+      defined by the connectivity of provider networks, RLOCs can be
+      thought of as PA addresses.  Multiple RLOCs can be assigned to the
+      same ETR device or to multiple ETR devices at a site.  Defined in
+      [I-D.ietf-lisp].
+
+   Membership test
+
+      Bloom filter based membership test.  Bloom filters [Bloom] offer a
+      compact method to represent a set of n elements using a vector of
+      m bits.  The Bloom filters use k independent hash functions that
+      hash a set of input elements to one of the m array positions.
+      False positives are possible, but false negatives are not.
+
+
+3.  Membership test for identifier locator mapping
+
+   The membership test offers means for an authoritative ETR to provide
+   a set of EID to RLOC mappings to a requestor in an efficient way
+   beyond what prefix based aggregation can offer.  As explained in the
+   Introduction section the resolution process is expensive in terms of
+   delay, jitter and lost packets so that it would be beneficial to
+   resolve more mappings with the same transactions if possible.  The
+   membership test is a hash of EIDs.  The membership test acts as a
+   compressed representation of the end point identifiers that an ETR
+   can serve.  An ETR can express with it the most frequently requested
+   mappings, or any other subset or all of the mappings.  The use of
+   membership test doesn't require that the EIDs aggregate into
+   prefixes.  This makes it optimal for cases where an ETR is serving
+   EIDs from different EID blocks.  In the Map-Reply message that the
+   ETR returns to ITR, the ETR MAY provide one or more membership test
+   hashes depending on the size of the mapping base that needs to be
+   compressed to the requesting ITR.  Multiple membership tests are
+   useful in cases where there are different sets of hosts such as very
+   frequently used, static hosts or nomadic, etc.  When an ITR gets a
+   new packet without a matching identifier locator mapping it runs the
+
+
+
+Flinck                  Expires September 2, 2010               [Page 5]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+   membership tests before resorting to a new mapping resolution
+   transaction.  If a membership test provides a positive match there is
+   no reason to buffer the first packet longer than what it takes to
+   execute the membership test.  Membership test is hash operation that
+   is quick to execute (we use MD5 for this purpose, see next sections
+   of this document).  If no membership test provides a positive match,
+   the default mapping resolution is executed as defined in LISP
+   specification.
+
+   When a packet arrives from a host to an ITR following steps SHOULD
+   take place:
+
+   1.  An EID-to-RLOC mapping cache look up is performed based on the
+       destination EID to find the destination RLOC as defined in
+       [I-D.ietf-lisp].
+
+   2.  If the look up returns a destination RLOC then the packet is
+       encapsulated and forwarded as defined in the default behavior of
+       LISP to the destination RLOC.
+
+   3.  If the look up doesn't result into a RLOC then a membership test
+       cache is checked and the tests are executed using the destination
+       EID as an input.
+
+   4.  If any of the membership tests results into a match then the
+       corresponding RLOC is used for creating a Map-Request message
+       that is "piggybacked" with the packet from the host and forwarded
+       to ETR.  Map-Request is formulated as defined in [I-D.ietf-lisp]
+       for cases of reachability tests, or refreshing a mapping before
+       TTL expiration (see section 6.1.3 in [I-D.ietf-lisp]).  That is
+       the destination IP address used for the Map-Request is one of the
+       matching RLOCs.  A successful membership test is handled as if
+       there was a cache entry that is becoming stale to that particular
+       EID-to-RLOC mapping.
+
+   5.  In the case of no matching RLOCs in membership tests, the map
+       resolution is invoked as defined in LISP and a Map-Request
+       Message is sent to the mapping system.
+
+   If an ITR receives an ICMP Network or ICMP Host Unreachable message
+   for an RLOC it is using for an ETR, it MUST also remove the
+   membership test vector associated with the RLOC.  If the ITR receives
+   a Negative Map-Reply then a related membership test should be removed
+   from the cache.
+
+   When a Map-Request Message arrives to the authoritative ETR the
+   message is processed as following:
+
+
+
+
+Flinck                  Expires September 2, 2010               [Page 6]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+   1.  The router looks up the destination EID in the router's EID-to-
+       RLOC database.  An EID-to-RLOC Map-Reply message with the mapping
+       information complemented with one or more optional membership
+       test information elements is originated by the ETR.  If there is
+       no entry for the requested EID then a Negative Map-Reply is
+       returned as defined in [I-D.ietf-lisp].
+
+   When an ITR receives the Map-Reply message, it parses the message and
+   stores the mapping information from the packet.  This information is
+   put in the ITR's EID-to-RLOC mapping cache (this is the on-demand
+   cache referred in [I-D.ietf-lisp] ).  The optional membership test(s)
+   and the associated RLOC(s) of the originating ETR are stored
+   ("conceptually") into a separate cache with a time out value if such
+   exists in the membership test option.  The management of the
+   membership test cache can be as simple as removing least frequently
+   used entry from the cache when the cache is running out of space.
+   The membership test entries can also time out if a time out value was
+   provided in the membership test option.  Membership tests that result
+   false positives will cause a Negative Map-Reply which removes the
+   related membership test.  A new membership test may be provided with
+   the Map-Reply that replaces a previous one.
+
+   The ETR SHOULD calculate the membership tests beforehand and just add
+   the membership test option with proper tests to the Map-Reply
+   message.
+
+
+4.  Message Format
+
+   The membership test extends the LISP Map-Reply Message Format by
+   defining a new Mapping Protocol Data option that carries the
+   membership data.  The option is always associated with a record of a
+   locator (RLOC) field in the Map-Reply Message.
+
+
+
+        0                   1                   2                   3
+        0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |Type=M |T|         Reserved    |Length of the Membership test  |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |                        Membership test vector(0)              |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |                        Membership test vector (1 ... 3)       |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |                          Membership  TTL                      |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+
+
+
+Flinck                  Expires September 2, 2010               [Page 7]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+    Type:
+
+      M: ( set to 1) Membership test information element.  T: Set to 0
+      if no TTL value is included, Set to 1 if TTL for the test vector
+      is included.
+
+    Length of the Membership test
+
+      16-bit unsigned integer.  The length of the option (including the
+      type, reserved and length fields) in units of 8 octets.  In some
+      cases an RLOC may be associated to multiple Membership test
+      vectors (e.g. frequently used, etc)
+
+    Membership test vector
+
+      Multiple of 16 octets (128 bits) long Bloom filter.
+
+    Membership  TTL
+
+      The time in minutes the recipient of the Map-Reply will store the
+      membership test.  If the TTL is 0, the entry should be removed
+      from the cache immediately.  If the value is 0xffffffff, the
+      recipient can decide locally how long to store the test.
+
+   Bloom filters [Bloom] may result into false positives which in this
+   application context means that an EID is interpreted to belonging
+   incorrectly to an ETR that doesn't host the EID.  The error case
+   degenerates into stale mapping information and the ETR should remove
+   the previously sent Membership test from the ITR by setting TTL value
+   = 0, or by providing a new Membership test vector (or vectors).  In
+   this case the first packet is lost, and the ITR needs to revert into
+   full map resolution process.
+
+
+5.  Calculation of the membership tests
+
+   The accuracy of the membership test depends on the length of the test
+   vector, number of independent hashes, k, and the number of elements,
+   n, (that is the number of unique EIDs) that is inserted into the
+   filter [Bloom], [Dharma].
+
+   We suggest to use fixed sets of the parameters defined for two cases.
+   One is for small businesses, where the unaggregatable EIDs are in the
+   order if 100 hosts and the other one is for larger companies/sites
+   with unaggregatable EIDs of the order of 1000.  The reason for this
+   is to minimize the protocol logic, and to avoid any parameter
+   negotiation between ITRs and ETRs.  For the case of 100 EIDs we fix
+   the number of hash functions to k=20, length of the test vector to
+
+
+
+Flinck                  Expires September 2, 2010               [Page 8]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+   4096 bits (32*128 bits) and require 10exp-6 probability of false
+   positives, the number of EIDs that can be covered is now 140.
+   Compare this to the corresponding full map information (140*256=
+   35840 bits) the savings are 88%.  For case of 1000 EIDs we fix the
+   number of hash functions to k=20, length of the test vector to 32768
+   bits (256*128bits) and require 10exp-6 probability of false
+   positives, the number of EIDs that can be covered is now 1350.  In
+   any case if the error probability or the covered EID do not meet the
+   accuracy needs, more Membership test vectors with smaller covered EID
+   sets could be added to the Map-Reply.  It is a local decision of ETR
+   how many Membership test vectors optimizes its RLOC-to-EID mappings.
+   ETR chooses the size of the Membership test vector based on how many
+   EID-to-RLOC mappings it has.  In our scheme only the size changes,
+   number of hash functions and error probability remains the same
+   limiting the trade offs.  Therefore two sets of parameters and
+   covered EID sets (one for less than 140 EIDs and the other for less
+   than 1350 EIDs) is sufficient.  A site with more than 1000s of EIDs
+   is likely to have aggregatable EID space.
+
+   If an ETR is hosting EID-prefixes and EIDs, the Membership test
+   SHOULD be used for host EIDs.  EID-prefixes should be sent to the
+   requesting ITR as defined in the base protocol [I-D.ietf-lisp] and
+   sent separately.  Adding prefix support to the Membership test is
+   possible, but not covered in this draft because it introduces
+   unnecessary complexity.  An ETR is unlikely to host such a number of
+   individual EID-prefixes that it would be justifiable to use a
+   Membership test for prefixes.
+
+   For the k hash functions we use MD5 algorithm [RFC1321], because of
+   its availability in all platforms and because its output matches 128
+   length that is the size of IPv6 address and fits therefore well to
+   IPv6 header structure, although the Membership test vector is part of
+   LISP header.  MD5 is a cryptographic message digest algorithm that
+   hashes arbitrary length strings to 128 bits.  It has relatively fast
+   implementation.  Output of a MD5 hash function is used to set a
+   corresponding bit in the Membership Test vector that is multiple of
+   128 bits.  Notice that the Membership test vectors should be
+   calculated beforehand in the ETR so that the results are ready before
+   any Map-Reply with the Membership test is requested.  Membership test
+   vector content can change between ITRs and Map-Replies, they can even
+   be customized per requesting ITR.
+
+   Following pseudo code shows how the Membership test vector is
+   calculated.  This is just a standard use of Bloom filter code.
+
+
+
+
+
+
+
+Flinck                  Expires September 2, 2010               [Page 9]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+MemberShipTest (array_of_EIDs_n= n elements, hash_function = "MD5",
+number_of_hashes = 20, filter_size_m = 4086)
+{
+membership_test = allocate _tablesize_of (filter_size_m);
+                                          // table size for m
+
+        for (i= 0; i < size_number_of_elements_n(array_of_EIDs_n); ++i){
+                // for each n elements
+         for (k= 0; k < number_of_hashes; ++k) {
+                // for each hashes set a bit in the membership test
+            (membership_test [hash_function((uint8_t )k+1, EID(i))]= 1);
+
+          }
+
+        }
+return membership_test;
+
+}
+
+
+
+
+6.  IANA Considerations
+
+   This document has no requests to IANA.
+
+
+7.  Security Considerations
+
+   Use of Membership Test between an ITR and an ETR doesn't add to any
+   new security issues between the ITR, mapping system or ETR beyond the
+   current LISP solution.  If an ITR can trust an EID-to-RLOC mapping
+   from an ETR, it can trust the Membership test as well.  False
+   positives are handled in the same way as the stale mapping cache EID-
+   to-RLOC entries.
+
+
+8.  Acknowledgments
+
+   Acknowledgements belong to Johanna Heinonen, Petteri Poeyhonen,
+   Sreenu Sasubilli, Jarno Rajahalme and for good comments, questions
+   and improvements.  This work was supported by TEKES as part of the
+   Future Internet program of TIVIT
+
+
+9.  References
+
+
+
+
+
+Flinck                  Expires September 2, 2010              [Page 10]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+9.1.  Normative References
+
+   [I-D.ietf-lisp]
+              Farinacci, D., Fuller, V., Meyer, D., and D. Lewis,
+              "Locator/ID Separation Protocol (LISP)",
+              draft-ietf-lisp-06 (work in progress), January 2010.
+
+   [I-D.ietf-lisp-alt]
+              Fuller, V., Farinacci, D., Meyer, D., and D. Lewis, "LISP
+              Alternative Topology (LISP+ALT)", draft-ietf-lisp-alt-02
+              (work in progress), January 2010.
+
+   [I-D.ietf-lisp-ms]
+              Fuller, V. and D. Farinacci, "LISP Map Server",
+              draft-ietf-lisp-ms-04 (work in progress), October 2009.
+
+   [RFC1321]  Rivest, R., "The MD5 Message-Digest Algorithm", RFC 1321,
+              April 1992.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+9.2.  Informative References
+
+   [Bloom]    "http://en.wikipedia.org/wiki/Bloom_filter".
+
+   [CONS]     Farinacci, D.,, Fuller, V., and Meyer, D., "LISP-CONS: A
+              Content distribution Overlay Network  Service for LISP",
+              draft-meyer-lisp-cons-05.txt (work in progress),
+              November 2007.
+
+   [Dharma]   Dharmapurikar S., Krishnamurthy P., and Taylor, D.E.,
+              "Longest prefix matching using bloom filters", IEEE/ACM
+              Transactions on Networking (TON)  Volume 14 Issue 2 ,
+              April 2006.
+
+   [NERD]     Lear, E., "NERD: A Not-so-novel EID to RLOC Database",
+              draft-lear-lisp-nerd-07.txt (work in progress),
+              April 2008.
+
+   [cost]     Iannone L. and Bonaventure O., "On the Cost of Caching
+              Locator/ID mappings", CoNEXT New York, USA, December 2007.
+
+
+
+
+
+
+
+
+
+Flinck                  Expires September 2, 2010              [Page 11]
+
+Internet-Draft                 Member Test                    March 2010
+
+
+Author's Address
+
+   Hannu Flinck
+   Nokia  Siemens Networks
+   Linnoitustie 6
+   Espoo  02600
+   Finland
+
+   Email: hannu.flinck@nsn.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Flinck                  Expires September 2, 2010              [Page 12]
+
+

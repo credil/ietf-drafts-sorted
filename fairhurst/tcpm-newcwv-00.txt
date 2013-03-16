@@ -1,0 +1,504 @@
+
+
+
+TCPM Working Group                                          G. Fairhurst
+Internet-Draft                                                 I. Biswas
+Intended status: Standards Track                  University of Aberdeen
+Expires: September 8, 2011                                March 07, 2011
+
+
+             Updating TCP to support Variable-Rate Traffic
+                      draft-fairhurst-tcpm-newcwv-00
+
+Abstract
+
+   This document addresses issues that arise when TCP is used to support
+   variable-rate traffic that includes periods where the transmission
+   rate is limited by the application.  It evaluates TCP Congestion
+   Window Validation (TCP-CWV), an IETF experimental specification
+   defined in RFC 2581, and concludes that TCP-CWV sought to address
+   important issues, but failed to deliver a widely used solution.
+
+   The document recommends that the IETF should consider moving RFC 2861
+   from Experimental to Historic status, and replacing this with the
+   current specification, which updates TCP to allow a TCP sender to
+   restart quickly following either an idle or data-limited period.  The
+   method is expected to benefit variable-rate TCP applications, while
+   also providing an appropriate response if congestion is experienced.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on September 8, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2011 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+
+
+
+Fairhurst & Biswas      Expires September 8, 2011               [Page 1]
+
+Internet-Draft   TCP  support for  Variable-Rate Traffic      March 2011
+
+
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . . . 3
+   2.  Reviewing experience with TCP-CWV . . . . . . . . . . . . . . . 3
+   3.  Terminology . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+   4.  An updated TCP response to idle and application-limited
+       periods . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+     4.1.  A method for preserving cwnd in idle and
+           application-limited periods.  . . . . . . . . . . . . . . . 5
+     4.2.  The nonvalidated phase  . . . . . . . . . . . . . . . . . . 5
+     4.3.  TCP congestion control during the nonvalidated phase  . . . 5
+       4.3.1.  Adjustment at the end of the nonvalidated phase . . . . 6
+       4.3.2.  Response to congestion in the nonvalidated phase  . . . 7
+     4.4.  Determining a safe period to preserve cwnd  . . . . . . . . 7
+   5.  Security Considerations . . . . . . . . . . . . . . . . . . . . 8
+   6.  IANA Considerations . . . . . . . . . . . . . . . . . . . . . . 8
+   7.  Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . 8
+   8.  References  . . . . . . . . . . . . . . . . . . . . . . . . . . 8
+     8.1.  Normative References  . . . . . . . . . . . . . . . . . . . 8
+     8.2.  Informative References  . . . . . . . . . . . . . . . . . . 9
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . . . 9
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Fairhurst & Biswas      Expires September 8, 2011               [Page 2]
+
+Internet-Draft   TCP  support for  Variable-Rate Traffic      March 2011
+
+
+1.  Introduction
+
+   TCP's congestion window (cwnd) controls the number of packets a TCP
+   flow may have in the network at any time.  A bulk application that
+   always sends as fast as possible, will continue to grow the cwnd, and
+   increase its transmission rate until it reaches the maximum
+   permitted.  In contrast, a variable-rate application may experience
+   long periods when the sender is either idle or application-limited.
+
+   Standard TCP requires the cwnd to be reset to the restart window (rw)
+   when an application becomes idle.  RFC 2861 noted that this behaviour
+   was not always observed in current implementations.  Recent
+   experiments [Bis08] confirm this to still be the case.  Standard TCP
+   does not control growth of the cwnd when an application is data-
+   limited.  A data-limited application may therefore grow a cwnd that
+   does not reflect any current information about the state of the
+   network.  Use of an invalid cwnd may result in reduced application
+   performance or could significantly contribute to network congestion.
+   These issues were noted in [RFC 2861].
+
+   TCP-CWV proposed a solution to help reduce the cases where TCP
+   experienced an invalid cwnd.  The use of TCP-CWV is discussed in
+   Section 2.
+
+   Section 4 discusses an alternative to TCP-CWV that seeks to address
+   the same issues, but does so in a way that is expected to mitigate
+   the impact on an application that varies its transmission rate.  The
+   proposal described applies to both a data limited and an idle
+   condition. .
+
+
+2.  Reviewing experience with TCP-CWV
+
+   RFC 2861 described a simple modification to the TCP congestion
+   control algorithms that decayed the cwnd after the transition from a
+   "sufficiently-long" application-limited period, while using the slow-
+   start threshold ssthresh to save information about the previous value
+   of the congestion window.  This approach relaxed the standard TCP
+   behaviour [RFC5681] for an idle session, intended to improve
+   application performance.  It did not modify the behaviour for an
+   application-limited session where a sender continues to transmit at a
+   rate less than allowed by cwnd.
+
+   RFC 2861 has been implemented in some mainstream operating systems as
+   the default behaviour [Bis08].  Experience from using applications
+   with TCP-CWV suggests that this mechanism does not offer the
+   desirable increase in application performance for "bursty"
+   applications and it is unclear that applications actually use the
+
+
+
+Fairhurst & Biswas      Expires September 8, 2011               [Page 3]
+
+Internet-Draft   TCP  support for  Variable-Rate Traffic      March 2011
+
+
+   mechanism.  Analysis (e.g.  [Bis10]) has shown that TCP-CWV is able
+   to use the available capacity after an idle period over a shared path
+   and that this can have benefit, especially over long delay paths,
+   when compared to slow-start restart specified by standard TCP, but
+   this behaviour can be too conservative to be attractive to many
+   common variable-rate applications.
+
+   TCP-CWV offer a benefit, compared to standard TCP, for an application
+   that exhibits regular idleness.  However TCP-CWV would only benefit
+   the application if the idle period was greater than several RTOs,
+   since the behaviour would be the same as for standard TCP.  Although
+   TCP-CWV benefits the network in an application-limited scenario, the
+   conservative approach of TCP-CWV does not provide an incentive to
+   application to use this.  It is therefore suggested that TCP-CWV is
+   often a poor solution for many variable rate applications.  In
+   summary, TCP-CWV has the correct motivation, but has the wrong
+   approach to solving this problem
+
+
+3.  Terminology
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in [RFC2119].
+
+   The document also assumes familiarity with the terminology of TCP
+   congestion control [RFC5681].
+
+
+4.  An updated TCP response to idle and application-limited periods
+
+   This section proposes an update to the TCP congestion control
+   behaviour during an idle or data limited period.  The new method
+   allows a TCP sender to preserve the cwnd when an application becomes
+   idle for a period of time (set in this specification to 6 minutes).
+   This period where actual usage is less than allowed by cwnd is called
+   the nonvalidation phase.  This allows an application to resume
+   transmission at a previous rate without incurring the delay of slow-
+   start.  However, if the TCP sender experiences congestion using the
+   preserved cwnd, it is required to immediately reset the cwnd to an
+   appropriate value.  If a sender does not take advantage of the
+   preserved cwnd within 6 minutes, the value of cwnd is updated,
+   ensuring the value then reflects the capacity was recently used.
+
+   The new method does not differentiate between times when the sender
+   has become idle or application-limited.  It recognises that
+   applications can result in variable-rate transmission.  This
+   therefore reduces the incentive for an application to send data,
+
+
+
+Fairhurst & Biswas      Expires September 8, 2011               [Page 4]
+
+Internet-Draft   TCP  support for  Variable-Rate Traffic      March 2011
+
+
+   simply to keep transport congestion state.  The method requires SACK
+   to be enabled.  This allows a sender to select a cwnd following a
+   congestion event that is based on the measured path capacity path,
+   better reflecting the fair-share.  A similar approach was proposed by
+   TCP Jump Start [Liu07], as a congestion response after more rapid
+   opening of a connection.
+
+   It is expected that the proposed TCP modification will satisfy the
+   requirements of many variable rate applications and at the same time
+   provide an appropriate method for use in the Internet.  This change
+   may also serve to encourage application
+
+4.1.  A method for preserving cwnd in idle and application-limited
+      periods.
+
+   The method described in this document updates RFC 5681.  Use of the
+   method REQUIRES a TCP sender and the corresponding receiver to enable
+   the SACK option [RFC 3517].
+
+   RFC 5681 define a variable FlightSize, that indicates the amount of
+   outstanding data in the network.  In RFC 5681 this is used during
+   loss recovery, whereas in this method it is also used in normal data
+   transfer.  A sender is not required to accurately record this value,
+   but must be able to measure the volume of data in the network at
+   least each RTT period.
+
+4.2.  The nonvalidated phase
+
+   The updated method creates a new TCP phase that captures where the
+   cwnd reflects a valid or nonvalidated value.  The phases are defined
+   as:
+
+   o  Valid phase: FlightSize >=(2/3)*cwnd - In this phase the sender is
+      in the normal phase, where cwnd is an approximate indication of
+      available capacity currently available along the network path.
+
+   o  Nonvalidated phase: FlightSize <(2/3)*cwnd - In this phase the
+      sender is in the nonvalidated phase, where the cwnd was based on a
+      previous approximation of the available capacity, and the usage of
+      this capacity has not been validated in the previous RTT.  That
+      is, the transmission rate is not being constrained by the cwnd.
+
+4.3.  TCP congestion control during the nonvalidated phase
+
+   A TCP sender that enters the non-validated phase preserves the cwnd
+   (i.e., this neither grows nor reduces).  The phase is concluded after
+   a fixed period of time (6 minutes, as explained in section 4.4) or
+   when the sender transmits using the full cwnd (i.e. it is no longer
+
+
+
+Fairhurst & Biswas      Expires September 8, 2011               [Page 5]
+
+Internet-Draft   TCP  support for  Variable-Rate Traffic      March 2011
+
+
+   data-limited).
+
+   The behaviour in the non-validated phase is specified as:
+
+   o  If the sender consumes all the available space within the cwnd
+      (i.e. the remaining cwnd is less than one SMSS), then the sender
+      MUST exit the nonvalidated phase.  (The conditions for entering
+      and leaving this phase are intentionally different to introduce
+      hysteresis, although the change between phases is not impacted to
+      impact the application.)  If the Retransmission Time Out (RTO)
+      expires during the nonvalidated phase, the sender MUST exit the
+      nonvalidated phase.  It then uses the Standard TCP mechanism (in
+      this case the path history is considered unreliable).
+
+4.3.1.  Adjustment at the end of the nonvalidated phase
+
+   An application that remains in the nonvalidated phase for a period
+   greater than six minutes is required to adjust its congestion control
+   state.
+
+   During the non-validated phase, an application may produce bursts of
+   data at up to the cwnd in size.  This is no different to normal TCP,
+   however it is desirable to control the maximum burst size, e.g. by
+   setting a burst size limit, using a pacing algorithm, or some other
+   method.
+
+   At the end of the nonvalidated phase, the sender MUST update cwnd:
+
+   cwnd = max(FlightSize*2, IW).
+
+   Where IW is the TCP initial window.
+
+   The sender also MUST reset the ssthresh:
+
+   ssthresh = max(ssthresh, 3*cwnd/4).
+
+   The adjustment of ssthresh ensures that the sender records that it
+   has safely sustained the present rate.  This change is beneficial to
+   applications-limited flows that encounter occasional congestion, and
+   could otherwise suffer an unwanted additional delay in recovering the
+   transmission rate.
+
+   The sender MAY re-enter the nonvalidated phase if required (see
+   section 4.2).
+
+
+
+
+
+
+
+Fairhurst & Biswas      Expires September 8, 2011               [Page 6]
+
+Internet-Draft   TCP  support for  Variable-Rate Traffic      March 2011
+
+
+4.3.2.  Response to congestion in the nonvalidated phase
+
+   If the sender receives congestion feedback while in the nonvalidated
+   phase, i.e. it detects a packet-drop or receives an Explicit
+   Congestion Notification (ECN), this indicates that it was unsafe to
+   start with the preserved cwnd, and TCP is required to quickly reduce
+   the rate to avoid further congestion.
+
+   When loss is detected, the sender MUST calculate a safe cwnd:
+
+   cwnd = FlightSize- R.
+
+   Where, R is the volume of data reported as unacknowledged by the SACK
+   information.  Following the method proposed for JumpStart {Liu07].
+
+   At the end of the recovery phase, the TCP sender MUST reset the cwnd:
+
+   cwnd = (FlightSize/2).
+
+4.4.  Determining a safe period to preserve cwnd
+
+   Setting a limit to the period that cwnd is preserved avoids the
+   undesirable side effects that would result if cwnd were preserved for
+   an arbitrary long period, which was a part of the problem that TCP-
+   CWV originally attempted to address.  The period a sender may safely
+   preserve the cwnd, is a function of the period that a network path is
+   expected to sustain capacity reflected by cwnd.  There is no perfect
+   choice for this time.  The period of 6 minutes was chosen as a
+   compromise that was larger than the idle intervals of common
+   applications, but not sufficiently larger than the period for which
+   an Internet path may commonly be regarded as stable.
+
+   The capacity of wired networks is usually relatively stable for
+   periods of several minutes and that load stability increases with the
+   capacity.  This suggests that cwnd may be preserved for at least a
+   few minutes.
+
+   There are cases where the TCP throughput exhibits significant
+   variability over a time less than 6 minutes.  Examples could include
+   many wireless topologies, where TCP rate variations may fluctuate on
+   the order of a few seconds as a consequence of medium access protocol
+   instabilities.  Mobility changes may also impact TCP performance over
+   short time scales.  Senders that observe such rapid changes in the
+   path characteristic may also experience increased congestion with the
+   new method, however such variation would likely also impact TCP's
+   behaviour when supporting interactive and bulk applications.
+
+   Routing algorithms may modify the network path, disrupting the RTT
+
+
+
+Fairhurst & Biswas      Expires September 8, 2011               [Page 7]
+
+Internet-Draft   TCP  support for  Variable-Rate Traffic      March 2011
+
+
+   measurement and changing the capacity available to a TCP connection,
+   however such changes do not often occur within a time frame of a few
+   minutes.
+
+   The value of 6 minutes is expected to be sufficient for most current
+   applications.  Simulation studies also suggest that for most
+   practical applications, the performance using this value will not be
+   significantly different to that observed using a non-standard method
+   that does not reset cwnd after idle.
+
+
+5.  Security Considerations
+
+   General security considerations concerning TCP congestion control are
+   discussed in RFC 5681.  This document describes a algorithm for one
+   aspect of those congestion control procedures, and so the
+   considerations described in RFC 5681 apply to this algorithm also.
+
+
+6.  IANA Considerations
+
+   None.
+
+
+7.  Acknowledgments
+
+   The authors acknowledge the contributions of Dr A Sathiaseelan and Dr
+   R Secchi in supporting the evaluation of TCP-CWV and for their help
+   in developing the protocol proposed in this draft.
+
+
+8.  References
+
+8.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC2861]  Handley, M., Padhye, J., and S. Floyd, "TCP Congestion
+              Window Validation", RFC 2861, June 2000.
+
+   [RFC3517]  Blanton, E., Allman, M., Fall, K., and L. Wang, "A
+              Conservative Selective Acknowledgment (SACK)-based Loss
+              Recovery Algorithm for TCP", RFC 3517, April 2003.
+
+   [RFC5681]  Allman, M., Paxson, V., and E. Blanton, "TCP Congestion
+              Control", RFC 5681, September 2009.
+
+
+
+
+Fairhurst & Biswas      Expires September 8, 2011               [Page 8]
+
+Internet-Draft   TCP  support for  Variable-Rate Traffic      March 2011
+
+
+8.2.  Informative References
+
+   [Bis08]    Biswas and Fairhurst, "A Practical Evaluation of
+              Congestion Window Validation Behaviour, 9th Annual
+              Postgraduate Symposium in the Convergence of
+              Telecommunications, Networking and Broadcasting (PGNet),
+              Liverpool, UK, Jun. 2008.".
+
+   [Bis10]    Biswas, Sathiaseelan, Secchi, and Fairhurst, "Analysing
+              TCP for Bursty Traffic, Int'l J. of Communications,
+              Network and System Sciences, 7(3), July 2010.".
+
+   [Liu07]    Liu, Allman, Jiny, and Wang, "Congestion Control without a
+              Startup Phase, 5th International Workshop on Protocols for
+              Fast Long-Distance Networks (PFLDnet), Los Angeles,
+              California, USA, Feb. 2007.".
+
+
+Authors' Addresses
+
+   Godred Fairhurst
+   University of Aberdeen
+   School of Engineering
+   Fraser Noble Building
+   Aberdeen, Scotland  AB24 3UE
+   UK
+
+   Email: gorry@erg.abdn.ac.uk
+   URI:   http://www.erg.abdn.ac.uk
+
+
+   Israfil Biswas
+   University of Aberdeen
+   School of Engineering
+   Fraser Noble Building
+   Aberdeen, Scotland  AB24 3UE
+   UK
+
+   Email: israfil@erg.abdn.ac.uk
+   URI:   http://www.erg.abdn.ac.uk
+
+
+
+
+
+
+
+
+
+
+
+Fairhurst & Biswas      Expires September 8, 2011               [Page 9]
+

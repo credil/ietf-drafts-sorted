@@ -1,0 +1,673 @@
+
+
+
+TCP Maintenance and Minor                               R. Scheffenegger
+Extensions (tcpm)                                           NetApp, Inc.
+Internet-Draft                                         November 15, 2010
+Intended status: Standards Track
+Expires: May 19, 2011
+
+
+               Improving SACK-based loss recovery for TCP
+             draft-scheffenegger-tcpm-sack-loss-recovery-00
+
+Abstract
+
+   This note clarifies the behavior of TCP SACK while doing loss
+   recovery close to the end-of-stream.  This allows TCP SACK to never
+   exhibit worse loss recovery characteristics than TCP NewReno under
+   identical circumstances.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on May 19, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2010 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+
+Scheffenegger             Expires May 19, 2011                  [Page 1]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Requirements Language  . . . . . . . . . . . . . . . . . . . .  3
+   3.  Overview . . . . . . . . . . . . . . . . . . . . . . . . . . .  4
+   4.  Definitions  . . . . . . . . . . . . . . . . . . . . . . . . .  4
+   5.  Algorithm  . . . . . . . . . . . . . . . . . . . . . . . . . .  5
+   6.  Discussion . . . . . . . . . . . . . . . . . . . . . . . . . .  5
+     6.1.  Reordering . . . . . . . . . . . . . . . . . . . . . . . .  6
+   7.  Acknowledgements . . . . . . . . . . . . . . . . . . . . . . .  6
+   8.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . .  7
+   9.  Security Considerations  . . . . . . . . . . . . . . . . . . .  7
+   10. References . . . . . . . . . . . . . . . . . . . . . . . . . .  7
+     10.1. Normative References . . . . . . . . . . . . . . . . . . .  7
+     10.2. Informative References . . . . . . . . . . . . . . . . . .  7
+   Appendix A.  Scenarios . . . . . . . . . . . . . . . . . . . . . .  8
+     A.1.  Basic Case . . . . . . . . . . . . . . . . . . . . . . . .  9
+     A.2.  Data delay ~1 RTT  . . . . . . . . . . . . . . . . . . . . 10
+     A.3.  Data reordering  . . . . . . . . . . . . . . . . . . . . . 11
+   Author's Address . . . . . . . . . . . . . . . . . . . . . . . . . 11
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Scheffenegger             Expires May 19, 2011                  [Page 2]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+1.  Introduction
+
+   Selective Acknowledgement (SACK) is widely used to identify exactly
+   which TCP segment was lost and only send these missing segments
+   during a recovery episode.  This helps improve the effectiveness of
+   loss recovery and aligns with the principle of packet conservation.
+   When no SACK information is available, TCP senders typically revert
+   to the [RFC3782] NewReno fast retransmission / fast recovery
+   retransmission algorithm.  As ultima ratio, the method of last
+   resort, retransmission timeouts (RTO) are used to perform loss
+   recovery.
+
+   When multiple segments of a window are lost, including one or more
+   segments directly prior to the end-of-stream, TCP sessions making use
+   of [RFC3517] SACK suffer worse loss recovery performance than TCP
+   session utilizing [RFC3782] NewReno.  When this happens, TCP SACK has
+   to revert to retransmission timeout (RTO) for loss recovery.
+
+   An algorithm is described that allows the complete and timely
+   recovery at the end-of-stream.  The aim of this algorithm is to
+   address one corner case of TCP SACK.  The timeliness of recovery for
+   TCP SACK is improved to that of TCP NewReno.  Overall, this minor
+   change will minimize the prevalence of RTOs.
+
+
+2.  Requirements Language
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in [RFC2119].
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Scheffenegger             Expires May 19, 2011                  [Page 3]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+3.  Overview
+
+   TCP SACK Loss Recovery [RFC3517] was designed to reduce the number of
+   unnecessary retransmissions to close to zero and also to recover from
+   multiple segment loss within a single window without reverting to a
+   retransmission timeout.
+
+   In addition, [RFC2018] specifically stipulated up to which point a
+   SACK enabled sender may promote segments to become elegible for
+   retransmission under the SACK scheme.  This heuristic works very well
+   during bulk transfers, where the sender always has additional data to
+   transmit.  Close to the end of a stream, when there is no more data
+   in the socket to send, still outstanding and never acknowledged
+   segments can not become elegible for retransmission.
+
+   When this happens, TCP SACK performance degrades and becomes worse
+   than the performance of TCP NewReno [RFC3782].  TCP NewReno can
+   recover such a set of loss events without reverting to RTO loss
+   recovery.
+
+   The relevance of this specific aspect may seem unimportant at first
+   glance.  When TCP is used for boundary synchronized transactions,
+   where applications regularly stall transmitting data, end-of-stream
+   performance can dominate the transfer.  Such streams are very
+   frequently application limited during their existance (see definition
+   in [RFC5827]), and the performance penalty of TCP SACK often requires
+   the use of TCP NewReno despite it having worse overall network
+   efficiency.
+
+
+4.  Definitions
+
+   The reader is expected to be familiar with the definitions given in
+   [RFC5827], [RFC5681], [RFC3517] and [RFC2018].
+
+   SND.FACK (forward acknowledgment) is used to describe the highest
+   sequence number that has been SACKed by the receiver and subsequently
+   seen by the sender.  The full definition can be found in [MM96a] and
+   [MM96b].
+
+   End-of-stream is used similar to the definition of small congestion
+   windows in [RFC5827], with the exception of small congestion windows
+   due to TCP congestion control.  End-of-stream indicates that the TCP
+   sender has no additional unsent data in the sender socket, or may
+   wait for enough data to accumulate before sending (Nagle's Algorithm
+   [RFC0896]).
+
+
+
+
+
+Scheffenegger             Expires May 19, 2011                  [Page 4]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+5.  Algorithm
+
+   The key observation is that when the receiver sends out a cumulative
+   ACK with no SACK entries, all data delivered to the receiver is fully
+   continguous but some segments are potentially lost.  In NewReno loss
+   recovery, any cumulative ACK below "recover" triggers a single
+   retransmission regardless if NewReno is at end-of-stream or in
+   continous transfer.
+
+   TCP SACK already performs at least as good as TCP NewReno, as long as
+   the sender can continue to inject new data into the network.  The
+   modification outlined below ensures, that TCP SACK can perform as
+   good as NewReno under a wider range of circumstances.
+
+   This algorithm is only applicable when the TCP sender has SACK
+   enabled for the TCP connection, and also maintains a variable
+   SND.FACK.
+
+   A.  A TCP sender SHOULD NOT exit loss recovery if it receives a
+       cumulative ACK for a sequence number greater than RecoveryPoint
+       while it is at end-of-stream.  Any necessary congestion window
+       adjustments SHALL be performed as necessary.
+
+   B.  A TCP sender using this algorithm MUST perform the following
+       steps upon the receipt of a cumulative ACK containing no SACK
+       information, while it is in loss recovery.
+
+       1.  Process ACK information per the loss recovery algorithm
+           outlined in [RFC3517].
+
+       2.  If the ACK contains no SACK information, cumulatively
+           acknowledges all data up to SND.FACK (SND.UNA == SND.FACK),
+           some data is still outstanding (SND.UNA < SND.MAX), the TCP
+           sender may send additional data (cwnd - Pipe >= 1 SMSS), and
+           the TCP sender has no additional data to send beyond SND.MAX,
+           the TCP sender SHOULD transmit one segment.
+
+   In order to achive timely recovery the retransmission timer MUST NOT
+   be reset when this algorithm performs a retransmission.  This is in
+   strict compliance with [RFC0793].
+
+
+6.  Discussion
+
+   This algorithm does not deviate from current implementation of SACK
+   loss recovery for bulk transfers.  However, at the end-of-stream,
+   when there is no data to advance SND.MAX, this heuristic allows the
+   recovery of segments similar to NewReno loss recovery.  If the loss
+
+
+
+Scheffenegger             Expires May 19, 2011                  [Page 5]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+   occurs during times where cwnd is very small, or when the ACK clock
+   fails, this approach still falls back to RTO loss recovery.
+
+   For the case of only a few (2-3) segments lost in the last window
+   before the end-of-stream, which this algorithm addresses, no spurious
+   retransmissions are performed unless reordering delay above 1 RTT
+   occurs, any a cumulative ACK is received by the sender in the
+   meantime.  This property of the outlined algorithm is identical to
+   that of TCP NewReno.
+
+   The aspects of packet conservation, timely loss recovery and
+   avoidance of retransmission timeouts have lead to allowing only a
+   single segment to be recovered per RTT.
+
+6.1.  Reordering
+
+   If the last segment(s) at the end-of-stream are not lost, but delays,
+   three different cases may result:
+
+   If RTT > RTO(min), and reordering delay >= RTT:  No change in the
+       sender behavior, all segments may be retransmitted spuriously.
+       Without this algorithm due to RTO, with this algorithm the
+       retransmitted segments may be clocked out by ACKs.  Slow-start
+       may be posponed somewhat reliving acute network congestion
+       slightly.
+
+   If RTT < RTO(min), and reorder delay between RTT and RTO(min):  Some
+       spurious retransmits can happen, but retransmissions will again
+       occur at most 1 segment per RTT.  A premature, spurious RTO may
+       be avoided.
+
+   If reordering delay < RTT:  The TCP sender will not see a cumulative
+       ACK without SACK enties, thus SND.UNA will remain lower than
+       SND.FACK.  The TCP sender behavior is therefore unchanged.
+
+
+7.  Acknowledgements
+
+   The author would like to thank Matt Mathis for the insightful
+   discussions about SACK and it's intended behavior and the spirit
+   driving the design of SACK.
+
+   Furthermore, valuable feedback was received from Ethan Blanton,
+   Yoshifumi Nishida and John Heffner.
+
+   Dragana Damjanovic was very helpful in reviewing the text.
+
+
+
+
+
+Scheffenegger             Expires May 19, 2011                  [Page 6]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+8.  IANA Considerations
+
+   This memo includes no request to IANA.
+
+
+9.  Security Considerations
+
+   The algorithm presented in this paper shares security considerations
+   with [RFC2018] and [RFC3517].
+
+
+10.  References
+
+10.1.  Normative References
+
+   [RFC1323]  Jacobson, V., Braden, B., and D. Borman, "TCP Extensions
+              for High Performance", RFC 1323, May 1992.
+
+   [RFC2018]  Mathis, M., Mahdavi, J., Floyd, S., and A. Romanow, "TCP
+              Selective Acknowledgment Options", RFC 2018, October 1996.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC3517]  Blanton, E., Allman, M., Fall, K., and L. Wang, "A
+              Conservative Selective Acknowledgment (SACK)-based Loss
+              Recovery Algorithm for TCP", RFC 3517, April 2003.
+
+   [RFC3782]  Floyd, S., Henderson, T., and A. Gurtov, "The NewReno
+              Modification to TCP's Fast Recovery Algorithm", RFC 3782,
+              April 2004.
+
+   [RFC5681]  Allman, M., Paxson, V., and E. Blanton, "TCP Congestion
+              Control", RFC 5681, September 2009.
+
+   [RFC5827]  Allman, M., Avrachenkov, K., Ayesta, U., Blanton, J., and
+              P. Hurtig, "Early Retransmit for TCP and Stream Control
+              Transmission Protocol (SCTP)", RFC 5827, May 2010.
+
+10.2.  Informative References
+
+   [I-D.blanton-tcpm-3517bis]
+              Blanton, E., Allman, M., Jarvinen, I., and M. Kojo, "A
+              Conservative Selective Acknowledgment (SACK)-based Loss
+              Recovery Algorithm for TCP", draft-blanton-tcpm-3517bis-00
+              (work in progress), October 2010.
+
+   [I-D.henderson-tcpm-rfc3782-bis]
+
+
+
+Scheffenegger             Expires May 19, 2011                  [Page 7]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+              Floyd, S., Henderson, T., and A. Gurtov, "The NewReno
+              Modification to TCP's Fast Recovery Algorithm",
+              draft-henderson-tcpm-rfc3782-bis-01 (work in progress),
+              October 2010.
+
+   [I-D.ietf-tcpm-sack-recovery-entry]
+              Jarvinen, I. and M. Kojo, "Using TCP Selective
+              Acknowledgement (SACK) Information to Determine Duplicate
+              Acknowledgements for Loss Recovery Initiation",
+              draft-ietf-tcpm-sack-recovery-entry-01 (work in progress),
+              March 2010.
+
+   [LRSF]     Hurtig, P., Garcia, J., and A. Brunstrom, "Loss Recovery
+              in Short TCP/SCTP Flows", Dec 2006, <Karlstad University
+              Studies 2006:71>.
+
+   [MM96a]    Mathis, M. and J. Mahdavi, "Forward Acknowledgment:
+              Refining TCP Congestion Control", Aug 1996, <Proceedings
+              of SIGCOMM'96>.
+
+   [MM96b]    Mathis, M. and J. Mahdavi, "TCP Rate-Halving with Bounding
+              Parameters", Sep 2004,
+              <http://www.psc.edu/networking/papers/FACKnotes/current>.
+
+   [RFC0793]  Postel, J., "Transmission Control Protocol", STD 7,
+              RFC 793, September 1981.
+
+   [RFC0896]  Nagle, J., "Congestion control in IP/TCP internetworks",
+              RFC 896, January 1984.
+
+   [SimRTO]   Guan, Y., Van den Broeck, B., Potemans, J., Theunis, J.,
+              Li, D., Van Lil, E., and A. Van de Capelle, "Simulation
+              Study of TCP Eifel Algorithms", 2005, <http://
+              www.esat.kuleuven.be/telemic/networking/
+              opnetwork05_guan.pdf>.
+
+   [TCPLat]   Cardwell, N., Savage, S., and T. Anderson, "Modeling TCP
+              Latency", Mar 2000, <Proceedings IEEE INFOCOM>.
+
+
+Appendix A.  Scenarios
+
+   For clarity, each segment is denoted only via a single number.  Note
+   that the ACKs are also given with the segement they ack, not the next
+   sequence number.  For example S1 may span sequence numbers 1000-1999,
+   while the acknowledgement A1 carries the sequence number 2000.  If an
+   acknowledgement also carries SACK information, the SACK entries are
+   listed after a colon.  A hyphen denotes which segments a single SACK
+
+
+
+Scheffenegger             Expires May 19, 2011                  [Page 8]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+   entry spans.  For simplicity, all segments are SMSS sized.
+
+A.1.  Basic Case
+
+   In this scenario, the sender has no more data to send past S7.
+   Reordering of data segments or ACKs and ACK losses are are absent
+   from this scenario.
+
+
+                          ACK    TX  RX    ACK
+                          Rcvd   Seg Seg   Sent
+
+                          A00
+                                 S1  S1
+                                 S2  (dropped)
+                                           A1
+                          A0
+                                 S3  S3
+                                 S4  S4    A1,3
+                                           A1,3-4
+                          A1
+                                 S5  S5
+                                 S6  (dropped)
+                                           A1,3-5
+                          A1,3
+                                 S7  (dropped)
+                                 ---
+                          A1,3-4
+                                 ---
+                          A1,3-5
+                                 S2  S2
+                                           A5
+                          A5
+                                 S6  S6
+                                           A6
+                          A6
+                                 S7  S7
+                                           A7
+                          A7
+
+                        end-of-stream loss recovery
+
+
+
+
+
+
+
+
+
+
+Scheffenegger             Expires May 19, 2011                  [Page 9]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+A.2.  Data delay ~1 RTT
+
+   In this scenario, segments S6 and S7 are not dropped, but delayed by
+   about 1 RTT - while RTT is smaller then the minimum allowed
+   retransmission timeout threshold RTO(min).  Segments that are delayed
+   by less than 1 RTT are not retransmitted.  Segments delayed more than
+   1 RTT are either retransmitted by this algorithm, or by RTO loss
+   recovery.
+
+                          ACK    TX  RX    ACK
+                          Rcvd   Seg Seg   Sent
+
+                          A00
+                                 S1  S1
+                                 S2  (dropped)
+                                           A1
+                          A0
+                                 S3  S3
+                                 S4  S4    A1,3
+                                           A1,3-4
+                          A1
+                                 S5  S5
+                                 S6  (delayed)
+                                           A1,3-5
+                          A1,3
+                                 S7  (delayed)
+                                 ---
+                          A1,3-4
+                                 ---
+                          A1,3-5     S6
+                                 S2  S2    A1,3-6
+                                           A6
+                          A1,3-6     S7
+                                 ---       A7
+                          A6
+                                 S7  S7
+                                           A7
+                          A7
+
+                          A7
+
+                     end-of-stream segment delay < RTT
+
+
+
+
+
+
+
+
+
+Scheffenegger             Expires May 19, 2011                 [Page 10]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+A.3.  Data reordering
+
+   In this case, the segments S6 and S7 are delivered out of order.
+   This is a normal SACK recovery event.
+
+                         ACK    TX  RX    ACK
+                         Rcvd   Seg Seg   Sent
+
+                         A00
+                                S1  S1
+                                S2  (dropped)
+                                          A1
+                         A0
+                                S3  S3
+                                S4  S4    A1,3
+                                          A1,3-4
+                         A1
+                                S5  S5
+                                S6  (reordered)
+                                          A1,3-5
+                         A1,3
+                                S7  S7
+                                ---       A1,3-5,7
+                         A1,3-4
+                                --- S6
+                                          A1,3-7
+                         A1,3-5
+                                S2  S2
+                                          A7
+                         A1,3-5,7
+                                S6
+                                          A7
+                         A1,3-7
+                                ---
+
+                         A7
+
+                         A7
+
+                    end-of-stream segment reorder < RTT
+
+
+
+
+
+
+
+
+
+
+
+Scheffenegger             Expires May 19, 2011                 [Page 11]
+
+Internet-Draft             SACK loss recovery              November 2010
+
+
+Author's Address
+
+   Richard Scheffenegger
+   NetApp, Inc.
+   Am Euro Platz 2
+   Vienna,   1120
+   Austria
+
+   Phone: +43 1 3676811 3146
+   Email: rs@netapp.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Scheffenegger             Expires May 19, 2011                 [Page 12]
+
+

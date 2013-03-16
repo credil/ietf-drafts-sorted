@@ -1,0 +1,952 @@
+
+
+
+OPSEC                                                           D. Dugal
+Internet-Draft                                          Juniper Networks
+Intended status: Informational                              C. Pignataro
+Expires: December 31, 2010                                       R. Dunn
+                                                           Cisco Systems
+                                                           June 29, 2010
+
+
+                  Protecting The Router Control Plane
+               draft-ietf-opsec-protect-control-plane-00
+
+Abstract
+
+   This memo provides a method for protecting a router's control plane
+   from undesired or malicious traffic.  In this approach, all
+   legitimate router control plane traffic is identified.  Once
+   legitimate traffic has been identified, a filter is deployed in the
+   router's forwarding plane.  That filter prevents traffic not
+   specifically identified as legitimate from reaching the router's
+   control plane or rate limited to an acceptable level.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on December 31, 2010.
+
+Copyright Notice
+
+   Copyright (c) 2010 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+
+
+
+Dugal, et al.           Expires December 31, 2010               [Page 1]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Applicability Statement  . . . . . . . . . . . . . . . . . . .  4
+   3.  Method . . . . . . . . . . . . . . . . . . . . . . . . . . . .  4
+     3.1.  Legitimate Traffic . . . . . . . . . . . . . . . . . . . .  4
+     3.2.  Filter Design  . . . . . . . . . . . . . . . . . . . . . .  5
+     3.3.  Design Trade-offs  . . . . . . . . . . . . . . . . . . . .  6
+   4.  Security Considerations  . . . . . . . . . . . . . . . . . . .  8
+   5.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . .  9
+   6.  Acknowledgements . . . . . . . . . . . . . . . . . . . . . . .  9
+   7.  Informative References . . . . . . . . . . . . . . . . . . . .  9
+   Appendix A.  Cisco Configuration . . . . . . . . . . . . . . . . . 10
+   Appendix B.  Juniper Configuration . . . . . . . . . . . . . . . . 12
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 16
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Dugal, et al.           Expires December 31, 2010               [Page 2]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+1.  Introduction
+
+   Modern router architecture design maintains a strict separation of
+   forwarding and routing control plane hardware and software.  The
+   router control plane supports routing and management functions, and
+   is generally described as router architecture hardware and software
+   components for handling packets destined to the device itself as well
+   as building and sending packets originated locally on the device.
+   Forwarding plane is typically described as router architecture
+   hardware and software components responsible for taking a packet
+   coming in one interface, performing a lookup to identify the packet's
+   IP next hop and determine the outgoing interface towards the
+   destination, and forwarding the packet through the correct outgoing
+   interface.
+
+   Visually it can be represented as the router's control plane hardware
+   sitting on top of and interfacing with the forwarding plane hardware,
+   with interfaces connecting to other network devices.  See Figure 1.
+
+                             +----------------+
+                             | Router Control |
+                             |     Plane      |
+                             +------+ +-------+
+                                    | |
+                               Router Control
+                              Plane Protection
+                                    | |
+                             +------+ +-------+
+                             |   Forwarding   |
+               Interface X ==[     Plane      ]== Interface Y
+                             +----------------+
+
+                 Figure 1: Router Control Plane Protection
+
+   Typically, forwarding plane functionality is realized in high-
+   performance Application Specific Integrated Circuits (ASICs) that are
+   capable of handling very high packet rates.  By contrast, the router
+   control plane is generally realized in software on general purpose
+   processors.  While software instructions run on both planes, the
+   router control plane software is usually not optimized for high speed
+   packet handling.  Given their differences in packet handling
+   capabilities, the router's control plane hardware is more susceptible
+   to be overwhelmed by a DoS attack than forwarding plane ASICs.  It is
+   imperative that the router control plane remain stable regardless of
+   traffic load to and from the device because the router control plane
+   is what drives the programming of the forwarding plane.
+
+   The router control plane processes traffic destined to the router,
+
+
+
+Dugal, et al.           Expires December 31, 2010               [Page 3]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+   and because of the wider range of functionality is more susceptible
+   to security vulnerabilities and a more likely target for a DoS attack
+   than the forwarding plane.
+
+   It is advisable to protect the router control plane by implementing
+   mechanisms to filter completely or rate limit traffic not required at
+   the control plane level (i.e., unwanted traffic).  Router Control
+   Plane Protection is the concept of filtering or rate limiting
+   unwanted traffic which would be diverted out of the forwarding plane
+   up to the router control plane.  The closer to the forwarding plane
+   and line-rate hardware the filters and rate-limiters are, the more
+   effective the protection is and the more resistant the system is to
+   DoS attacks.  This memo demonstrates how to deploy an example policy
+   filter that satisfies a set of example traffic matching, filtering
+   and rate limiting criteria..
+
+
+2.  Applicability Statement
+
+   The method described in Section 3 and depicted in Figure 1
+   illustrates how to protect the router control plane from unwanted
+   traffic.  Recognizing that deployment scenarios will vary, the exact
+   implementation is not generally applicable in all situations.  The
+   categorization of legitimate router control plane traffic is
+   critically important in a successful implementation.
+
+   The examples given in this memo are simplified and minimalistic,
+   designed to illustrate the concept of protecting the router's control
+   plane.  From them, operators can extrapolate specifics based on their
+   unique configuration and environment.
+
+   This method is applicable for IPv4 as well as IPv6 address families.
+
+
+3.  Method
+
+   In this memo, the authors demonstrate how a filter protecting the
+   router control plane can be deployed.  In Section 3.1, a sample
+   router is introduced and all traffic that its control plane must
+   process is identified.  In Section 3.2, filter design concepts are
+   discussed.  Cisco (Cisco IOS software) and Juniper (JUNOS)
+   implementations are provided in Appendices A and B, respectively.
+
+3.1.  Legitimate Traffic
+
+   In this example, the router control plane must process traffic per
+   the following criteria:
+
+
+
+
+Dugal, et al.           Expires December 31, 2010               [Page 4]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+   o  Drop all IP packets that are fragments
+
+   o  Permit ICMP traffic from any source, rate-limited to 500 kbps
+
+   o  Permit OSPF traffic from routers within the local network
+      (192.0.2.0/24)
+
+   o  Permit iBGP traffic from routers within the local network
+      (192.0.2.0/24)
+
+   o  Permit eBGP traffic from known eBGP peers (198.51.100.25,
+      198.51.100.27, 198.51.100.29, and 198.51.100.31)
+
+   o  Permit DNS traffic from local DNS resolvers (198.51.100.0/30)
+
+   o  Permit NTP traffic from local NTP servers (198.51.100.4/30)
+
+   o  Permit SSH traffic from network management stations
+      (198.51.100.128/25)
+
+   o  Permit SNMP traffic from network management stations
+      (198.51.100.128/25)
+
+   o  Permit RADIUS authentication and accounting replies from RADIUS
+      servers (198.51.100.9 and 198.51.100.10) that are listening on UDP
+      ports 1645 and 1646.  Note that this doesn't account for a server
+      using Internet Assigned Numbers Authority (IANA) ports 1812 and
+      1813 for RADIUS.
+
+   o  Permit all other IP traffic that was not explicitly matched in a
+      class above, rate-limited to 500 kbps, and drop above that rate
+
+   o  Permit non-IP traffic, rate-limited to rate of 250 kbps, and drop
+      all remaining traffic above that rate
+
+   The characteristics of legitimate traffic will vary from network to
+   network.  The list provided above is for example only.
+
+3.2.  Filter Design
+
+   A filter is installed on the forwarding plane.  This filter counts
+   and applies the actions to the categories of traffic described in
+   Section 3.1.  Because the filter is enforced in the forwarding plane,
+   it prevents traffic from consuming bandwidth on the interface that
+   connects the forwarding plane to the router control plane.  The
+   counters serve as an important forensic tool for the analysis of
+   potential attacks, and as an invaluable debugging and troubleshooting
+   aid.  By adjusting the granularity and order of the filters more
+
+
+
+Dugal, et al.           Expires December 31, 2010               [Page 5]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+   granular forensics can be performed (i.e., create a filter that
+   matches only on traffic allowed from a group of IP addresses for a
+   given protocol followed by a filter that denies all traffic for that
+   protocol).  This would allow for counters to be monitored for the
+   allowed protocol filter as well as any traffic matching traffic for
+   the specific protocol that didn't originate from the explicitly
+   allowed hosts.
+
+   In addition to the filters, rate-limiters for certain classes of
+   traffic are also installed in the forwarding plane as defined in
+   Section 3.1.  These rate limiters help futher control the traffic
+   that will reach the control plane for each filtered class as well as
+   all traffic not matching an explicit class.  The actual rates
+   selected for various classes is network deployment specific and
+   analysis of required rates for stability should be done periodically.
+
+   Syntactically, these filters explicitly define "allowed" traffic
+   (including IP addresses, protocols, and ports), define acceptable
+   actions for these acceptable traffic profiles (e.g., rate-limit or
+   simply permit the traffic), and then drop to the bit bucket all
+   traffic destined to the router control plane that is not within the
+   specifications of the policy definition.
+
+   In an actual production environment, predicting a complete and
+   exhaustive list of traffic necessary to reach the router's control
+   plane for day-to-day operation may not be this obvious.  One
+   recommended method to gauge this set of traffic is to allow all
+   traffic initially, and audit what hits the router control plane
+   before applying any explicit filters or rate limits.  See the
+   Section 3.3 section below for more discussion of this topic.
+
+   The filter design provided in this document is intentionally limited
+   to attachment at the local router in question (e.g., a 'service-
+   policy' attached to the 'control-plane' in Cisco IOS, or a firewall
+   filter attached to the 'lo0' interface in JUNOS).  While virtually
+   all production environments utilize and rely heavily upon edge
+   protection or interface filtering, these methods of router protection
+   are beyond the intended scope of this document.  Additionally, the
+   protocols themselves that are allowed to reach the control plane
+   (e.g., OSPF, RSVP, TCP, SNMP, DNS, NTP, and inherently, SSH, TLS,
+   ESP, etc.) may have cryptographic security methods applied to them,
+   and the method of router control plane protection herein provided is
+   not a replacement for these cryptographic methods.
+
+3.3.  Design Trade-offs
+
+   In designing the protection method, there are two independent parts
+   to consider: the classification of traffic (i.e., which traffic is
+
+
+
+Dugal, et al.           Expires December 31, 2010               [Page 6]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+   matched by the filters), and the policy actions taken on the
+   classified traffic.
+
+   There are different levels of granularity utilized for traffic
+   classification.  For example, allowing all traffic from specific
+   source IP addresses versus allowing only a specific set of protocols
+   from those specific source IP addresses will each affect a different
+   set of traffic.
+
+   Similarly, the policy actions taken on the classified traffic have
+   degrees of impact that may not become immediately obvious.  For
+   example, discarding all ICMP traffic may have a negative impact on
+   the operational use of ICMP tools such as ping or traceroute to debug
+   network issues or to test turn up of a new circuit.  Expanding on
+   this, in a real production network, an astute operator could define
+   varying rate limits for ICMP such that internal traffic is granted
+   uninhibited access to the router control plane, while traffic from
+   external addresses is rate limited.
+
+   It is important to note that both classification and policy action
+   decisions are accompanied by respective trade-offs.  Two examples of
+   these trade-off decisions are, operational complexity at the expense
+   of policy (and statistics gathering) detail, and tighter protection
+   at the expense of network supportability and troubleshooting ability.
+
+   Two types of traffic that need special consideration are IP fragments
+   and IP optioned packets.  For network deployments where IP
+   fragmentation is necessary, a blanket policy of dropping all
+   fragments may not be possible.  However, many deployments allow
+   network configurations such that the router control plane should
+   never see a fragmented datagram.  Since many attacks rely on ip
+   fragmentation the example policy referenced here drops all fragments.
+   Similarly, some deployments may chose to drop all IP Optioned
+   Packets.  Others may need to losen the constraint to allow for
+   protocols that require IP Optioned packets such as RSVP.
+
+   The goal of the method for protecting the router control plane is to
+   minimize potential disruptions.  The granularity of the filter design
+   inversely correlates to the scope of the potential disruption.  The
+   finer the granularity of the filter design (e.g., isolating a more
+   targeted subset of traffic from the rest of the policed traffic, or
+   isolating valid source addresses into a different class or classes)
+   the smaller the scope of disruption.
+
+   Additionally, the baselining and monitoring of traffic flows to the
+   router's control plane are critical in determining both the rates and
+   granularity of the policies being applied.  This is important to
+   validate the existing policies and rules or update them as the
+
+
+
+Dugal, et al.           Expires December 31, 2010               [Page 7]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+   network evolves and its traffic dynamics change.  Some possible ways
+   to achieve this include individual policy counters that can be
+   exported or retrieved for example via SNMP, and logging of filtering
+   actions.
+
+   Finally, the use of flow-based behavioral analysis or CLI functions
+   to identify what client/server functions a given router's control
+   plane handles would be very useful during initial policy development
+   phases, and certainly for forensic analysis afterwards.
+
+
+4.  Security Considerations
+
+   The filter above leaves the router susceptible to discovery from any
+   host on the Internet.  If network operators find this risk
+   objectionable, they can mitigate it by restricting the sub-networks
+   from which ICMP Echo requests or traceroute packets are accepted.
+   Moreover, different rate-limiting policies may be defined for
+   internally (e.g., from the NOC) versus externally sourced traffic.
+
+   The filter above also leaves the router exposed to port scans from
+   hosts spoofing the source addresses found in Section 3.1.  Network
+   operators can mitigate this risk by preventing source address
+   spoofing with filters applied at the network edge.  Refer to Section
+   5.3.8 of [RFC1812] for more information regarding source address
+   validation.  Other methods also exist for limiting exposure to packet
+   spoofing such as the Generalized TTL Security Mechanism (GTSM)
+   [RFC5082] and Ingress Filtering [RFC2827] [RFC3704].
+
+   The ICMP rate limiter specified in this filter protects the router
+   from floods of ICMP traffic.  However, during an ICMP flood, some
+   legitimate ICMP traffic may be dropped.  Because of this, when
+   operators discover a flood of ICMP traffic, they are highly motivated
+   to cut it off at its source.
+
+   Additional considerations pertaining to the usage and handling of
+   traffic that utilizes the IP Router Alert Options can be found at
+   [I-D.ietf-intarea-router-alert-considerations], and additional IP
+   Options filtering explanations can be found at
+   [I-D.gont-opsec-ip-options-filtering].
+
+   The treatment of exception traffic in the forwarding plane, and the
+   generation of specific messages by the router control plane also
+   requires protection from a DoS attack.  Specifically, the generation
+   of ICMP Unreachable messages by the router control plane needs to be
+   rate-limited, either implicitly within the router's architecture or
+   explicitly through configuration.  See Section 4.3.2.8 of [RFC1812].
+
+
+
+
+Dugal, et al.           Expires December 31, 2010               [Page 8]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+   Additionally, the handling of TTL / Hop Limit expired traffic needs
+   protection.  This traffic is not necessarily addressed to the device,
+   but it can get sent to the control plane to process the TTL / Hop
+   Limit expiration.  For example, rate limiting the TTL / Hop Limit
+   expired traffic before sending the packets to the router control
+   plane component that will generate the ICMP error, and distributing
+   the sending of ICMP errors to Line Card CPUs are protection
+   mechanisms that mitigate attacks before they can negatively affect a
+   rate-limited router control plane component.
+
+
+5.  IANA Considerations
+
+   [RFC Editor: please remove this section prior to publication.]
+
+   This document has no IANA actions.
+
+
+6.  Acknowledgements
+
+   The authors would like to thank Ron Bonica for providing initial and
+   ongoing review, suggestions, and valuable input.  Pekka Savola,
+   Warren Kumari, and Xu Chen provided very thorough and useful feedback
+   that improved the document.  Many thanks to John Kristoff,
+   Christopher Morrow, and Donald Smith for a fruitful discussion around
+   the operational and manageability aspects of router control plane
+   protection techniques.  The authors would also like to thank Joel
+   Jaeggli, Richard Graveman, Danny McPherson, Gregg Schudel, and Eddie
+   Parra for providing thorough review, useful suggestions, and valuable
+   input.
+
+
+7.  Informative References
+
+   [I-D.gont-opsec-ip-options-filtering]
+              Gont, F. and S. Fouant, "IP Options Filtering
+              Recommendations", draft-gont-opsec-ip-options-filtering-00
+              (work in progress), March 2010.
+
+   [I-D.ietf-intarea-router-alert-considerations]
+              Faucheur, F., "IP Router Alert Considerations and Usage",
+              draft-ietf-intarea-router-alert-considerations-00 (work in
+              progress), March 2010.
+
+   [RFC1812]  Baker, F., "Requirements for IP Version 4 Routers",
+              RFC 1812, June 1995.
+
+   [RFC2827]  Ferguson, P. and D. Senie, "Network Ingress Filtering:
+
+
+
+Dugal, et al.           Expires December 31, 2010               [Page 9]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+              Defeating Denial of Service Attacks which employ IP Source
+              Address Spoofing", BCP 38, RFC 2827, May 2000.
+
+   [RFC3704]  Baker, F. and P. Savola, "Ingress Filtering for Multihomed
+              Networks", BCP 84, RFC 3704, March 2004.
+
+   [RFC5082]  Gill, V., Heasley, J., Meyer, D., Savola, P., and C.
+              Pignataro, "The Generalized TTL Security Mechanism
+              (GTSM)", RFC 5082, October 2007.
+
+
+Appendix A.  Cisco Configuration
+
+
+   !Start: Protecting The Router Control Plane
+   !
+   !Policy-map Configuration
+   !
+   !Access-list Definitions
+   ip access-list extended ICMP
+    permit icmp any any
+   ip access-list extended OSPF
+    permit ospf 192.0.2.0 0.0.0.255 any
+   ip access-list extended IBGP
+    permit tcp 192.0.2.0 0.0.0.255 eq bgp any
+    permit tcp 192.0.2.0 0.0.0.255 any eq bgp
+   ip access-list extended EBGP
+    permit tcp host 198.51.100.25 eq bgp any
+    permit tcp host 198.51.100.25 any eq bgp
+    permit tcp host 198.51.100.27 eq bgp any
+    permit tcp host 198.51.100.27 any eq bgp
+    permit tcp host 198.51.100.29 eq bgp any
+    permit tcp host 198.51.100.29 any eq bgp
+    permit tcp host 198.51.100.31 eq bgp any
+    permit tcp host 198.51.100.31 any eq bgp
+   ip access-list extended DNS
+    permit udp 198.51.100.0 0.0.0.252 eq domain any
+   ip access-list extended NTP
+    permit udp 198.51.100.4 255.255.255.252 any eq ntp
+   ip access-list extended SSH
+    permit tcp 198.51.100.0 0.0.0.128 any eq 22
+   ip access-list extended SNMP
+    permit udp 198.51.100.128 0.0.0.125 any eq snmp
+   ip access-list extended RADIUS
+    permit udp host 198.51.100.9 eq 1645 any
+    permit udp host 198.51.100.9 eq 1646 any
+    permit udp host 198.51.100.10 eq 1645 any
+    permit udp host 198.51.100.10 eq 1646 any
+
+
+
+Dugal, et al.           Expires December 31, 2010              [Page 10]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+   ip access-list extended FRAGMENTS
+    permit ip any any fragments
+   ip access-list extended ALLOTHERIP
+    permit ip any any
+   !
+   !Class Definitions
+   !
+   class-map match-all ICMP
+    match access-group name ICMP
+   class-map match-all OSPF
+    match access-group name OSPF
+   class-map match-all IBGP
+    match access-group name IBGP
+   class-map match-all EBGP
+    match access-group name EBGP
+   class-map match-all DNS
+    match access-group name DNS
+   class-map match-all NTP
+    match access-group name NTP
+   class-map match-all SSH
+    match access-group name SSH
+   class-map match-all SNMP
+    match access-group name SNMP
+   class-map match-all RADIUS
+    match access-group name RADIUS
+   class-map match-all FRAGMENTS
+    match access-group name FRAGMENTS
+   class match-all ALLOTHERIP
+    match access-group name ALLOTHERIP
+   !
+   !Policy Definition
+   !
+   policy-map COPP
+    class FRAGMENTS
+     drop
+    class ICMP
+     police 500000
+    class OSPF
+    class IBGP
+    class EBGP
+    class DNS
+    class NTP
+    class SSH
+    class SNMP
+    class RADIUS
+    class ALLOTHERIP
+      police cir 500000
+        conform-action transmit
+
+
+
+Dugal, et al.           Expires December 31, 2010              [Page 11]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+        exceed-action drop
+        violate-action drop
+    class class-default
+      police cir 250000
+        conform-action transmit
+        exceed-action drop
+        violate-action drop
+   !
+   !Control Plane Configuration
+   !
+   control-plane
+    service-policy input COPP
+   !
+   !End: Protecting The Router Control Plane
+
+
+Appendix B.  Juniper Configuration
+
+
+   policy-options {
+       prefix-list IBGP-NEIGHBORS {
+           192.0.2.0/24;
+       }
+       prefix-list EBGP-NEIGHBORS {
+           198.51.100.25/32;
+           198.51.100.27/32;
+           198.51.100.29/32;
+           198.51.100.31/32;
+       }
+       prefix-list RADIUS-SERVERS {
+           198.51.100.9/32;
+           198.51.100.10/32;
+       }
+   }
+   firewall {
+       policer 500kbps {
+           if-exceeding {
+               bandwidth-limit 500k;
+               burst-size-limit 1500;
+           }
+           then discard;
+       }
+       policer 250kbps {
+           if-exceeding {
+               bandwidth-limit 250k;
+               burst-size-limit 1500;
+           }
+           then discard;
+
+
+
+Dugal, et al.           Expires December 31, 2010              [Page 12]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+       }
+       family inet {
+           filter protect-router-control-plane {
+               term first-frag {
+                   from {
+                       first-fragment;
+                   }
+                   then {
+                       count frag-discards;
+                       log;
+                       discard;
+                   }
+               }
+               term next-frag {
+                   from {
+                       is-fragment;
+                   }
+                   then {
+                       count frag-discards;
+                       log;
+                       discard;
+                   }
+               }
+               term icmp {
+                   from {
+                       protocol icmp;
+                   }
+                   then {
+                       policer 500kbps;
+                       accept;
+                   }
+               }
+               term ospf {
+                   from {
+                       source-address {
+                           192.0.2.0/24;
+                       }
+                       protocol ospf;
+                   }
+                   then accept;
+               }
+               term ibgp-connect {
+                   from {
+                       source-prefix-list {
+                           IBGP-NEIGHBORS;
+                       }
+                       protocol tcp;
+                       destination-port bgp;
+
+
+
+Dugal, et al.           Expires December 31, 2010              [Page 13]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+                   }
+                   then accept;
+               }
+               term ibgp-reply {
+                   from {
+                       source-prefix-list {
+                           IBGP-NEIGHBORS;
+                       }
+                       protocol tcp;
+                       port bgp;
+                   }
+                   then accept;
+               }
+               term ebgp-connect {
+                   from {
+                       source-prefix-list {
+                           EBGP-NEIGHBORS;
+                       }
+                       protocol tcp;
+                       destination-port bgp;
+                   }
+                   then accept;
+               }
+               term ebgp-reply {
+                   from {
+                       source-prefix-list {
+                           EBGP-NEIGHBORS;
+                       }
+                       protocol tcp;
+                       port bgp;
+                   }
+                   then accept;
+               }
+               term dns {
+                   from {
+                       source-address {
+                           198.51.100.0/30;
+                       }
+                       protocol udp;
+                       port domain;
+                   }
+                   then accept;
+               }
+               term ntp {
+                   from {
+                       source-address {
+                           198.51.100.4/30;
+                       }
+
+
+
+Dugal, et al.           Expires December 31, 2010              [Page 14]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+                       protocol udp;
+                       destination-port ntp;
+                   }
+                   then accept;
+               }
+               term ssh {
+                   from {
+                       source-address {
+                           198.51.100.128/25;
+                       }
+                       protocol tcp;
+                       destination-port ssh;
+                   }
+                   then accept;
+               }
+               term snmp {
+                   from {
+                       source-address {
+                           198.51.100.128/25;
+                       }
+                       protocol udp;
+                       destination-port snmp;
+                   }
+                   then accept;
+               }
+               term radius {
+                   from {
+                       source-prefix-list {
+                           RADIUS-SERVERS;
+                       }
+                       protocol udp;
+                       port [1645 1646];
+                   }
+                   then accept;
+               }
+               term default-term {
+                   then {
+                       count copp-exceptions;
+                       log;
+                       policer 500kbps;
+                       accept;
+                   }
+               }
+           }
+       }
+       family any {
+           filter protect-router-control-plane-non-ip {
+               term rate-limit-non-ip {
+
+
+
+Dugal, et al.           Expires December 31, 2010              [Page 15]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+                   then {
+                       policer 250kbps;
+                       accept;
+                   }
+               }
+           }
+       }
+   }
+   interfaces {
+       lo0 {
+           unit 0 {
+               family inet {
+                   filter input protect-router-control-plane;
+               }
+               family any {
+                   filter input protect-router-control-plane-non-ip;
+               }
+           }
+       }
+   }
+
+
+Authors' Addresses
+
+   David Dugal
+   Juniper Networks
+   10 Technology Park Drive
+   Westford, MA  01886
+   US
+
+   Email: ddugal@juniper.net
+
+
+   Carlos Pignataro
+   Cisco Systems
+   7200-12 Kit Creek Road
+   Research Triangle Park, NC  27709
+   US
+
+   Email: cpignata@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+Dugal, et al.           Expires December 31, 2010              [Page 16]
+
+Internet-Draft        Protect Router Control Plane             June 2010
+
+
+   Rodney Dunn
+   Cisco Systems
+   7200-12 Kit Creek Road
+   Research Triangle Park, NC  27709
+   US
+
+   Email: rodunn@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Dugal, et al.           Expires December 31, 2010              [Page 17]
+

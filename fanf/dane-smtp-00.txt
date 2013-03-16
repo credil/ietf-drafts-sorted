@@ -1,0 +1,448 @@
+
+
+
+DNS-Based Authentication of Named                               T. Finch
+Entities (DANE)                                  University of Cambridge
+Internet-Draft                                              May 25, 2012
+Intended status: Standards Track
+Expires: November 26, 2012
+
+
+      Secure inter-domain SMTP with TLS, DNSSEC and TLSA records.
+                        draft-fanf-dane-smtp-00
+
+Abstract
+
+   SMTP supports STARTTLS for inter-domain mail transfer, but it only
+   provides very limited security because the server's certificate
+   cannot be authenticated.  This memo specifies how TLSA records in the
+   DNS can be used for proper MX target server authentication.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on November 26, 2012.
+
+Copyright Notice
+
+   Copyright (c) 2012 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+
+Finch                   Expires November 26, 2012               [Page 1]
+
+Internet-Draft               SMTP with TLSA                     May 2012
+
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . . . 3
+   2.  Terminology . . . . . . . . . . . . . . . . . . . . . . . . . . 3
+   3.  Details of SMTP with TLSA . . . . . . . . . . . . . . . . . . . 4
+   4.  IANA Considerations . . . . . . . . . . . . . . . . . . . . . . 5
+   5.  Security considerations . . . . . . . . . . . . . . . . . . . . 6
+   6.  References  . . . . . . . . . . . . . . . . . . . . . . . . . . 6
+     6.1.  Normative References  . . . . . . . . . . . . . . . . . . . 6
+     6.2.  Informative References  . . . . . . . . . . . . . . . . . . 7
+   Appendix A.  Rationale - choice of certificate identity . . . . . . 7
+   Author's Address  . . . . . . . . . . . . . . . . . . . . . . . . . 8
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Finch                   Expires November 26, 2012               [Page 2]
+
+Internet-Draft               SMTP with TLSA                     May 2012
+
+
+1.  Introduction
+
+   The specification for SMTP over TLS [RFC3207] does not describe how
+   to authenticate a server: which identity relating to the connection
+   ought to be authenticated by the server's certificate.  In practice,
+   most certificates presented by publicly-referenced SMTP servers
+   either cannot be validated with respect to a well-known certification
+   authority, or do not verify any identity expected by the client.
+
+   As a result, inter-domain SMTP clients cannot require working server
+   authentication if they want to successfully send mail using TLS.
+   Therefore TLS currently provides only a limited amount of additional
+   security for inter-domain SMTP.  Its encryption protects against on-
+   path passive eavesdropping; but it does not protect against an active
+   attack, since the client has no way to detect when an attacker is
+   spoofing the server.
+
+   This memo describes how to fix this using DNSSEC [RFC4033] and TLSA
+   records [I-D.ietf-dane-protocol].
+
+   We use DNSSEC to secure the association between a mail domain and its
+   SMTP server host names.  A server's TLS certificate authenticates its
+   host name.
+
+   As well as its normal function of providing an association between a
+   domain name and a certificate, we are using the existance of a TLSA
+   record to signal to the client that it can expect a valid server
+   certificate.
+
+   The protocol described in this memo adds new security checks that can
+   cause email delivery to be delayed when a security failure is
+   detected.
+
+
+2.  Terminology
+
+   ADMD:  An ADministrative Management Domain, as described in the
+      Internet Mail Architecture [RFC5598].
+
+   SMTP server host name:  The target of a (possibly implicit) MX
+      record.
+
+   Inter-domain SMTP:  SMTP between different ADMDs across the public
+      Internet, where a client sends mail to a publicly-referenced SMTP
+      server.
+
+
+
+
+
+
+Finch                   Expires November 26, 2012               [Page 3]
+
+Internet-Draft               SMTP with TLSA                     May 2012
+
+
+   Mail domain:  The part of an email address after the "@"; also the
+      owner name of a (possibly implicit) MX record.
+
+   MX resolution:  The algorithm for resolving a mail domain into a set
+      of SMTP server hosts, described in [RFC5321] section 5.
+
+   Publicly-referenced SMTP server:  An SMTP server which runs on port
+      25 of an Internet host located using MX resolution.  (This term is
+      from [RFC3207].)
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   memo are to be interpreted as described in [RFC2119].
+
+
+3.  Details of SMTP with TLSA
+
+   In the following we describe some additions to the usual MX
+   resolution algorithm described in [RFC5321] section 5.  If there is
+   any conflict between [RFC5321] and this memo, that is an error in
+   this memo.
+
+   The client SHALL look up the MX RRset for the mail domain.  There are
+   three succesful results that yield a list of SMTP server host names:
+
+   o  A list of one or more MX records;
+
+   o  An implicit MX record, in lieu of an empty list of MX records;
+
+   o  A CNAME to a successful result.
+
+   If the lookup is not successful, the client SHALL proceed as usual.
+
+   All of these DNS RRsets MUST be "secure" according to DNSSEC
+   validation ([RFC4033] section 5).  In the case of an implicit MX
+   record, there MUST be a secure denial of existence of an MX RRset for
+   the mail domain.  In the case of a (chain of) CNAME RRs, all the
+   CNAMEs MUST be secure as well as their ultimate target.
+
+   If any of the responses is "bogus", the client MUST treat this as a
+   temporary error.
+
+   If these security requirements are not satisfied, this protocol does
+   not take effect.  The client SHOULD fall back to insecure delivery
+   (which might be over unauthenticated TLS).
+
+   The client now has an authentic list of SMTP server host names and
+   priority values.  It processes this list as usual.
+
+
+
+Finch                   Expires November 26, 2012               [Page 4]
+
+Internet-Draft               SMTP with TLSA                     May 2012
+
+
+   The rest of this section applies to each SMTP server host name
+   individually.
+
+   When connecting to a server, the client SHALL look up its TLSA RRset
+   as described in [I-D.ietf-dane-protocol] section 3.  That is, the
+   TLSA RRset owner name SHALL be "_25._tcp.hostname" where "hostname"
+   is the SMTP server host name.  The response can be one of the
+   following (as listed in [I-D.ietf-dane-protocol] section 4.1):
+
+   o  A secure answer containing one or more TLSA records, in which case
+      the client SHALL proceed as descrbed below.
+
+   o  A bogus answer, which the client SHALL treat as a temporary error.
+
+   o  In the other cases the client SHOULD deliver to this server
+      insecurely (which might be over unauthenticated TLS).
+
+   The client now has one or more TLSA records for the server it is
+   connecting to.
+
+   The client MUST ensure that the server offers the STARTTLS service
+   extension [RFC3207] in its response to the client's EHLO command
+   ([RFC5321] section 4.1.1.1).
+
+   The client SHALL then issue the STARTTLS command which MUST be
+   successful.  It then proceeds with TLS negotiation.
+
+   The client SHALL validate the server's certificate as described in
+   [I-D.ietf-dane-protocol] section 2.1.
+
+   The client SHALL verify the server's identity as described in
+   [RFC6125] section 6.  Its list of reference identifiers MUST include
+   the SMTP server host name with type DNS-ID, and MAY include a second
+   copy of the host name with type CN-ID.
+
+   If any of these checks fail, the client MUST disconnect from the
+   server and treat this as a temporary failure.
+
+   The client can now proceed to deliver mail securely.
+
+   The client MAY wish to insert a header at the start of the message to
+   record the fact that it authenticated the server.  XXX: Perhaps the
+   form of this header should be specified here.
+
+
+4.  IANA Considerations
+
+   No IANA action is required.
+
+
+
+Finch                   Expires November 26, 2012               [Page 5]
+
+Internet-Draft               SMTP with TLSA                     May 2012
+
+
+5.  Security considerations
+
+   This memo provides only conditional security.  It allows a server to
+   publish in the DNS the details of how it can be authenticated.
+   Clients that implement this protocol can use it to provide a strong
+   guarantee that they are sending mail to the correct place.
+
+   There is no way for a server to tell if a client has authenticated it
+   using this protocol, since SMTP has no mechanism to signal this
+   information.
+
+   We do not specify that clients check that all of a mail domain's SMTP
+   server host names consistently have or do not have TLSA records.
+   This is so that partial or incremental deployment does not break mail
+   delivery.  Inconsistencies are likely if a domain has a third-party
+   backup MX, for example.
+
+   We do not specify that clients check the DNSSEC state of the SMTP
+   server address records.  This is not necessary since the certificate
+   checks ensure that the client has connected to the correct server.
+   (The address records will normally have the same security state as
+   the TLSA records, but they can differ if there are CNAME or DNAME
+   indirections.)
+
+   This memo does not make any changes to SMTP client authentication.
+   Inter-domain SMTP client authentication remains extremely weak.
+
+
+6.  References
+
+6.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC3207]  Hoffman, P., "SMTP Service Extension for Secure SMTP over
+              Transport Layer Security", RFC 3207, February 2002.
+
+   [RFC4033]  Arends, R., Austein, R., Larson, M., Massey, D., and S.
+              Rose, "DNS Security Introduction and Requirements",
+              RFC 4033, March 2005.
+
+   [RFC5321]  Klensin, J., "Simple Mail Transfer Protocol", RFC 5321,
+              October 2008.
+
+   [RFC6125]  Saint-Andre, P. and J. Hodges, "Representation and
+              Verification of Domain-Based Application Service Identity
+              within Internet Public Key Infrastructure Using X.509
+
+
+
+Finch                   Expires November 26, 2012               [Page 6]
+
+Internet-Draft               SMTP with TLSA                     May 2012
+
+
+              (PKIX) Certificates in the Context of Transport Layer
+              Security (TLS)", RFC 6125, March 2011.
+
+   [I-D.ietf-dane-protocol]
+              Hoffman, P. and J. Schlyter, "The DNS-Based Authentication
+              of Named Entities (DANE) Transport Layer Security (TLS)
+              Protocol: TLSA", draft-ietf-dane-protocol-21 (work in
+              progress), May 2012.
+
+6.2.  Informative References
+
+   [RFC6066]  Eastlake, D., "Transport Layer Security (TLS) Extensions:
+              Extension Definitions", RFC 6066, January 2011.
+
+   [RFC5598]  Crocker, D., "Internet Mail Architecture", RFC 5598,
+              July 2009.
+
+
+Appendix A.  Rationale - choice of certificate identity
+
+   There are a number of reasons for the certificate to authenticate the
+   SMTP server host name rather than the mail domain.
+
+   SMTP allows a client to transfer mail to recipients at multiple
+   domains in the same connection.  If the certificate identifies the
+   host name then it does not need to list all the possible mail
+   domains.
+
+   It is not in general feasible for the server to select a mail domain
+   certificate based on the recipient domains when the connection is
+   established (using Server Name Indication, [RFC6066] section 3),
+   because an SMTP client might not know all of the recipients when it
+   establishes the connection.
+
+   Outgoing SMTP relays and message submission servers handle mail for
+   any domain, so in those cases the only sensible option is for the
+   certificate to contain the host name.  It is more consistent for
+   incoming MX server certificates to match.
+
+   It is common for SMTP servers to act in multiple roles, as outgoing
+   relays or as incoming MX servers, depending on the client identity.
+   It is simpler if the server can present the same certificate
+   regardless of the role in which it is to act.
+
+   Sometimes the server does not know its role until the client has
+   authenticated, which usually occurs after TLS has been established.
+
+
+
+
+
+Finch                   Expires November 26, 2012               [Page 7]
+
+Internet-Draft               SMTP with TLSA                     May 2012
+
+
+Author's Address
+
+   Tony Finch
+   University of Cambridge Computing Service
+   New Museums Site
+   Pembroke Street
+   Cambridge  CB2 3QH
+   ENGLAND
+
+   Phone: +44 797 040 1426
+   Email: dot@dotat.at
+   URI:   http://dotat.at/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Finch                   Expires November 26, 2012               [Page 8]
+

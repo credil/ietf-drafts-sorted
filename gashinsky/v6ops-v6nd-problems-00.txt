@@ -1,0 +1,672 @@
+
+
+
+Network Working Group                                          W. Kumari
+Internet-Draft                                                    Google
+Intended status: Informational                              I. Gashinsky
+Expires: April 8, 2012                                            Yahoo!
+                                                              J. Jaeggli
+                                                                   Zynga
+                                                        October 06, 2011
+
+
+                Operational Neighbor Discovery Problems
+                 draft-gashinsky-v6ops-v6nd-problems-00
+
+Abstract
+
+   In IPv4, subnets are generally small, made just large enough to cover
+   the actual number of machines on the subnet.  In contrast, the
+   default IPv6 subnet size is a /64, a number so large it covers
+   trillions of addresses, the overwhelming number of which will be
+   unassigned.  Consequently, simplistic implementations of Neighbor
+   Discovery can be vulnerable to denial of service attacks whereby they
+   attempt to perform address resolution for large numbers of unassigned
+   addresses.  Such denial of attacks can be launched intentionally (by
+   an attacker), or result from legitimate operational tools that scan
+   networks for inventory and other purposes.  As a result of these
+   vulnerabilities, new devices may not be able to "join" a network, it
+   may be impossible to establish new IPv6 flows, and existing ipv6
+   transported flows may be interrupted.
+
+   This document describes the problem in detail and suggests possible
+   implementation improvements as well as operational mitigation
+   techniques that can in some cases to protect against such attacks.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on April 8, 2012.
+
+
+
+Kumari, et al.            Expires April 8, 2012                 [Page 1]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+Copyright Notice
+
+   Copyright (c) 2011 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+     1.1.  Applicability  . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  The Problem  . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   3.  Terminology  . . . . . . . . . . . . . . . . . . . . . . . . .  4
+   4.  Background . . . . . . . . . . . . . . . . . . . . . . . . . .  5
+   5.  Neighbor Discovery Overview  . . . . . . . . . . . . . . . . .  6
+   6.  Operational Mitigation Options . . . . . . . . . . . . . . . .  6
+     6.1.  Filtering of unused address space. . . . . . . . . . . . .  7
+     6.2.  Appropriate Subnet Sizing. . . . . . . . . . . . . . . . .  7
+     6.3.  Routing Mitigation.  . . . . . . . . . . . . . . . . . . .  7
+     6.4.  Tuning of the NDP Queue Rate Limit.  . . . . . . . . . . .  8
+   7.  Recommendations for Implementors.  . . . . . . . . . . . . . .  8
+     7.1.  Priortize NDP Activities . . . . . . . . . . . . . . . . .  9
+     7.2.  Queue Tuning.  . . . . . . . . . . . . . . . . . . . . . . 10
+   8.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 10
+   9.  Security Considerations  . . . . . . . . . . . . . . . . . . . 10
+   10. Acknowledgements . . . . . . . . . . . . . . . . . . . . . . . 10
+   11. References . . . . . . . . . . . . . . . . . . . . . . . . . . 11
+     11.1. Normative References . . . . . . . . . . . . . . . . . . . 11
+     11.2. Informative References . . . . . . . . . . . . . . . . . . 11
+   Appendix A.  Text goes here. . . . . . . . . . . . . . . . . . . . 11
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 11
+
+
+
+
+
+
+
+
+
+
+
+Kumari, et al.            Expires April 8, 2012                 [Page 2]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+1.  Introduction
+
+   This document describes implementation issues with IPv6's Neighbor
+   Discovery protocol that can result in vulnerabilities when a network
+   is scanned, either by an intruder or through the use of scanning
+   tools that peform network inventory, security audits, etc. (e.g.,
+   "nmap").
+
+   This document describes the problem in detail and suggests possible
+   implementation improvements as well as operational mitigation
+   techniques that can in some cases to protect against such attacks.
+
+   The RFC series documents generally describe the behavior of
+   protocols, that is, "what" is to be done by a protocol, but not
+   exactly "how" it is to be implemented.  The exact details of how best
+   to implement a protocol will depend on the overall hardware and
+   software architecture of a particular device.  The actual "how"
+   decisions are (correctly) left in the hands of implementers, so long
+   as implementations differences will generally produce proper on-the-
+   wire behavior.
+
+   While reading this document, it is important to keep in mind that
+   discussions of how things have been implemented beyond basic
+   compliance with the specification is not within the scope of the
+   neighbor discovery RFCs.
+
+1.1.  Applicability
+
+   This document is primarily intended for operators of IPV6 networks
+   and implementors of [RFC4861].  The Document provides some
+   operational consideration as well as recommendations to increase the
+   resilience of the Neighbor Discovery protocol.
+
+
+2.  The Problem
+
+   In IPv4, subnets are generally small, made just large enough to cover
+   the actual number of machines on the subnet.  For example, an IPv4
+   /20 contains only 4096 address.  In contrast, the default IPv6 subnet
+   size is a /64, a number so large it covers literally billions of
+   billions of addresses, the overwhelming number of which will be
+   unassigned.  Consequently, simplistic implementations of Neighbor
+   Discovery can be vulnerable to denial of service attacks whereby they
+   perform address resolution for large numbers of unassigned addresses.
+   Such denial of attacks can be launched intentionally (by an
+   attacker), or result from legitimate operational tools that scan
+   networks for inventory and other purposes.  As a result of these
+   vulnerabilities, new devices may not be able to "join" a network, it
+
+
+
+Kumari, et al.            Expires April 8, 2012                 [Page 3]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+   may be impossible to establish new IPv6 flows, and existing ipv6
+   transport flows may be interrupted.
+
+   Network scans attempt to find and probe devices on a network.
+   Typically, scans are performed on a range of target addresses, or all
+   the addresses on a particular subnet.  When such probes are directed
+   via a router, and the target addresses are on a directly attached
+   network, the router will to attempt to perform address resolution on
+   a large number of destinations (i.e., some fraction of the 2^64
+   addresses on the subnet).  The process of testing for the
+   (non)existance of neighbors can induce a denial of service condition,
+   where the number of Neighbor Discovery requests overwhelms the
+   implementation's capacity to process them, exhausts available memory,
+   replaces existing in-use mappings with incomplete entries that will
+   never be completed, etc.  The result can be network disruption, where
+   existing traffic may be impacted, and devices that join the net find
+   that address resolutions fails.
+
+   In order to alleviate risk associated with this DOS threat, some
+   router implementations have taken steps to rate-limit the processing
+   rate of Neighbor Solicitations (NS).  While these mitigations do
+   help, they do not fully address the issue and may introduce their own
+   set of potential liabilities to the neighbor discovery process.
+
+
+3.  Terminology
+
+   Address Resolution  Address resolution is the process through which a
+      node determines the link-layer address of a neighbor given only
+      its IP address.  In IPv6, address resolution is performed as part
+      of Neighbor Discovery [RFC4861], p60
+
+   Forwarding Plane  That part of a router responsible for forwarding
+      packets.  In higher-end routers, the forwarding plane is typically
+      implemented in specialized hardware optimized for performance.
+      Forwarding steps include determining the correct outgoing
+      interface for a packet, decrementing its Time To Live (TTL),
+      verifying and updating the checksum, placing the correct link-
+      layer header on the packet, and forwarding it.
+
+   Control Plane  That part of the router implementation that maintains
+      the data structures that determine where packets should be
+      forwarded.  The control plane is typically implemented as a
+      "slower" software process running on a general purpose processor
+      and is responsible for such functions as the routing protocols,
+      performing management and resolving the correct link-layer address
+      for adjacent neighbors.  The control plane "controls" the
+      forwarding plane by programming it with the information needed for
+
+
+
+Kumari, et al.            Expires April 8, 2012                 [Page 4]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+      packet forwarding.
+
+   Neighbor Cache  As described in [RFC4861], the data structure that
+      holds the cache of (amongst other things) IP address to link-layer
+      address mappings for connected nodes.  The forwarding plane
+      accesses the Neighbor Cache on every forwarded packet.  Thus it is
+      usually implemented in an ASIC .
+
+   Neighbor Discovery Process  The Neighbor Discovery Process (NDP) is
+      that part of the control plane that implements the Neighbor
+      Discovery protocol.  NDP is responsible for performing address
+      resolution and maintaining the Neighbor Cache.  When forwarding
+      packets, the forwarding plane accesses entries within the Neighbor
+      Cache.  Whenever the forwarding plane processes a packet for which
+      the corresponding Neighbor Cache Entry is missing or incomplete,
+      it notifies NDP to take appropriate action (typically via a shared
+      queue).  NDP picks up requests from the shared queue and performs
+      any necessary actions.  In many implementations it is also
+      responsible for responding to router solicitation messages,
+      Neighbor Unreachability Detection (NUD), etc.
+
+
+4.  Background
+
+   Modern router architectures separate the forwarding of packets
+   (forwarding plane) from the decisions needed to decide where the
+   packets should go (control plane).  In order to deal with the high
+   number of packets per second the forwarding plane is generally
+   implemented in hardware and is highly optimized for the task of
+   forwarding packets.  In contrast, the NDP control plane is mostly
+   implemented in software processes running on a general purpose
+   processor.
+
+   When a router needs to forward an IP packet, the forwarding plane
+   logic performs the longest match lookup to determine where to send
+   the packet and what outgoing interface to use.  To deliver the packet
+   to an adjacent node, It encapsulates the packet in a link-layer frame
+   (which contains a header with the link-layer destination address).
+   The forwarding plane logic checks the Neighbor Cache to see if it
+   already has a suitable link-layer destination, and if not, places the
+   request for the required information into a queue, and signals the
+   control plane (i.e., NDP) that it needs the link-layer address
+   resolved.
+
+   In order to protect NDP specifically and the control plane generally
+   from being overwhelmed with these requests, appropriate steps must be
+   taken.  For example, the size and rate of the queue might be limited.
+   NDP running in the control plane of the router dequeues requests and
+
+
+
+Kumari, et al.            Expires April 8, 2012                 [Page 5]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+   performs the address resolution function (by performing a neighbor
+   solicitation and listening for a neighbor advertisement).  This
+   process is usually also responsible for other activities needed to
+   maintain link-layer information, such as Neighbor Unreachability
+   Detection (NUD).
+
+   An attacker sending the appropriate packets to addresses on a given
+   subnet can cause the router to queue attempts to resolve so many
+   addresses that it crowds out attempts to resolve "legitimate"
+   addresses (and in many cases becomes unable to perform maintenance of
+   existing entries in the neighbor cache, and unable to answer Neighbor
+   Solicitiation).  This condition can result the inability to resolve
+   new neighbors and loss of reachability to neighbors with existing ND-
+   Cache entries.  During testing it was concluded that 4 simultaneous
+   nmap sessions from a low-end computer was sufficient to make a
+   router's neighbor discovery process unhappy and therefore forwarding
+   unusable.
+
+   This behavior has been observed across multiple platforms and
+   implementations.
+
+
+5.  Neighbor Discovery Overview
+
+   When a packet arrives at (or is generated by) a router for a
+   destination on an attached link, the router needs to determine the
+   correct link-layer address to send the packet to.  The router checks
+   the Neighbor Cache for an existing Neighbor Cache Entry for the
+   neighbor, and if none exists, invokes the address resolution portions
+   of the IPv6 Neighbor Discovery [RFC4861] protocol to determine the
+   link-layer address.
+
+   RFC4861 Section 5.2 (Conceptual Sending Algorithm) outlines how this
+   process works.  A very high level summary is that the device creates
+   a new Neighbor Cache Entry for the neighbor, sets the state to
+   INCOMPLETE, queues the packet and initiates the actual address
+   resolution process.  The device then sends out one or more Neighbor
+   Solicitiations, and when it receives a correpsonding Neighbor
+   Advertisement, completes the Neighbor Cache Entry and sends the
+   queued packet.
+
+
+6.  Operational Mitigation Options
+
+   This section provides some feasible mitigation options that can be
+   employed today by network operators in order to protect network
+   availability while vendors implement more effective protection
+   measures.  It can be stipulated that some of these options are
+
+
+
+Kumari, et al.            Expires April 8, 2012                 [Page 6]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+   "kludges", and are operationally difficult to manage.  They are
+   presented, as they represent options we currently have.  It is each
+   operator's responsibility to evaluate and understand the impact of
+   changes to their network due to these measures.
+
+6.1.  Filtering of unused address space.
+
+   The DOS condition is induced by making a router try to resolve
+   addresses on the subnet at a high rate.  By carefully addressing
+   machines into a small portion of a subnet (such as the lowest
+   numbered addresses), it is possible to filter access to addresses not
+   in that portion.  This will prevent the attacker from making the
+   router attempt to resolve unused addresses.  For example if there are
+   only 50 hosts connected to an interface, you may be able to filter
+   any address above the first 64 addresses of that subnet by
+   nullrouting the subnet carrying a more specific /122 route.
+
+   As mentioned at the beginning of this section, it is fully understood
+   that this is ugly (and difficult to manage); but failing other
+   options, it may be a useful technique especially when responding to
+   an attack.
+
+   This solution requires that the hosts be statically or statefully
+   addressed (as is often done in a datacenter) and may not interact
+   well with networks using [RFC4862]
+
+6.2.  Appropriate Subnet Sizing.
+
+   By sizing subnets to reflect the number of addresses actually in use,
+   the problem can be avoided.  For example [RFC6164] recommends sizing
+   the subnet for inter-router links to only have 2 addresses.  It is
+   worth noting that this practice is common in IPv4 networks, partly to
+   protect against the harmful effects of ARP flooding attacks.
+
+6.3.  Routing Mitigation.
+
+   One very effective technique is to route the subnet to a discard
+   interface (most modern router platforms can discard traffic in
+   hardware / the forwarding plane) and then have individual hosts
+   announce routes for their IP addresses into the network (or use some
+   method to inject much more specific addresses into the local routing
+   domain).  For example the network 2001:db8:1:2:3::/64 could be routed
+   to a discard interface on "border" routers, and then individual hosts
+   could announce 2001:db8:1:2:3::10/128, 2001:db8:1:2:3::66/128 into
+   the IGP.  This is typically done by having the IP address bound to a
+   virtual interface on the host (for example the loopback interface),
+   enabling IP forwarding on the host and having it run a routing
+   daemon.  For obvious reasons, host participation in the IGP makes
+
+
+
+Kumari, et al.            Expires April 8, 2012                 [Page 7]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+   many operators uncomfortable, but can be a very powerful technique if
+   used in a disciplined and controlled manner.
+
+6.4.  Tuning of the NDP Queue Rate Limit.
+
+   Many implementations provide a means to control the rate of
+   resolution of unknown addresses.  By tuning this rate, it may be
+   possibly to amerlorate the isse, although, as with most tuning knobs
+   (especially those that deal with rate limiting), you may be
+   "completing the attack".  By excissivly lowing this rate you may
+   negatively impact how long the device takes to learn new addresses
+   under normal conditions (for example, after clearing the neighbor
+   cache or when the router first boots) and, under attack conditions
+   you may be unable to resolve "legitimate" addresses sooner than if
+   you had just the the knob alone.
+
+   It is worth noting that this technique is only worth investigationg
+   if the device has separate queue for resolution of unknown addresses
+   versus maintaice of existing entries.
+
+
+7.  Recommendations for Implementors.
+
+   The section provides some recommendations to implementors of IPv4
+   Neighbor Discovery.
+
+   At a high-level, implementors should program defensively.  That is,
+   they should assume that intruders will attempt to exploit
+   implementation weaknesses, and should ensure that implementations are
+   robust to various attacks.  In the case of Neighbor Discovery, the
+   following general considerations apply:
+
+   Manage Resources Explicitely  - Resources such as processor cycles,
+      memory, etc. are never infinite, yet with IPv6's large subnets it
+      is easy to cause NDP to generate large numbers of address
+      resolution requests for non-existant destinations.
+      Implementations need to limit resources devoted to processing
+      Neighbor Discovery requests in a thoughtful manner.
+
+   Prioritize  - Some NDP requests are more important than others.  For
+      example, when resources are limited, responding to Neighbor
+      Solicitations for one's own address is more important than
+      initiating address resolution requests that create new entries.
+      Likewise, performing Neighbor Unreachability Detection, which by
+      definition is only invoked on destinations that are actively being
+      used, is more important than creating new entries for possibly
+      non-existant neighbors.
+
+
+
+
+Kumari, et al.            Expires April 8, 2012                 [Page 8]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+7.1.  Priortize NDP Activities
+
+   Not all Neighbor Discovery activies are equally important.
+   Specifically, requests to perform large numbers of address
+   resolutions on non-existant Neighbor Cache Entries should not come at
+   the expense of servicing requests related to keeping existing, in-use
+   entries properly up-to-date.  Thus, implementations should divide
+   work activities into categories having different priorities.  The
+   following gives examples of different activities and their importance
+   in rough priority order.
+
+   1.  It is critical to respond to Neighbor Solicitations for one's own
+   address, especially when a router.  Whether for address resolution or
+   Neighbor Unreachability Detection, failure to respond to Neighbor
+   Solicitations results in immediate problems.  Failure to respond to
+   NS requests that are part of NUD can cause neighbors to delete the
+   NCE for that address, and will result in followup NS messages using
+   multicast.  Once an entry has been flushed, existing traffic for
+   destinations using that entry can no longer be forwarded until
+   address resolution completes succesfully.  In other words, not
+   responding to NS messages further increases the NDP load, and causes
+   on-going communication to fail.
+
+   2.  It is critical to revalidate one's own existing NCEs in need of
+   refresh.  As part of NUD, ND is required to frequently revalidate
+   existing, in-use entries.  Failure to do so can result in the entry
+   being discarded.  For in-use entries, discarding the entry will
+   almost certainly result in a subsquent request to perform address
+   resolution on the entry, but this time using multicast.  As above,
+   once the entry has been flushed, existing traffic for destinations
+   using that entry can no longer be forwarded until address resolution
+   completes succesfully.
+
+   3.  To maintin the stability of the control plane, Neighbor Discovery
+   activity related to traffic sourced by the router (as opposed to
+   traffic being forwarded by the router) should be given high priority.
+   Whenever network problems occur, debugging and making other
+   operational changes requires being able to query and access the
+   router.  In addition, routing protocols may begin to react
+   (negatively) to perceived connectivity problems, causing addition
+   undesirable ripple effects.
+
+   4.  Activities related to the sending and recieving of Router
+   Advertisements also impact address resolutions.  [XXX say more?]
+
+   5.  Traffic to unknown addresses should be given lowest priority.
+   Indeed, it may be useful to distinguish between "never seen"
+   addresses and those that have been seen before, but that do not have
+
+
+
+Kumari, et al.            Expires April 8, 2012                 [Page 9]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+   a corresponding NCE.  Specifically, the conceptual processing
+   algorithm in IPv6 Neighbor Discovery [RFC4861] calls for deleting
+   NCEs under certain conditions.  Rather than delete them completely,
+   however, it might be useful to at least keep track of the fact that
+   an entry at one time existed, in order to prioritize address
+   resolution requests for such neighbors compared with neighbors that
+   have never been seen before.
+
+7.2.  Queue Tuning.
+
+   On implementations in which requests to NDP are submitted via a
+   single queue, router vendors SHOULD provide operators with means to
+   control both the rate of link-layer address resolution requests
+   placed into the queue and the size of the queue.  This will allow
+   operators to tune Neighbour Discovery for their specific environment.
+   The ability to set or have per interface or subnet queue limits at a
+   rate below that of the global queue limit might limit the damage to
+   the neighbor discovery process to the taret network.
+
+   Setting those values must be a very careful balancing act - the lower
+   the rate of entry into the queue, the less load there will be on the
+   ND process, however, it also means that it will take the router
+   longer to learn legitimate destinations.  In a datacenter with 6,000
+   hosts attached to a single router, setting that value to be under
+   1000 would mean that resolving all of the addresses from an initial
+   state (or something that invalidates the address cache, such as a STP
+   TCN) may take over 6 seconds.  Similarly, the lower the size of the
+   queue, the higher the likelihood of an attack being able to knock out
+   legitimate traffic (but less memory utilization on the router).
+
+
+8.  IANA Considerations
+
+   No IANA resources or consideration are requested in this draft.
+
+
+9.  Security Considerations
+
+   This document outlines mitigation options that operators can use to
+   protect themselves from Denial of Service attacks.  Implementation
+   advice to router vendors aimed at ameliorating known problems carries
+   the risk of previously unforeseen consequences.  It is not believed
+   that these techniques create additional security or DOS exposure
+
+
+10.  Acknowledgements
+
+   The authors would like to thank Ron Bonica, Troy Bonin, John Jason
+
+
+
+Kumari, et al.            Expires April 8, 2012                [Page 10]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+   Brzozowski, Randy Bush, Vint Cerf, Jason Fesler Erik Kline, Jared
+   Mauch, Chris Morrow and Suran De Silva.  Special thanks to Thomas
+   Narten for detailed review and (even more so) for providing text!
+
+   Apologies for anyone we may have missed; it was not intentional.
+
+
+11.  References
+
+11.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC4398]  Josefsson, S., "Storing Certificates in the Domain Name
+              System (DNS)", RFC 4398, March 2006.
+
+   [RFC4861]  Narten, T., Nordmark, E., Simpson, W., and H. Soliman,
+              "Neighbor Discovery for IP version 6 (IPv6)", RFC 4861,
+              September 2007.
+
+   [RFC4862]  Thomson, S., Narten, T., and T. Jinmei, "IPv6 Stateless
+              Address Autoconfiguration", RFC 4862, September 2007.
+
+   [RFC6164]  Kohno, M., Nitzan, B., Bush, R., Matsuzaki, Y., Colitti,
+              L., and T. Narten, "Using 127-Bit IPv6 Prefixes on Inter-
+              Router Links", RFC 6164, April 2011.
+
+11.2.  Informative References
+
+   [RFC4255]  Schlyter, J. and W. Griffin, "Using DNS to Securely
+              Publish Secure Shell (SSH) Key Fingerprints", RFC 4255,
+              January 2006.
+
+
+Appendix A.  Text goes here.
+
+   TBD
+
+
+Authors' Addresses
+
+   Warren Kumari
+   Google
+
+   Email: warren@kumari.net
+
+
+
+
+
+Kumari, et al.            Expires April 8, 2012                [Page 11]
+
+Internet-Draft           Operational ND Problems            October 2011
+
+
+   Igor
+   Yahoo!
+   45 W 18th St
+   New York, NY
+   USA
+
+   Email: igor@yahoo-inc.com
+
+
+   Joel
+   Zynga
+   111 Evelyn
+   Sunnyvale, CA
+   USA
+
+   Email: jjaeggli@zynga.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kumari, et al.            Expires April 8, 2012                [Page 12]
+

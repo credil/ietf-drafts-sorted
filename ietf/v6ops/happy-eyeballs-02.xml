@@ -1,0 +1,974 @@
+<?xml version="1.0" encoding="US-ASCII"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+<?xml-stylesheet type='text/xsl' href='rfc2629.xslt' ?>
+<?rfc toc="yes" ?>
+<?rfc rfcprocack="yes" ?>
+<?rfc symrefs="yes" ?>
+<?rfc iprnotified="no" ?>
+<?rfc strict="yes" ?>
+<?rfc compact="yes" ?>
+<?rfc subcompact="no" ?>
+<?rfc sortrefs="yes" ?>
+<?rfc colonspace='yes' ?>
+<?rfc tocindent='yes' ?>
+<rfc category="std" docName="draft-ietf-v6ops-happy-eyeballs-02"
+     ipr="trust200902">
+  <front>
+    <title abbrev="Happy Eyeballs Dual Stack">Happy Eyeballs: Trending Towards
+    Success with Dual-Stack Hosts</title>
+
+    <author fullname="Dan Wing" initials="D." surname="Wing">
+      <organization abbrev="Cisco">Cisco Systems, Inc.</organization>
+
+      <address>
+        <postal>
+          <street>170 West Tasman Drive</street>
+
+          <city>San Jose</city>
+
+          <region>CA</region>
+
+          <code>95134</code>
+
+          <country>USA</country>
+        </postal>
+
+        <email>dwing@cisco.com</email>
+      </address>
+    </author>
+
+    <author fullname="Andrew Yourtchenko" initials="A." surname="Yourtchenko">
+      <organization abbrev="Cisco">Cisco Systems, Inc.</organization>
+
+      <address>
+        <postal>
+          <street>De Kleetlaan, 7</street>
+
+          <city>San Jose</city>
+
+          <region>Diegem</region>
+
+          <code>B-1831</code>
+
+          <country>Belgium</country>
+        </postal>
+
+        <email>ayourtch@cisco.com</email>
+      </address>
+    </author>
+
+    <date year="2011" />
+
+    <workgroup>v6ops</workgroup>
+
+    <abstract>
+      <t>This document describes an algorithm for a dual-stack client to
+      quickly determine the functioning address family to a dual-stack server,
+      and trend towards using that same address family for subsequent
+      connections. This improves the dual-stack user experience during IPv6 or
+      IPv4 server or network outages.</t>
+    </abstract>
+  </front>
+
+  <middle>
+    <section title="Introduction">
+      <t>In order to use HTTP successfully over IPv6, it is necessary that the
+      user enjoys nearly identical performance as compared to IPv4. A
+      combination of today's applications, IPv6 tunneling and IPv6 service
+      providers, and some of today's content providers all cause the user
+      experience to suffer (<xref target="problem_statement"></xref>). For
+      IPv6, a content provider may ensure a positive user experience by using
+      a DNS white list of IPv6 service providers who peer directly with them,
+      e.g. <xref target="whitelist"></xref>. However, this is not scalable to
+      all service providers worldwide, nor is it scalable for other content
+      providers to operate their own DNS white list.</t>
+
+      <t>Instead, this document suggests a mechanism for applications to
+      quickly determine if IPv6 or IPv4 is the most optimal to connect to a
+      server. The suggestions in this document provide a user experience which
+      is superior to connecting to ordered IP addresses which is helpful
+      during the IPv6/IPv4 transition with dual stack hosts.</t>
+
+      <t>This problem is also described in <xref target="RFC1671"></xref>,
+      published in 1994: <list style="empty">
+          <t>"The dual-stack code may get two addresses back from DNS; which
+          does it use? During the many years of transition the Internet will
+          contain black holes. For example, somewhere on the way from IPng
+          host A to IPng host B there will sometimes (unpredictably) be
+          IPv4-only routers which discard IPng packets. Also, the state of the
+          DNS does not necessarily correspond to reality. A host for which DNS
+          claims to know an IPng address may in fact not be running IPng at a
+          particular moment; thus an IPng packet to that host will be
+          discarded on delivery. Knowing that a host has both IPv4 and IPng
+          addresses gives no information about black holes. A solution to this
+          must be proposed and it must not depend on manually maintained
+          information. (If this is not solved, the dual stack approach is no
+          better than the packet translation approach.)"</t>
+        </list></t>
+
+      <t>Even after the transition, the procedure described in this document
+      allows applications to strongly prefer IPv6 -- yet when an IPv6 outage
+      occurs the application will quickly start using IPv4 and continue using
+      IPv4. It will quietly continue trying to use IPv6 until IPv6 becomes
+      available again, and then trend again towards using IPv6.</t>
+
+      <t>Following the procedures in this document, once a certain address
+      family is successful, the application trends towards preferring that
+      address family. Thus, repeated use of the application DOES NOT cause
+      repeated probes over both address families.</t>
+
+<t>Applications would have to change in order to use the mechanism
+described in this document, by either implementing the mechanism
+directly, or by calling APIs made available to them.  To improve IPv6
+connectivity experience for legacy applications (e.g., applications
+which simply rely on the operating system's address preference
+order), operating systems may use other approaches.  These can include
+changing address sorting based on configuration received from the
+network, other configuration, or dynamic detection of the host
+connectivity to IPv6 and IPV4 destinations.</t>
+
+
+      <t>While the application recommendations in this document are described
+      in the context of HTTP clients ("web browsers") and SRV clients (e.g.,
+      XMPP clients) the procedure is also useful and applicable to other
+      interactive applications.</t>
+
+      <t>Code which implements some of the ideas described in this document
+      has been made available <xref target="Perreault"></xref> <xref
+      target="Andrews"></xref>.</t>
+    </section>
+
+    <section title="Notational Conventions">
+      <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+      "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+      document are to be interpreted as described in <xref
+      target="RFC2119"></xref>.</t>
+    </section>
+
+    <section anchor="problem_statement" title="Problem Statement">
+      <t>As discussed in more detail in <xref target="problem_uris"></xref>,
+      it is important that the same URI and hostname be used for IPv4 and
+      IPv6. Using separate namespaces causes namespace fragmentation and
+      reduces the ability for users to share URIs and hostnames, and
+      complicates printed material that includes the URI or hostname.</t>
+
+      <t>As discussed in more detail in <xref target="problem_ipv6"></xref>,
+      IPv6 connectivity is broken to specific prefixes or specific hosts, or
+      slower than native IPv4 connectivity.</t>
+
+      <section anchor="problem_uris" title="URIs and hostnames">
+        <t>URIs are often used between users to exchange pointers to content
+        -- such as on social networks, email, instant messaging, or other
+        systems. Thus, production URIs and production hostnames containing
+        references to IPv4 or IPv6 will only function if the other party is
+        also using an application, OS, and a network that can access the URI
+        or the hostname.</t>
+      </section>
+
+      <section anchor="problem_ipv6" title="IPv6 connectivity">
+        <t>When IPv6 connectivity is impaired, today's IPv6-capable web
+        browsers incur many seconds of delay before falling back to IPv4. This
+        harms the user's experience with IPv6, which will slow the acceptance
+        of IPv6, because IPv6 is frequently disabled in its entirety on the
+        end systems to improve the user experience.</t>
+
+        <t>Reasons for such failure include no connection to the IPv6
+        Internet, broken 6to4 or Teredo tunnels, and broken IPv6 peering.</t>
+
+        <figure anchor="diagram_message_flow"
+                title="Existing behavior message flow">
+          <artwork align="center"><![CDATA[
+   DNS Server                  Client                  Server
+       |                          |                       |
+ 1.    |<--www.example.com A?-----|                       |
+ 2.    |<--www.example.com AAAA?--|                       |
+ 3.    |---192.0.2.1------------->|                       |
+ 4.    |---2001:db8::1----------->|                       |
+ 5.    |                          |                       |
+ 6.    |                          |--TCP SYN, IPv6--->X   |
+ 7.    |                          |--TCP SYN, IPv6--->X   |
+ 8.    |                          |--TCP SYN, IPv6--->X   |
+ 9.    |                          |                       |
+ 10.   |                          |--TCP SYN, IPv4------->|
+ 11.   |                          |<-TCP SYN+ACK, IPv4----|
+ 12.   |                          |--TCP ACK, IPv4------->|
+]]></artwork>
+        </figure>
+
+        <t>The client obtains the IPv4 and IPv6 records for the server (1-4).
+        The client attempts to connect using IPv6 to the server, but the IPv6
+        path is broken (6-8), which consumes several seconds of time.
+        Eventually, the client attempts to connect using IPv4 (10) which
+        succeeds.</t>
+
+        <t>Delays experienced by users of various browser and operating system
+        combinations have been studied <xref target="Experiences"></xref>.</t>
+      </section>
+    </section>
+
+    <section title="Client Recommendations">
+      <t>Happy Eyeballs does two things:<list style="numbers">
+          <t>Provides fast connection for users. To provide fast connections
+          for users, clients should make connections quickly over various
+          technologies, automatically tune itself to avoid flooding the
+          network with unnecessary connections (i.e., for technologies that
+          have not made successful connections), and occasionally flush its
+          self-tuning if it trended towards IPv4 <xref
+          target="initialization"></xref>.</t>
+
+          <t>Avoids thrashing the network. Clients need to avoid flooding the
+          network or servers with excessive connection initiation traffic. One
+          way to accomplish this, without significant impairment to the user
+          experience, is to cache which address family has been unsuccessful
+          and successful, and use that address family for subsequent
+          connections to the same host.</t>
+        </list></t>
+
+      <t>If a TCP client supports IPv6 and IPv4 and is connected to IPv4 and
+      IPv6 networks, it can perform the procedures described in this
+      section.</t>
+
+      <figure anchor="diagram_message_flow_happy_1"
+              title="Happy Eyeballs flow 1, IPv6 broken">
+        <artwork align="center"><![CDATA[
+   DNS Server                  Client                  Server
+       |                          |                       |
+ 1.    |<--www.example.com A?-----|                       |
+ 2.    |<--www.example.com AAAA?--|                       |
+ 3.    |---192.0.2.1------------->|                       |
+ 4.    |---2001:db8::1----------->|                       |
+ 5.    |                          |                       |
+ 6.    |                          |==TCP SYN, IPv6===>X   |
+ 7.    |                          |--TCP SYN, IPv4------->|
+ 8.    |                          |<-TCP SYN+ACK, IPv4----|
+ 9.    |                          |--TCP ACK, IPv4------->|
+10.    |                          |==TCP SYN, IPv6===>X   |
+]]></artwork>
+      </figure>
+
+      <t>In the diagram above, the client sends two TCP SYNs at the same time
+      over IPv6 (6) and IPv4 (7). In the diagram, the IPv6 path is broken but
+      has little impact to the user because there is no long delay before
+      using IPv4. The IPv6 path is retried until the application gives up
+      (10).</t>
+
+      <t>After performing the above procedure, the client learns if
+      connections to the host's IPv6 or IPv4 address were successful. The
+      client MUST cache that information to avoid thrashing the network with
+      excessive subsequent connection attempts. For example, in the diagram
+      above, the client has noticed that IPv6 to that address failed, and it
+      should provide a greater preference to using IPv4 instead.</t>
+
+      <figure anchor="diagram_message_flow_happy_2"
+              title="Happy Eyeballs flow 2, IPv6 working">
+        <artwork align="center"><![CDATA[
+   DNS Server                  Client                  Server
+       |                          |                       |
+ 1.    |<--www.example.com A?-----|                       |
+ 2.    |<--www.example.com AAAA?--|                       |
+ 3.    |---192.0.2.1------------->|                       |
+ 4.    |---2001:db8::1----------->|                       |
+ 5.    |                          |                       |
+ 6.    |                          |==TCP SYN, IPv6=======>|
+ 7.    |                          |--TCP SYN, IPv4------->|
+ 8.    |                          |<=TCP SYN+ACK, IPv6====|
+ 9.    |                          |<-TCP SYN+ACK, IPv4----|
+10.    |                          |==TCP ACK, IPv6=======>|
+11.    |                          |--TCP ACK, IPv4------->|
+12.    |                          |--TCP RST, IPv4------->|
+]]></artwork>
+      </figure>
+
+      <t>The diagram above shows a case where both IPv6 and IPv4 are working,
+      and IPv4 is abandoned (12).</t>
+
+    </section>
+
+    <section anchor="client_v6_details" title="Implementation details: A and AAAA">
+        <t>This section details how to provide robust dual stack service for
+        both IPv6 and IPv4, so that the user perceives very fast application
+        response.</t>
+
+        <t>Depending on implementation, the variables and procedures described
+        below might be implemented or maintained within a specific application
+        (e.g., web browser), library, framework, or by the operating system
+        itself. An API call such as "connect_by_name()" is envisioned 
+which would call the Happy Eyeballs routine and implement the functions
+described in this section.</t>
+
+<section title="Description of State Variables">
+
+        <t>The system maintains a Smoothed P (which provides the overall
+        preference to IPv6 or IPv4), and an exception cache. Both of these
+        change over time and are described below:<list style="hanging">
+            <t hangText="Exception Cache:  ">This is a cache, indexed
+            by IP prefixes, contains a "P" value for each prefix. Entries are
+            added to this cache if a connection to the expected address family
+            failed and a connection to the other address family succeeded. That
+            is, these are exceptions to the Smoothed P variable. See <xref
+            target="prefix"></xref> for description of how these prefixes are
+            defined.<list style="empty">
+                <t>(Note: In previous versions of this document, this was the
+                "per-destination P (preference) value".)</t>
+              </list></t>
+
+<t hangText="P:">Address family preference.  This is computed for this
+connection attempt.  A positive value is a preference to start the
+IPv6 connection first, a negative value to start the IPv4 connection
+first, and zero indicates both IPv6 and IPv4 connections are started
+simultaneously. The absolute value is the number of milliseconds between 
+the connection attempts on two address families.</t>
+
+            <t hangText="Smoothed P:">Smoothed address family
+            preference. This is the address family preference for
+            destinations that are not in the exception cache.  This
+            variable can be positive or negative, with values having
+            the same meaning as "P".  In the absence of more specific
+            configuration information, it is RECOMMENDED that
+            implementations enforce a maximum value of 8000 (8
+            seconds) for this variable.
+            <list style="empty">
+
+                <t>(Note: In previous versions of this document, this was the
+                "application-wide P (preference) value".)</t>
+              </list></t>
+
+            <!--
+	      <t hangText="Averaged DNS Response Time:">The averaged value to
+		receive a DNS response.  When the connection attempts
+		for the address families are far apart (i.e., "P" is
+		large), this value helps delay the DNS query to
+		reduce DNS load, without delaying the connection 
+		attempt itself.  Its value can never be completely
+		accurate (due to the vagaries of DNS responsiveness)
+		and the algorithm is designed to accomodate the
+		inaccuracy.  Initial value is 2 seconds.</t>
+-->
+          </list></t>
+
+
+        <t>The following values are configured and constant:<list
+            style="hanging">
+            <t hangText="TI:">Tolerance Interval, in milliseconds. This is the
+            allowance in the time a connection is expected to complete and its
+            actual completion, and is provided to accommodate slight
+            differences in network and server responsiveness. In the absence
+            of dynamic configuration information from the network (e.g., DHCP)
+            or other configuration information, it is RECOMMENDED to use
+            20ms.</t>
+
+            <t hangText="Initial Headstart (IH):">The initial headstart
+            ("preference") for IPv6, in milliseconds. This value provides a
+            preference towards IPv6 (if positive) or IPv4 (if negative) when
+            the host joins a new network or otherwise flushes its cached
+            information (see <xref target="initialization"></xref>), and the distance
+            to move P away from zero when P was zero. In the absence of
+            dynamic configuration information from the network (e.g., <xref
+            target="I-D.ietf-6man-addr-select-opt"></xref>) or other
+            configuration information (e.g., the node's address selection
+            policy has been modified to prefer IPv4 over IPv6), the value
+            100ms is recommended, which causes the initial IPv6 connection to
+            be attempted 100ms before the IPv4 connection.</t>
+
+            <t hangText="MAXWAIT:">Maximum wait time for a connection to
+            complete, before trying additional IP addresses. This is
+            RECOMMENDED to be 10 seconds.</t>
+          </list></t>
+
+
+</section>
+
+<section anchor="initialization" title="Initialization, Cache Flush, and Resetting Smoothed P">
+
+        <t>Because every network has different characteristics (e.g., working
+        or broken IPv6 or IPv4 connectivity) the Smoothed P variable SHOULD be
+        set to its default value (Smoothed P = Initial Headstart) and the exception
+	  cache SHOULD be emptied whenever the host is connected to a new
+        network (e.g., <xref target="RFC4436">DNAv4</xref>, <xref
+        target="RFC6059">DNAv6</xref>, <xref target="cx-osx"></xref>, <xref
+        target="cx-win"></xref>).</t>
+
+        <t>If there are IPv6 failures to specific hosts or prefixes, the
+        exception cache will build up exception entries preferring IPv4, and
+        if there are significant IPv6 failures to many hosts or prefixes,
+        Smoothed P will become negative. When this occurs, IPv6 will not be
+        attempted at all. To avoid this problem, it is strongly RECOMMENDED to
+        occasionally flush the exception cache of all entries and reset
+        Smoothed P to Initial Offset. This SHOULD be done every 10 minutes. In
+        so doing, IPv6 and IPv4 are tried again so that if the IPv6 is working
+        again, it will quickly be preferred again.</t>
+
+</section>
+
+<section title="Connecting to a Server">
+
+        <t>The steps when connecting to a server are as follows:</t>
+
+        <t><list style="numbers">
+            <t>query DNS using getaddrinfo(). This will return addresses
+            sorted by the host's <xref target="RFC3484">default address
+            selection ordering</xref>, its updates, or the address selection
+            as chosen by the network administrator <xref
+            target="I-D.ietf-6man-addr-select-opt"></xref>.</t>
+
+            <t>If this returns both an IPv6 and IPv4 address, continue
+            processing to the next stop. Otherwise, Happy Eyeballs processing
+            stops here.</t>
+
+            <t>Of the addresses returned in step (1), look up the
+            first IPv6 address and first IPv4 address in the Happy
+            Eyeballs exception cache.  Matching entries in the
+            exception cache influence the P value for this connection
+            attempt by setting P to the sum of Smoothed_P and of the P values from 
+              the matching IPv6 entry (if it exists) and the matching 
+              IPv4 entry (if it exists).</t>
+
+            <t>If P&gt;=0, initiate a connection attempt using the first IPv6
+            address returned by step (1). If that connection has not completed
+            after P milliseconds, initiate a connection attempt using
+            IPv4.</t>
+
+            <t>If P&lt;=0, initiate a connection attempt using the first IPv4
+            address returned by getaddrinfo. If that connection has not
+            completed after absolute value(P) milliseconds, initiate a
+            connection attempt using IPv6.</t>
+
+            <t>If neither connection has completed after MAXWAIT seconds,
+            repeat the procedure at step (3) until the addresses are
+            exhausted.</t>
+          </list>After performing the above steps, there will be no connection
+        at all or one connection will complete first. If no connection was
+        successful, it should be treated as a failure for both IPv6 and
+        IPv4.</t>
+</section>
+
+<section title="Adjusting Address Family Preferences">
+
+        <t>If the preferred address family completed first, Smoothed P is
+        adjusted towards that address family. If the non-preferred address
+        family completed, we wait an additional Tolerance Interval
+        milliseconds for the preferred address family to complete. 
+        If the expected address family succeeded, we increment the absolute
+        value of the Smoothed P; if the expected address family failed - 
+        we create an exception entry that will make an adjustment to the future
+        value of P for the attempt on this pair in the direction 
+        opposite to the current sign of Smoothed P.</t>
+
+	<t>The table below summarizes the adjustments:</t>
+
+        <figure anchor="diagram_p_adjustments"
+                title="Table summarizing P adjustments">
+          <artwork align="center"><![CDATA[         |   Connection completed within Tolerance Interval   |
++--------+--------------|------------------|------------------+
+|        | v6 and v4 ok | v6 ok, v4 failed | v6 failed, v4 ok |
++--------+--------------|------------------|------------------+
+| P > 0  |  SP=SP+10    |    SP=SP+10      | SP=SP/2 or cache |
+| P < 0  |  SP=SP+10    | SP=SP/2 or cache |     SP=SP-10     |
+| P = 0  |SP=big(10,IH) |    SP=IH         |     SP=(-IH)     |
+|--------+--------------|------------------|------------------+
+]]></artwork>
+        </figure>
+
+        <t>The the above table is described in textual form:<list
+            style="symbols">
+            <t>If P &gt; 0 (indicating IPv6 is preferred over IPv4): <list
+                style="symbols">
+                <t>and both the IPv6 and IPv4 connection attempts completed
+                within the Tolerance Interval, it means the IPv6 preference
+                was accurate or we should gently prefer IPv6, so Smoothed P is
+                increased by 10 milliseconds (Smoothed P = Smoothed P +
+                10).</t>
+
+                <t>If the IPv6 connection completed but the IPv4 connection
+                failed within the tolerance interval, it means future
+                connections should prefer IPv6, so Smoothed P is increased by
+                10 milliseconds (Smoothed_P = Smoothed_P + 10).</t>
+
+                <t>If the IPv6 connection failed but the IPv4
+                connection completed within the tolerance interval, it
+                means the IPv6 preference is inaccurate.  If no
+                exception cache entry exists for the IPv6 and IPv4
+                prefixes, the entries are created and their P value
+                set to to the connection setup time * -1, and Smoothed
+                P is halved and rounded towards zero (Smoothed_P =
+                Smoothed_P * 0.5).  If an exception cache entry
+                already existed, its P value is doubled and Smoothed_P
+		is not adjusted.
+                </t>
+              </list></t>
+
+            <t>If P &lt; 0 (indicating IPv4 is preferred over IPv6):<list
+                style="symbols">
+                <t>and both the IPv6 and IPv4 connection attempts completed
+                within the tolerance interval, we should gently prefer IPv6,
+                so Smoothed P is increased by 10 milliseconds (Smoothed_P =
+                Smoothed_P + 10).</t>
+
+                <t>If the IPv6 connection completed but the IPv4
+                connection failed within within the tolerance
+                interval, it means the IPv4 preference is inaccurate.
+                If no exception cache entry exists for the IPv6 and
+                IPv4 prefixes, they are created and their P values set
+                to the connection setup time and Smoothed P is halved
+                and rounded towards 0 (Smoothed_P = Smoothed_P * 0.5).
+                If an exception cahe entry already existed, its P
+                value is doubled and Smoothed_P is not adjusted.</t>
+
+                <t>If the IPv4 connection completed but the IPv6 connection
+                failed within the tolerance interval, it means future
+                connections should prefer IPv4, so Smoothed P is decreased by
+                10 milliseconds (Smoothed_P = Smoothed_P - 10).</t>
+              </list></t>
+
+            <t>If P = 0 (indicating IPv4 and IPv6 are equally preferred):<list
+                style="symbols">
+                <t>and both the IPv6 and IPv4 connection attempts
+                completed within the tolerance interval, we should
+                prefer IPv6 significantly, so Smoothed P is set to
+                the larger of Initial Headstart or 10 (Smoothed_P = 
+		larger(Initial Headstart, 10)).</t>
+
+                <t>if the IPv6 connection completed but the IPv4 connection
+                failed within the Tolerance Interval, it means we need to
+                prefer IPv6, so Smoothed P is increased by 10 (Smoothed_P =
+                Smoothed_P + 10).</t>
+
+                <t>if the IPv4 connection completed but the IPv6 connection
+                failed within the Tolerance Interval, it means we need to
+                prefer IPv4, so P is decreased by 10 (Smoothed_P = Smoothed_P
+                - 10).</t>
+              </list></t>
+          </list></t>
+
+        <!--
+        <t>An implementation of the IPv6/IPv4 Happy Eyeballs algorithm in the
+Links web browser <xref target="links"></xref> is available at <xref
+target="64-impl"></xref>.</t> 
+-->
+      </section>
+
+
+      <section anchor="prefix" title="Exception Cache">
+        <t>An exception cache is maintained of IPv6 prefixes and IPv4 prefixes, which are
+        exceptions to the Smoothed P value at the time a connection was made.
+        For IPv6 prefixes, the default prefix length is 64. For IPv4, the
+        default prefix length is /32. </t>
+
+	<t>The exception cache MAY be a fixed size, removing entires using a
+	least-frequently used algorithm.   This works because the network
+	path is likely to change over time (thus old entries aren't 
+	valuable anyway), and if an entry does not exist the Smoothed P
+	value will still provide some avoidance of user-noticable 
+        connection setup delay.</t>
+      </section>
+</section>
+
+      <section anchor="srv_clients"
+               title="Implementation Details: SRV">
+        <t><list style="empty">
+            <t>[[Editor's Note: SRV processing needs to be incorporated into
+            the above section, rather than described separately. This will be
+            done in a future update to this document.]]</t>
+          </list></t>
+
+        <t>For the purposes of this section, "client" is defined as the entity
+        initiating the connection.</t>
+
+        <t>For protocols which support DNS SRV <xref target="RFC2782"></xref>,
+        the client performs the IN SRV query (e.g. IN SRV
+        _xmpp-client._tcp.example.com) as normal. The client MUST perform the
+        following steps:</t>
+
+        <t><list style="numbers">
+            <t>Sort all SRV records according to priority (lowest priority
+            first)</t>
+
+            <t>Process all of the SRV targets of the same priority with a
+            weight greater than 0: <list style="letters">
+                <t>Perform A/AAAA queries for each SRV target in parallel, as
+                described in the A/AAAA processing section</t>
+
+                <t>Connect to the IPv4/IPv6 addresses</t>
+
+                <t>If at least one connection succeeds, stop processing SRV
+                records</t>
+              </list></t>
+
+            <t>If there is no connection, process all of the SRV targets of
+            the same priority with a weight of 0, as per steps 2.1 through 2.3
+            above</t>
+
+            <t>Repeat steps 2.1 through 2.3 for the next priority, until a
+            connection is established or all SRV records have been
+            exhausted</t>
+
+            <t>If there is still no connection, fallback to using the domain
+            (e.g., example.com), following steps 2.1 through 2.3 above</t>
+          </list></t>
+
+      </section>
+
+    <section title="Additional Considerations">
+      <t>This section discusses considerations and requirements that are
+      common to new technology deployment.</t>
+
+      <section title="Additional Network and Host Traffic">
+        <t>Additional network traffic and additional server load is created
+        due to the recommendations in this document. This additional load is
+        mitigated by the P value, especially the exception cache P value.</t>
+
+        <t>The procedures described in this document retain a quality user
+        experience while transitioning from IPv4-only to dual stack, while
+        still giving IPv6 a slight preference over IPv4 (in order to remove
+        load from IPv4 networks, most importantly to reduce the load on IPv4
+        network address translators). The improvement in the user experience
+        benefits the user to only a small detriment of the network, DNS
+        server, and server that are serving the user.</t>
+      </section>
+
+      <section anchor="abandon" title="Abandon Non-Winning Connections">
+        <t>It is RECOMMENDED that the non-winning connections be abandoned,
+        even though they could -- in some cases -- be put to reasonable use.
+        To take HTTP as an example, the design of some sites can break because
+        of HTTP cookies that incorporate the client's IP address, require all
+        connections be from the same IP address. If some connections from the
+        same client are arriving from different IP addresses, such
+        applications will break. It is also important to abandon connections
+        to avoid consuming server resources (file descriptors, TCP control
+        blocks) or middlebox resources (e.g., NAPT).  Using the non-winning
+        connection can also interfere with the browser's Same Origin 
+	  Policy (see <xref target="sec_sop"></xref>).</t>
+
+      </section>
+
+      <section title="Determining Address Type">
+        <t>For some transitional technologies such as a dual-stack host, it is
+        easy for the application to recognize the native IPv6 address (learned
+        via a AAAA query) and the native IPv4 address (learned via an A
+        query). While IPv6/IPv4 translation makes that difficult, fortunately
+        IPv6/IPv4 translators are not deployed on networks with dual stack
+        clients, which is the scope of this document.</t>
+
+      </section>
+
+      <section title="Debugging and Troubleshooting">
+        <t>This mechanism is aimed at ensuring a reliable user experience
+        regardless of connectivity problems affecting any single transport.
+        However, this naturally means that applications employing these
+        techniques are by default less useful for diagnosing issues with any
+        particular transport. To assist in that regard, the applications
+        implementing the proposal in this document SHOULD also provide a
+        mechanism to revert the behavior to that of a default provided by the
+        operating system - the <xref target="RFC3484"></xref>.</t>
+
+      </section>
+
+      <section anchor="dns_behavior" title="DNS Behavior">
+        <t>Unique to DNS AAAA queries are the problems described in <xref
+        target="RFC4074"></xref> which, if they still persist, require
+        applications to perform an A query before the AAAA query. <list>
+            <t>[[Editor's Note 03: It is believed these defective DNS servers
+            have long since been upgraded. If so, we can remove this
+            section.]]</t>
+          </list></t>
+      </section>
+
+      <section title="Middlebox Issues">
+        <t>Some devices are known to exhibit what amounts to a bug, when the A
+        and AAAA requests are sent back-to-back over the same 4-tuple, and
+        drop one of the requests or replies <xref
+        target="DNS-middlebox"></xref>. However, in some cases fixing this
+        behaviour may not be possible either due to the architectural
+        limitations or due to the administrative constraints (location of the
+        faulty device is unknown to the end hosts or not controlled by the end
+        hosts). The algorithm described in this draft, in the case of this
+        erroneous behaviour will eventually pace the queries such that this
+        middlebox issue is avoided. The algorithm described in this draft also
+        avoids calling the operating system's getaddrinfo() with "any", which
+        should prevent the operating system from sending the A and AAAA
+        queries from the same port.</t>
+
+        <t>For the large part, these issues with simultaneous DNS requests are
+        believed to be fixed.</t>
+      </section>
+
+      <section title="Multiple Interfaces">
+        <t>Interaction of the suggestions in this document with multiple
+        interfaces, and interaction with the MIF working group, is for further
+        study (<xref target="I-D.chen-mif-happy-eyeballs-extension"></xref> is
+        devoted to this).</t>
+      </section>
+
+<section anchor="sec_sop" title="Interaction with Same Origin Policy">
+<t>Web browsers implement same origin policy (SOP, <xref target="sop"></xref>,
+<xref target="I-D.abarth-origin"></xref>), which causes subsequent
+connections to the same hostname to go to the same IPv4 (or IPv6)
+address as the previous successful connection.  This is done to
+prevent certain types of attacks.</t>
+<t>The same-origin policy harms user-visible responsiveness if a new
+connection fails (e.g., due to a transient event such as router
+failure or load balancer failure).  While it is tempting to use Happy
+Eyeballs to maintain responsiveness, web browsers MUST NOT change
+their same origin policy because of Happy Eyeballs</t>
+</section>
+    </section>
+
+    <section title="Content Provider Recommendations">
+      <t>Content providers SHOULD provide both AAAA and A records for servers
+      using the same DNS name for both IPv4 and IPv6.</t>
+    </section>
+
+    <section anchor="security_considerations" title="Security Considerations">
+      <t>[[Placeholder.]]</t>
+
+      <t>See <xref target="abandon"></xref> and <xref target="sec_sop"></xref>.</t>
+    </section>
+
+    <section title="Acknowledgements">
+      <t>The mechanism described in this paper was inspired by Stuart
+      Cheshire's discussion at the IAB Plenary at IETF72, the author's
+      understanding of Safari's operation with SRV records, Interactive
+      Connectivity Establishment (<xref target="RFC5245">ICE</xref>), and the
+      current IPv4/IPv6 behavior of SMTP mail transfer agents.</t>
+
+      <t>Thanks to Fred Baker, Jeff Kinzli, Christian Kuhtz, and Iljitsch van
+      Beijnum for fostering the creation of this document.</t>
+
+      <t>Thanks to Scott Brim, Rick Jones, Stig Venaas, Erik Kline, Bjoern
+      Zeeb, Matt Miller, Dave Thaler, and Dmitry Anipko for providing feedback
+      on the document.</t>
+
+      <t>Thanks to Javier Ubillos, Simon Perreault and Mark Andrews for the
+      active feedback and the experimental work on the independent practical
+      implementations that they created.</t>
+
+      <t>Also the authors would like to thank the following individuals who
+      participated in various email discussions on this topic: Mohacsi Janos,
+      Pekka Savola, Ted Lemon, Carlos Martinez-Cagnazzo, Simon Perreault, Jack
+      Bates, Jeroen Massar, Fred Baker, Javier Ubillos, Teemu Savolainen,
+      Scott Brim, Erik Kline, Cameron Byrne, Daniel Roesen, Guillaume
+      Leclanche, Mark Smith, Gert Doering, Martin Millnert, Tim
+      Durack, Matthew Palmer.</t>
+    </section>
+
+    <section title="IANA Considerations">
+      <t>This document has no IANA actions.</t>
+    </section>
+  </middle>
+
+  <back>
+    <references title="Normative References">
+      <?rfc include='reference.RFC.2119'?>
+
+      <?rfc include='reference.RFC.3484'?>
+
+      <?rfc include='reference.RFC.2782'?>
+    </references>
+
+    <references title="Informational References">
+      <?rfc include='reference.RFC.1671'?>
+
+      <?rfc include='reference.RFC.4074'?>
+
+      <?rfc include='reference.RFC.5245'?>
+
+      <?rfc include='reference.RFC.6059'?>
+
+      <?rfc include='reference.RFC.4436'?>
+
+      <?rfc include='reference.I-D.chen-mif-happy-eyeballs-extension'?>
+
+      <?rfc include='reference.I-D.ietf-6man-addr-select-opt'?>
+
+      <reference anchor="whitelist"
+                 target="http://www.google.com/intl/en/ipv6">
+        <front>
+          <title>Google IPv6 DNS Whitelist</title>
+
+          <author fullname="Google" surname="Google">
+            <organization></organization>
+          </author>
+
+          <date month="January" year="2009" />
+        </front>
+      </reference>
+
+      <reference anchor="DNS-middlebox"
+                 target="https://bugzilla.redhat.com/show_bug.cgi?id=505105">
+        <front>
+          <title>DNS middlebox behavior with multiple queries over same source
+          port</title>
+
+          <author fullname="Various" surname="Various">
+            <organization></organization>
+          </author>
+
+          <date month="June" year="2009" />
+        </front>
+      </reference>
+
+      <reference anchor="cx-osx"
+                 target="https://bugzilla.redhat.com/show_bug.cgi?id=505105">
+        <front>
+          <title>AIHostReachabilityMonitor</title>
+
+          <author fullname="Adium" surname="Adium">
+            <organization></organization>
+          </author>
+
+          <date month="June" year="2009" />
+        </front>
+      </reference>
+
+      <reference anchor="cx-win"
+                 target="http://msdn.microsoft.com/en-us/library/system.net.networkinformation.networkchange.networkavailabilitychanged.aspx">
+        <front>
+          <title>NetworkChange.NetworkAvailabilityChanged Event</title>
+
+          <author fullname="Microsoft" surname="Microsoft">
+            <organization></organization>
+          </author>
+
+          <date month="June" year="2009" />
+        </front>
+      </reference>
+
+      <reference anchor="Perreault"
+                 target="http://www.viagenie.ca/news/index.html#happy_eyeballs_erlang">
+        <front>
+          <title>Happy Eyeballs in Erlang</title>
+
+          <author fullname="Simon Perreault" initials="S" surname="Perreault">
+            <organization>Viagenie</organization>
+          </author>
+
+          <date month="February" year="2011" />
+        </front>
+      </reference>
+
+      <reference anchor="Andrews"
+                 target="http://www.isc.org/community/blog/201101/how-to-connect-to-a-multi-h omed-server-over-tcp">
+        <front>
+          <title>How to connect to a multi-homed server over TCP</title>
+
+          <author fullname="Mark Andrews" initials="M" surname="Andrews">
+            <organization>ISC</organization>
+          </author>
+
+          <date month="January" year="2011" />
+        </front>
+      </reference>
+
+      <?rfc include='reference.I-D.abarth-origin'?>
+
+      <reference anchor="sop"
+                 target="http://www.w3.org/Security/wiki/Same_Origin_Policy">
+        <front>
+          <title>Same Origin Policy</title>
+
+          <author fullname="W3C" surname="W3C">
+            <organization></organization>
+          </author>
+
+          <date month="January" year="2010" />
+        </front>
+      </reference>
+
+
+      <reference anchor="Experiences"
+                 target="http://www.ietf.org/proceedings/80/slides/v6ops-12.pdf">
+        <front>
+          <title>Experiences of host behavior in broken IPv6 networks</title>
+
+          <author fullname="Teemu Savolainen" initials="T."
+                  surname="Savolainen">
+            <organization></organization>
+          </author>
+
+          <author fullname="Natalia Miettinen" initials="N."
+                  surname="Miettinen">
+            <organization></organization>
+          </author>
+
+          <author fullname="Simo Veikkolainen" initials="S."
+                  surname="Veikkolainen">
+            <organization></organization>
+          </author>
+
+          <author fullname="Tim Chown" initials="T." surname="Chown">
+            <organization></organization>
+          </author>
+
+          <author fullname="James" initials="J." surname="Morse">
+            <organization></organization>
+          </author>
+
+          <date month="March" year="2011" />
+        </front>
+      </reference>
+
+      <!--
+      <reference anchor="64-impl"
+                 target="http://www.employees.org/~andin/happy-eyeballs">
+        <front>
+          <title>Implementation of Happy Eyeballs Algorithm in Links</title>
+          <author fullname="Andrew Yourtchenko" initials="A." surname="Yourtchenko">
+            <organization></organization>
+          </author>
+
+          <date month="July" year="2009" />
+        </front>
+      </reference>
+
+      <reference anchor="links"
+                 target="http://links.sourceforge.net/">
+        <front>
+          <title>Links. The WWW Text Browser</title>
+          <author fullname="Sourceforge" surname="Sourceforge">
+            <organization></organization>
+          </author>
+
+          <date month="July" year="2009" />
+        </front>
+      </reference>
+-->
+    </references>
+
+    <section title="Changes">
+      <section title="changes from -01 to -02">
+        <t><list style="symbols">
+<t>Now honors host's address preference (RFC3484 and friends)</t>
+<t>No longer requires thread-safe DNS library.  It uses getaddrinfo()</t>
+<t>No longer describes threading.</t>
+<t>IPv6 is given a 200ms head start (Initial Headstart variable).</t>
+<t>If the IPv6 and IPv4 connection attempts were made at nearly the same
+    time, wait Tolerance Interval milliseconds for both to complete before
+    deciding which one wins.</t>
+<t>Renamed "global P" to "Smoothed P", and better described how it is
+calculated.</t>
+<t>introduced the exception cache.  This contains the set of networks
+    that only work with IPv4 (or only with IPv6), so that subsequent
+    connection attempts use that address family without them causing
+    serious affect to Smoothed P.</t>
+<t>encourages that every 10 minutes the exception cache and Smoothed P
+be reset.  This allows IPv6 to be attempted again, so we don't get
+'stuck' on IPv4.</t>
+<t>If we didn't get both A and AAAA, abandon all Happy Eyeballs
+processing (thanks to Simon Perreault).</t>
+<t>added discussion of Same Origin Policy</t>
+
+            <t>Removed discussion of NAT-PT and address learning; those are
+            only used with IPv6-only hosts whereas this document is about
+            dual-stack hosts contacting dual-stack servers.</t>
+          </list></t>
+      </section>
+        <section title="changes from -00 to -01">
+          <t><list style="symbols">
+              <t>added SRV section (thanks to Matt Miller)</t>
+            </list></t>
+        </section>
+    </section>
+  </back>
+</rfc>
+<!---
+-->

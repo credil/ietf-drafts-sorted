@@ -1,0 +1,897 @@
+
+
+
+Network Working Group                                        S. Cheshire
+Internet-Draft                                                Apple Inc.
+Intended status: Informational                                    Z. Zhu
+Expires: March 13, 2011                                             UCLA
+                                                             R. Wakikawa
+                                                              Toyota ITC
+                                                                L. Zhang
+                                                                    UCLA
+                                                       September 9, 2010
+
+
+              Understanding Apple's Back to My Mac Service
+                       draft-zhu-mobileme-doc-02
+
+Abstract
+
+   This draft describes the implementation of Apple Inc.'s Back to My
+   Mac (BTMM) service.  BTMM provides network connectivity between
+   devices so that a user can perform file sharing and screen sharing
+   among multiple computers at home, at work, or on the road.  The
+   implementation of BTMM addresses the issues of single sign-on
+   authentication, secure data communication, service discovery and end-
+   to-end connectivity in face of Network Address Translators (NAT) and
+   mobility of devices.
+
+Status of this Memo
+
+   This Internet-Draft is submitted to IETF in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on March 13, 2011.
+
+Copyright Notice
+
+   Copyright (c) 2010 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+
+
+
+Cheshire, et al.         Expires March 13, 2011                 [Page 1]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Overview of Back to My Mac . . . . . . . . . . . . . . . . . .  3
+   3.  Representing Host Location in SRV Records  . . . . . . . . . .  5
+   4.  NAT Traversal  . . . . . . . . . . . . . . . . . . . . . . . .  6
+     4.1.  Introduction to NAT-PMP  . . . . . . . . . . . . . . . . .  6
+     4.2.  Requesting/Removing a Port Mapping . . . . . . . . . . . .  7
+     4.3.  Obtaining NAT box's Public IP Address  . . . . . . . . . .  8
+     4.4.  Un-supported Scenarios . . . . . . . . . . . . . . . . . .  8
+   5.  Handling IP Address or Port Changes  . . . . . . . . . . . . .  8
+     5.1.  Updating Local Interfaces and Tunnels  . . . . . . . . . .  8
+     5.2.  Dynamically Updating Reachability Information  . . . . . .  9
+     5.3.  Getting Up-to-Date DNS Resource Records by DNS-LLQ . . . . 10
+   6.  An Engineering Approach to Augmenting Host with An
+       Identifier . . . . . . . . . . . . . . . . . . . . . . . . . . 11
+     6.1.  Why BTMM Needs Host Identifiers  . . . . . . . . . . . . . 11
+     6.2.  What to Use As Host Identifier . . . . . . . . . . . . . . 11
+     6.3.  IPv6 ULA Configuration . . . . . . . . . . . . . . . . . . 12
+   7.  Securing Communication . . . . . . . . . . . . . . . . . . . . 12
+     7.1.  Authentication for Connecting to Remote Host . . . . . . . 13
+     7.2.  Authentication for DNS Request/Response  . . . . . . . . . 13
+     7.3.  Using IPsec to Secure End-to-End Data Communication  . . . 13
+   8.  References . . . . . . . . . . . . . . . . . . . . . . . . . . 15
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 16
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                 [Page 2]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+1.  Introduction
+
+   The Back to My Mac (BTMM) service was shipped with MAC OS X 10.5
+   release in October 2007.  BTMM provides secure connections among a
+   set of devices over dynamic and heterogeneous network environment.
+   Independent from whether the user is traveling and accessing the
+   Internet via airport wifi, or staying at home behind a NAT, BTMM
+   allows the user to connect to any of his Mac computers with a click,
+   after which the user can share files with remote computers or control
+   the remote Mac through screen sharing.  When a user moves around and
+   changes locations and hence the IP addresses of his computing devices
+   (e.g. roaming around with a laptop and receiving dynamically
+   allocated IP address), BTMM provides a way for the roaming host to
+   updates its reachability information, so that it stays reachably by
+   the user's other Mac devices.  BTMM can maintain end-to-end
+   connections in face of hosts IP address changes by using unique host
+   identifiers for TCP connections and secure user data communications.
+   BTMM also provides mechanisms to reach devices behind a NAT.
+
+   BTMM achieves the above goals mainly by integrating a set of existing
+   protocols and software tools.  BTMM uses DNS-based Service Discovery
+   [DNS-SD] to announce host reachability information, uses dynamic DNS
+   Update [DDNS] to refresh the DNS resource records when a host changes
+   its IP address, and uses DNS Long-lived Queries [DNS-LLQ] to make
+   sure that all interested hosts get notified when the content of their
+   interested DNS resource records changes.  It uses the NAT Port
+   Mapping Protocol [NAT-PMP] for NAT traversal, and Kerberos for
+   authentication.  BTMM uses IPv6 ULA addresses as host identifiers,
+   and uses IPsec between a pair of host identifiers to secure data
+   communications.
+
+
+2.  Overview of Back to My Mac
+
+   Figure 1 provides a sketch of the basic components in BTMM
+   implementation.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                 [Page 3]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+           DDNS update    +--------+  DDNS update
+         +--------------->|        |<-------+
+         |                |  DNS   |        |
+         |      LLQ       |        | LLQ    |
+         |    +---------->|        |<----+  |
+         |    |           |        |     |  |
+         |    |           +--------+     |  |
+         |    |                          |  |            +---------+
+         |    V                      +---+--+----+       |         |
+        ++-------+                   |           +-------|         |
+        |Endhost1|     Tunnel        |    NAT    +------>|Endhost2 |
+        |        |<=====================================>|         |
+        +--------+                   |           |       |         |
+                                     +-----------+       +---------+
+
+                                 Figure 1
+
+   In BTMM, every user is assigned a DNS domain under members.me.com
+   domain (e.g. bob.members.me.com), and Apple Inc. provides the DNS
+   service.  The reachability information of the user's machines is
+   published in DNS, and only accessible to the user.  When a user logs
+   in from a computer M, the machine starts updating the Dynamic DNS
+   server about M's reachability information.  If the user has multiple
+   machines, M will also set up LLQ with the DNS server, so that the DNS
+   server can push any newly changed resource records to it if any other
+   machines change their reachability information.  In case a host is
+   behind a NAT, the public IP address of the NAT box and the port
+   opened for the host will be put in the DNS resource records;
+   otherwise, the public IP address of the host and the port opened on
+   the host are published to DNS instead.  Other hosts can then use this
+   information to reach computer M.
+
+   To enable established connections between a pair of machines to
+   survive IP address changes at either end, the connections must be
+   based on unique and stable identifier for each machine.  BTMM chose
+   to use IPv6 ULA as host identifier, so that all the existing IPv6
+   application and protocol code can be reused.  For security concerns,
+   BTMM leverages IPsec to protect the communications, and Kerberos is
+   used to do the authentication.
+
+   Thus, each user data packet originated by BTMM is an IPv6 packet,
+   which is inside the IPsec encapsulation.  The outer most headers is
+   the UDP head and IPv4 header that are used for NAT traversal.
+   Figure 2 illustrates how an encapsulated packet looks like.  Note
+   that even if both ends have routed public IP addresses, the packet
+   encapsulation process is still the same.
+
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                 [Page 4]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+     +-------------+------+------------+------------------------+
+     | IPv4 Header | UDP  | IP6sec ESP |      IPv6 Packet       |
+     +-------------+------+------------+------------------------+
+
+                                 Figure 2
+
+   The following sections describes each of the basic components in
+   BTMM.  Since this draft is intended to be an informal description of
+   the BTMM design, we did not include the details (e.g. packet format,
+   error code, etc) of each component.
+
+
+3.  Representing Host Location in SRV Records
+
+   For each host, BTMM must encode into DNS both the host identifier and
+   its current location information.  Since many hosts are behind a NAT
+   box, NAT traversal requires a transport port number as well.  BTMM
+   stores the host ID in DNS AAAA records, and utilizes DNS SRV RR to
+   represent the host's current location information.
+
+   The format of SRV RR [RFC2782] is as following:
+
+
+
+   +----------------------+---+-----+---+--------+------+----+------+
+   | _Service._Proto.Name |TTL|Class|SRV|Priority|Weight|Port|Target|
+   +----------------------+---+-----+---+--------+------+----+------+
+
+                                 Figure 3
+
+   The following text explains how BTMM utilizes SRV records to
+   represent the locations of machines.
+
+   Service is the symbolic name of the desired service.  In BTMM case,
+   the service is named "autotunnel", which means that the information
+   contained in the SRV RR is used by BTMM to automatically set up a
+   tunnel between two end hosts.
+
+   Proto is the symbolic name of desired protocol.  Typically it is
+   either "_tcp" or "_udp".  BTMM uses "_udp" to do the tunneling.
+
+   Name is the domain this RR refers to.  When the user subscribes to
+   BTMM service, a domain name "username.members.me.com" is assigned to
+   her.  For a particular machine, a user-friendly host name would be
+   appended to the assigned domain name.  Hence, the first part of SRV
+   record would look like
+   "_autotunnel._udp.hostname.username.members.me.com".
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                 [Page 5]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+   TTL and Class have Standard DNS meaning [RFC1035].  Priority and
+   Weight are always zero, since in BTMM for each Name there is only one
+   instance that provides "autotunnel" service.
+
+   Port is the port on this target host of this service.  In our case,
+   most likely it is the external port a NAT opened for the host behind
+   it.  Knowing the port number, the NAT traversal can be achieved via
+   UDP encapsulation.  More on NAT traversal will be discussed in next
+   section.  If the host is not behind a NAT, the port opened on the
+   host for autotunnel service would be placed here.
+
+   Target is the domain name of the target host.  Here it refers to a
+   name constructed by appending an autotunnel label to the domain name,
+   not generally user-visible.  The form of autotunnel label is
+   concatenating "AutoTunnel" with the IEEE EUI-64 identifier, which is
+   created according to [EUI64] from the machine's 48bit MAC identifier
+   of the primary interface.  The IP address corresponding to the target
+   will be used as external tunnel address during NAT traversal.
+
+   The following is an example of SRV records used by BTMM.
+
++----------------------------------------------+-----+--+---+-+-+----+-------
+| _autotunnel._udp.myMacpro.bob.members.me.com |86400|IN|SRV|0|0|7809|AutoTun
++----------------------------------------------+-----+--+---+-+-+----+-------
+-----------------------------------------------+
+nel-00-22-69-FF-FE-8E-34-2A.bob.members.me.com |
+-----------------------------------------------+
+
+                                 Figure 4
+
+
+4.  NAT Traversal
+
+   BTMM requires the router devices to support NAT-PMP or UPnP IGD.
+   NAT-PMP is the alternative introduced by Apple Inc. to the more
+   common Internet Gateway Device (IGD) Standardized Device Control
+   Protocol [IGD] as published in UPnP forum.  Both NAT-PMP and IGD
+   require that the NAT device can open a port for inbound connections
+   for the host behind it and inform the host about its public IP
+   address.  The design difference between IGD and NAT-PMP can be found
+   in [NAT-PMP].  This section focuses on NAT-PMP.
+
+4.1.  Introduction to NAT-PMP
+
+   NAT-PMP is a protocol that is designed specifically to handle the NAT
+   traversal without manual configuration.  When a host determines that
+   its primary IPv4 address is in one of the private IP address ranges
+   defined in "Address Allocation for Private Internets" [RFC1918], it
+
+
+
+Cheshire, et al.         Expires March 13, 2011                 [Page 6]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+   will invoke NAT-PMP to communicate with the NAT gateway to request
+   the creation of inbound mappings on demand.  Having created a NAT
+   mapping to allow inbound connections, the client host can then
+   publish its NAT's public IP address and external port number in a
+   public registry (e.g.  DNS as we discussed in last section).
+
+   A host sends its Port Mapping Protocol request to the default
+   gateway, which means that by default, this protocol is designed for
+   small home networks where the host's default gateway is the NAT
+   router.  If the host finds that NAT-PMP is not available on its
+   network, it would proceed on assumption that the network is a
+   publicly reachable network.
+
+4.2.  Requesting/Removing a Port Mapping
+
+   To request a port mapping, the client host sends its request packet
+   to port 5351 of its configured gateway address, and waits 250ms for a
+   response.  If no response is received after 250ms, the host repeats
+   the process with exponential back-off retry timer.
+
+   While requesting the port mapping, the host can specify the desired
+   external port(e.g. the port that is identical to the internal port),
+   but the NAT device is not obliged to allocate the desired one.  If
+   such port is not available, NAT device responds with another port.
+   The primary reason for allowing host to request a specific port is to
+   help recover from the NAT device crash, so that the host is likely to
+   obtain a port which is the same as the original one (i.e. this allows
+   the end hosts to keep the mapping states and does not require the NAT
+   to keep the mapping state after crash, which turns hard state in the
+   network into soft state, and enables automatic recovery when needed).
+
+   The recommended port mapping lifetime is 3600 seconds.  And the host
+   should begin trying to renew the mapping at 1800 seconds.
+
+   The renewal sent by client host, whether for the purpose of extending
+   lease or recreating mappings on NAT device reboot, is the same as
+   requesting a port mapping.
+
+   A mapping may be removed in a variety ways.  If a client host fails
+   to renew a mapping, then when its lifetime expires the mapping is
+   automatically deleted.  Or if the client host's DHCP address lease
+   expires, the NAT device may automatically delete the mapping.  A
+   client host may also send an explicit packet to request deletion of a
+   mapping that is no longer needed.
+
+
+
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                 [Page 7]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+4.3.  Obtaining NAT box's Public IP Address
+
+   To determine the public IP address of the NAT, the client host also
+   sends the query packet to port 5351 of the configured gateway
+   address.  NAT device should response with a packet containing the
+   public IP address of NAT.
+
+   In case the public IP address of the NAT changes, the NAT gateway
+   sends a gratuitous response to the link-local multicast address
+   224.0.0.1, port 5350 to notify the clients about the new IP address.
+
+4.4.  Un-supported Scenarios
+
+   There are a number of situations where NAT-PMP (and consequently
+   BTMM) may not work.
+
+4.4.1.  NAT Behind NAT
+
+   Some people's primary IP address assigned by their ISP may itself be
+   a NAT address.  In addition, some people may have an public IP
+   address, but may then double NAT themselves.  NAT traversal can not
+   be achieved with NAT-PMP in such situations.
+
+4.4.2.  NATs and Routed Private Networks
+
+   In some cases, a site may install a NAT gateway and subnet the
+   private network.  Such subneting breaks the assumption of NAT-PMP
+   protocol because the router address is not necessarily the address of
+   the device performing NAT.
+
+
+5.  Handling IP Address or Port Changes
+
+   This section describes how BTMM provides a way to handle IP address
+   or port changes, so that the hosts belonging to the same user can
+   find each other and keep ongoing connections even after the change
+   happens at one or both ends.
+
+5.1.  Updating Local Interfaces and Tunnels
+
+   After BTMM receives the notification about the network changes, all
+   interfaces are marked as inactive.  Then the system updates the
+   interface list, and at the same time it clears all inactive
+   interfaces.  Finally it sets up active interfaces.
+
+   Then, BTMM also needs to send requests to the NAT device (if it is
+   behind a NAT) in order to create a port mapping and obtain the new
+   public IP addresses, as discussed in last section.
+
+
+
+Cheshire, et al.         Expires March 13, 2011                 [Page 8]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+   Next step, BTMM makes change to the local autotunnel interface, i.e.
+   configures the IPv6 interface for the inner address of tunnel.  If
+   there are established tunnels, it scans to find those that local
+   inner/outer addresses have changed since the tunnel was set up, and
+   then put in the current addresses.
+
+   With all these done, now the BTMM client needs to publish the changes
+   to DNS.
+
+5.2.  Dynamically Updating Reachability Information
+
+   The mobile nature of the BTMM clients implies that Dynamic DNS Update
+   [DDNS] is required if the location information of hosts are going to
+   be published via DNS.
+
+   However, the dynamically updated resource records are often not
+   properly removed, leaving stale RRs in DNS server.  Hence, Dynamic
+   DNS Update Leases [DDUL] is used by BTMM to reduce the impact of
+   stale RRs.  Another possible choice is to overload the resource
+   records' TTL as the removal timer.  However, there is a concern about
+   unacceptable amount of network traffic due to refreshes if TTL were
+   used to clear stale resource record, because TTL is usually set to be
+   very short in order to minimize stale cached data in intermedia DNS.
+
+   In the case of network changes, the resource records of a host should
+   be updated immediately after local interfaces are properly configured
+   and port mapping as well as the public IP address of the NAT are
+   obtained.  Usually there are 4 types of resource records involved.
+   An AAAA record for updating the new IPv6 address of the host
+   (possibly the same as the old one); an SRV record for updating the
+   autotunnel service information, which includes the new external port
+   and the new target; an A record for updating the new public IP
+   address of the target; and a TXT record for describing the autotunnel
+   device information.  The host then constructs and sends an SRV query
+   for the name _dns-update._udp.user-domain.  Then the updates are sent
+   to the Dynamic DNS server returned in the target field of SRV query
+   response.
+
+   Besides that, periodically refreshment is also required by the
+   Dynamical DNS Update Leases even though the network may not
+   experience any change.  The Update Requests contain a signed 32-bit
+   integer indicating the lease life in seconds.  To reduce network and
+   server load, a minimum lease of 30 minutes is recommended.  On the
+   other hand, to avoid stale information, a lease longer than 2 hours
+   is not allowed in BTMM case.  The typical length is 90 minutes.
+   Resource records not to be deleted by the server must be refreshed by
+   the client host before the lease expires.
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                 [Page 9]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+5.3.  Getting Up-to-Date DNS Resource Records by DNS-LLQ
+
+   In dynamic environments, changes to DNS information are very
+   frequent.  How to let the hosts that are concerned about particular
+   DNS resource records know the change efficiently is a challenging
+   question.  In traditional DNS, queries are "one-shot" -- a name
+   server will answer a query once, returning the results available at
+   that instant in time.  Thus, polling is necessary to learn the
+   changes.  This solution is not scalable, however, as low polling rate
+   could leave the client with stale information and a high polling rate
+   would have an adverse impact on the network and server.
+
+   BTMM relies on DNS long-lived queries [DNS-LLQ] to allow the DNS
+   server to notify the client host about the changes to DNS data.
+
+   The same as in the case of resource records updates, the client
+   issues an SRV query for the name _dns-llq._udp.user-domain and
+   obtains the server providing LLQs.  LLQ is initiated by a client and
+   is completed via a four-way handshake: Initial Request, Challenge,
+   Challenge Response, and ACK + Answers.  During the Challenge phase,
+   the DNS server would provides a unique identifier for the request and
+   the client is required to echo this identifier in Challenge Response
+   phase.  This handshake provides resilience to packet loss,
+   demonstrates client reachability and reduces denial-of-service attack
+   opportunities.
+
+   LLQ lease is negotiated during the handshake.  In BTMM case, the
+   minimum lease is 15 minutes and the maximum lease is 2 hours.  Lease
+   must be refreshed before expiration.
+
+   When a change ("event") occurs to a name server's domain, the server
+   checks if the new or deleted resource records answer any LLQs.  If
+   so, the resource records would be sent to the LLQ requesters in the
+   form of a gratuitous DNS response, with the question(s) being
+   answered in the Question section, and answer(s) to the question(s) in
+   the Answer section.  Client acknowledges the reception of the
+   notifications, otherwise the server would re-send the response.  If a
+   total of 3 transmissions fails, the client is considered unreachable
+   and the LLQ is deleted.
+
+   BTMM host would then update tunnels according to the query answers.
+   The callback function for automatically setting up tunnels goes as
+   Figure 5 shows.
+
+
+
+
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                [Page 10]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+                       1:  Push Updated AAAA RR       +------------+
+                <-----------------------------------  |            |
+                    2: Query for autotunnel SRV RR    |            |
+    +--------+  ----------------------------------->  |            |
+    |        |        3: Reply Updated SRV RR         | DNS server |
+    | client |  <-----------------------------------  |            |
+    |        |      4: Query for Target in SRV RR     |            |
+    +--------+  ----------------------------------->  |            |
+                    5: Reply Updated A RR of Target   |            |
+                <-----------------------------------  |            |
+                                                      +------------+
+
+                  In Step
+                  1: client learns the inner IP address of the tunnel
+                  3: client learns the port opened for UDP NAT traversal
+                  5: client learns the public IP address of the remote NAT,
+                     i.e. the outer IP address of the tunnel
+
+
+                                 Figure 5
+
+
+6.  An Engineering Approach to Augmenting Host with An Identifier
+
+6.1.  Why BTMM Needs Host Identifiers
+
+   There are a number of reasons why BTMM would need a topology-
+   independent identifier for each client host.
+   o  A host may on the move, thus any identifier that is related to the
+      topology would be constantly changing, which causes great troubles
+      for mobility support and other purposes.
+   o  The two ends may wish to have the established TCP connections
+      survive network changes.
+   o  To facilitate the cryptography protection, sometimes a constant
+      identifier would need to be associated with a key so that the
+      security association can survive the location changes.
+
+6.2.  What to Use As Host Identifier
+
+   There are several candidates for host identifiers, such as DNS name,
+   HIP [HIP], and of course IPv6 address.  To be accurate, the last one
+   should be IPv6 ULA [RFC4193], because the globally routable IPv6
+   address dependents on the topology.  So why choose IPv6 ULA?
+
+   A very pragmatic concern about introducing a host identifier is: do
+   we need to re-write all the protocol and application code?  It would
+   be a tedious and error-prone work to migrate all the existing
+   implementations.  This gives us a hint: the host identifier should be
+
+
+
+Cheshire, et al.         Expires March 13, 2011                [Page 11]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+   compatible with existing protocol and application implementations,
+   e.g. something in the same form and length as IP address.  This rules
+   out DNS name, which has variable length.
+
+   For HIP, although it has the same length as IPv6 address and host ID
+   can serve as its public key, we still lack a secure way to retrieve
+   the host ID.  Under this condition, using HIP would not bring us much
+   benefit.
+
+   On the other hand, with IPv6 ULA as host identifier, all the existing
+   code can be used directly.  And since in BTMM all the IPv6 addresses
+   are not leaked to the public network, it would not cause any problem
+   to the global Internet.
+
+6.3.  IPv6 ULA Configuration
+
+   In BTMM, IPv6 ULA is advertised to be used in the autotunnel service
+   of the host.  Thus, the IPv6 address needs to be configured before
+   BTMM can start its service.
+
+   When the machine boots up, the IPv6 address for autotunnel service is
+   initialized as zeros and the autotunnel interface is marked as
+   inactive.  During the process when BTMM updates the interfaces list
+   (which is performed every time the network changes), if the IPv6
+   address is found uninitialized, BTMM would randomly generate an IPv6
+   ULA according to [RFC4193].  The first octet of the ULA is set to be
+   "0xFD", and the following 7 octets are randomly selected from 0~255.
+   Finally, the EUI-64 identifier fills up the rest 8 octets.  Since
+   there are 56 random bits plus a theoretically unique EUI-64
+   identifier, it is unlikely to have the IPv6 ULA collision between any
+   two machines of the same subscriber.
+
+   This locally generated ULA keeps unchanged when the machine is on,
+   despite its location changes.  Hence the user can fully enjoy the
+   benefits brought by topology-independent host identifiers.  After the
+   machine power off, this particular ULA is no longer kept.
+
+
+7.  Securing Communication
+
+   BTMM users often have to fetch their personal data via a network they
+   don't trust (or have no idea whether it's trustworthy).  Hence, it is
+   important for BTMM to have effective means to secure the
+   communications.
+
+
+
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                [Page 12]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+7.1.  Authentication for Connecting to Remote Host
+
+   Kerberos is a "single sign on" technology and is supported in Apple's
+   products since Mac OS X 10.5.  Each Mac OS X client maintains a local
+   Key Distribution Center (KDC) for the use of Bonjour and peer-to-peer
+   security, which means that it is also a component of BTMM.
+
+   When the user first signs in to MobileMe on a host, it automatically
+   receives a digital certificate and private key for "Back to My Mac
+   Encryption Certificate".  When the user connects to another system
+   using BTMM, authentication is performed using the standard Public Key
+   Cryptography for Initial Authentication in Kerberos (PKINIT) protocol
+   [PKINIT] with that certificate.  After that, the user is granted a
+   "ticket" that permits it to continue to use the services on the
+   remote machine, without re-authenticating, until the ticket expires,
+   which usually has 10 hours lifetime.
+
+7.2.  Authentication for DNS Request/Response
+
+   BTMM uses Transaction SIGnature (TSIG) to authenticate user when
+   dynamic DNS update is performed, as specified in [RFC2845].  Also, to
+   protect the subscriber's privacy, LLQ is required to contain TSIG.
+   This authentication mechanism is based on the shared secret key,
+   which in BTMM's case is the subscriber's MobileMe account password.
+
+   Every time a DNS request/response is going to be issued, a TSIG RR is
+   dynamically computed with HMAC-MD5 message digest algorithm (and the
+   TSIG RR will be discarded once its has been used).  Inside the TSIG
+   RR, a name of the shared secret key in domain name syntax is
+   included, so the receiver knows which key to used (especially useful
+   if the receiver is the DNS server).  This TSIG RR is appended to the
+   additional data section before the message is send out.  The receiver
+   of the message verifies the TSIG RR and proceeds only if the TSIG is
+   valid.
+
+   Besides, the DNS messages are also protected by TLS [RFC2246], so
+   that it prevents eavesdropping.
+
+7.3.  Using IPsec to Secure End-to-End Data Communication
+
+7.3.1.  Internet Key Exchange
+
+   Before the Security Association can be established between two end
+   hosts, Internet Key Exchange (IKE) process needs to be accomplished.
+
+   BTMM calls another process Racoon [Racoon] to do the key exchange,
+   after which the key will be put into Security Association Database
+   (SAD).  The exchange mode is set to be aggressive so that it would
+
+
+
+Cheshire, et al.         Expires March 13, 2011                [Page 13]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+   not take too long.  And it uses pre-shared key to do the user
+   authentication.  The subscriber's FQDN is used as both identifier and
+   pre-shared key during IKE process.
+
+7.3.2.  End-to-End Encryption
+
+   When it comes the time to set up Security Associations between two
+   BTMM clients, we have two choices: either to put the other host's
+   IPv4 address in the destination address field, or otherwise put in
+   the IPv6 address of the remote end.
+
+   If the IPv4 address (which is the public address of a NAT) is chosen
+   to associate with a Security Association, that means we set up a
+   Security Association between one end host and the NAT of the other
+   host.  The IPv6 packet would then be wrapped by UDP header and then
+   get encrypted by ESP.  After the encrypted packet arrives at the NAT,
+   the NAT device decrypts the packet and sends it to the destination
+   according to the port mapping.  Although this approach seems viable,
+   there are 3 drawbacks:
+   o  First, the encryption is not end-to-end, i.e. only the path
+      between one end host and the NAT device of the other end is
+      protected.  The rest of the path, from the NAT device to the final
+      receiver, is unprotected and vulnerable to attacks.  If the NAT
+      device is not trustworthy, the communication is at high risk.
+      Even if the NAT device is trustworthy (e.g. the user owns the
+      NAT), it is not uncommon that the NAT communicates with the host
+      through broadcast channel, which provides opportunities for
+      eavesdropper to sniff the sensitive data (consider the unlocked
+      "free" wifi access near your neighborhood).
+   o  Second, quite a lot BTMM clients are on move very often.  Every
+      time they change their attachment points to the Internet they will
+      get different IPv4 addresses.  As a result, the previously
+      established Security Associations become obsoleted and the two end
+      hosts need to re-establish them again.  This is a waste of time
+      and resources.
+   o  Third, this approach assumes that the NAT device is able and
+      willing to do the IPsec ESP for the host behind it, which is not
+      always the case.
+
+   Consequently, BTMM decides to put the IPv6 ULA into the destination
+   field of IPsec Security Associations.  This way, the end-to-end path
+   between the hosts are fully protected, and the Security Associations
+   can survive the network changes since the IPv6 ULA remains the same
+   even the BTMM client changes its location.  Furthermore, the
+   encryption is transparent to the NAT device, which means we do not
+   need the NAT device to interfere with the IPsec protection.
+
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                [Page 14]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+8.  References
+
+   [DDNS]     "Dynamic Updates in the Domain Name System (DNS UPDATE)",
+              draft draft-cheshire-dnsext-dns-sd-05.txt.
+
+   [DDUL]     "Dynamic DNS Update Leases", draft -sekar-dns-ul-01.txt.
+
+   [DNS-LLQ]  "DNS Long-Lived Queries",
+              draft draft-cheshire-dns-llq-01.txt.
+
+   [DNS-SD]   "DNS-Based Service Discovery",
+              draft draft-cheshire-dnsext-dns-sd-05.txt.
+
+   [EUI64]    "Guidelines for 64-bit Global Identifier (EUI-64)", http :
+              //standards.ieee.org/regauth/oui/tutorials/EUI64.html.
+
+   [HIP]      "Host Identify Protocol (HIP) Architecture", RFC 4423.
+
+   [IGD]      "Internet Gateway Device(IGD) Standard Device Control
+              Protocol", http ://www.upnp.org/standardizeddcps/igd.asp.
+
+   [NAT-PMP]  "NAT Port Mapping Protocol",
+              draft draft-cheshire-nat-pmp-03.txt.
+
+   [PKINIT]   "Public Key Cryptography for Initial Authentication in
+              Kerberos (PKINIT)", RFC 4556.
+
+   [RFC1035]  "Domain Names - implementation and specification",
+              RFC 1035.
+
+   [RFC1918]  "Address Allocation for Private Internets", RFC 1918.
+
+   [RFC2246]  "The TLS Protocol", RFC 2246.
+
+   [RFC2782]  "A DNS RR for specifying the location of services (DNS
+              SRV)", RFC 2782.
+
+   [RFC2845]  "Secret Key Transaction Authentication for DNS (TSIG)",
+              RFC 2845.
+
+   [RFC4193]  "Unique Local IPv6 Unicast Address", RFC 4193.
+
+   [Racoon]   "Racoon", http ://netbsd.gw.com/cgi-bin/
+              man-cgi?racoon++NetBSD-current.
+
+   [WWDC]     "Worldwide Developers Conference",
+              http developer.apple.com/wwdc/.
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                [Page 15]
+
+Internet-Draft                    BTMM                    September 2010
+
+
+Authors' Addresses
+
+   Stuart Cheshire
+   Apple Inc.
+   1 Infinite Loop
+   Cupertino, CA  95014
+   US
+
+   Phone: +1 408 974 3207
+   Email: cheshire@apple.com
+
+
+   Zhenkai Zhu
+   UCLA
+   4805 Boelter Hall, UCLA
+   Los Angeles, CA  90095
+   US
+
+   Phone: +1 310 993 7128
+   Email: zhenkai@cs.ucla.edu
+
+
+   Ryuji Wakikawa
+   Toyota ITC
+   465 Bernardo Avenue
+   Mountain View, CA  94043
+   US
+
+   Email: ryuji@jp.toyota-itc.com
+
+
+   Lixia Zhang
+   UCLA
+   3713 Boelter Hall, UCLA
+   Los Angeles, CA  90095
+   US
+
+   Phone: +1 310 825 2695
+   Email: lixia@cs.ucla.edu
+
+
+
+
+
+
+
+
+
+
+
+
+Cheshire, et al.         Expires March 13, 2011                [Page 16]
+
+

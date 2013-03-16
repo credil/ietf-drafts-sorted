@@ -1,0 +1,685 @@
+
+TRILL Working Group                                      Donald Eastlake
+INTERNET-DRAFT                                              Mingui Zhang
+Intended status: Proposed Standard                                Huawei
+                                                           Radia Perlman
+                                                              Intel Labs
+Expires: January 3, 2012                                    July 4, 2011
+
+
+                  RBridges: Multi-Topology Data Plane
+            <draft-eastlake-trill-rbridge-multi-topo-00.txt>
+
+
+Abstract
+
+   The IETF has standardized RBridges (Routing Bridges), devices that
+   implement the TRILL (TRansparent Interconnection of Lots of Links)
+   protocol, a solution for least cost transparent frame routing in
+   multi-hop networks with arbitrary topologies, using IS-IS
+   (Intermediate System to Intermediate System) link-state routing and
+   encapsulation with a hop count.
+
+   IS-IS supports multi-topology routing. This document specifies a
+   TRILL data plane encoding to make use of such routing.
+
+
+Status of This Memo
+
+   This Internet-Draft is submitted to IETF in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Distribution of this document is unlimited. Comments should be sent
+   to the TRILL working group mailing list.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF), its areas, and its working groups.  Note that
+   other groups may also distribute working documents as Internet-
+   Drafts.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   The list of current Internet-Drafts can be accessed at
+   http://www.ietf.org/1id-abstracts.html
+
+   The list of Internet-Draft Shadow Directories can be accessed at
+   http://www.ietf.org/shadow.html
+
+
+
+
+
+
+
+D. Eastlake, et al                                              [Page 1]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+Table of Contents
+
+      1. Introduction............................................3
+      1.1 Terminology............................................3
+
+      2. TRILL Multi-Topology (MT)...............................4
+      2.1 Nicknames and Topology Abbreviation....................4
+      2.2 Nickname Allocation....................................5
+      2.3 SPF and Distribution Tree Calculation..................5
+
+      3. Processing Multi-Topology Frames........................7
+      3.1 Ingress Processing.....................................7
+      4.2 Transit Processing.....................................7
+      4.3 Egress Processing......................................7
+      4.4 Address Learning.......................................7
+
+      5. IS-IS Extensions........................................8
+
+      6. IANA Considerations.....................................9
+      7. Security Considerations.................................9
+
+      8. References.............................................10
+      8.1 Normative References..................................10
+      8.2 Informative References................................10
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+D. Eastlake, et al                                              [Page 2]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+1. Introduction
+
+   The IETF has standardized RBridges (Routing Bridges), devices that
+   implement the TRILL (TRansparent Interconnection of Lots of Links)
+   protocol [RFCtrill], a solution for least cost transparent frame
+   routing in multi-hop networks with arbitrary topologies, using IS-IS
+   (Intermediate System to Intermediate System) link-state routing [IS-
+   IS] [RFC1195] [ISIStrill] and encapsulation with a hop count.
+
+   TRILL supports VLANs (Virtual Local Area Networks) but the
+   segregation provided by VLANs is logical, especially so with TRILL.
+   While maintaining logical separation, the base TRILL standard shares
+   inter-RBridge links across all VLANs and by default interconnects all
+   end stations that are in the same VLAN and have connectivity to any
+   RBridge in the campus.
+
+   IS-IS multi-topology [RFC5120] can provide physical separation of
+   classes of TRILL Data frames, assuming that the RBridges in a campus
+   can be trusted. This can be used for a variety of purposes including
+   such things as confining traffic to isolated islands within an
+   RBridge campus, quality of service traffic engineering, excluding
+   some frames from links that are particularly exposed to interception,
+   and providing significant protection against some covert channels
+   [RFC4949].
+
+   Familiarity with the TRILL base protocol standard [RFCtrill], TRILL
+   use of IS-IS [ISIStrill], and IS-IS multi-topology [RFC5120] is
+   assumed in this document.
+
+
+
+1.1 Terminology
+
+   The terminology and acronyms of [RFCtrill] are used in this document
+   with the additions listed below.
+
+      MT - Multi-Topology
+
+      TAS - Topology Abbreviation Size
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in [RFC2119].
+
+
+
+
+
+
+
+
+
+D. Eastlake, et al                                              [Page 3]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+2. TRILL Multi-Topology (MT)
+
+   The essence of TRILL multi-topology (MT) is that (a) when TRILL Data
+   frames are ingressed or created they are assigned to a topology, (b)
+   links can be labeled with one or more topologies and different cost,
+   etc., for different topologies, and (c) a TRILL Data frame is only
+   allowed on a link labeled with the frame's topology.  In addition,
+   there is a base topology: all links are considered to be labeled to
+   allow frames in the base topology, and, by default, TRILL Data frames
+   are considered to be base topology frames.
+
+   With minor exceptions, it is important that all transit RBridges
+   believe a TRILL Data frame is in the same topology to avoid
+   persistent routing loops. This document specifies how to encode this
+   information into the egress nickname in a TRILL Data frame. (It is
+   believed that this technique is supportable by most if not all TRILL
+   fast path silicon implementations as of the date of this document.)
+
+   Implementation of MT has a significant impact on shortest path and
+   distribution tree computation. In general, it multiplies the level of
+   effort by the number of different topologies. Using the technique in
+   this document, it also reduces the number of of available nicknames,
+   generally dividing it by the number of topologies rounded up to the
+   next power of two. For these reasons, the number of topologies in use
+   should be minimized.
+
+
+
+2.1 Nicknames and Topology Abbreviation
+
+   The TRILL base protocol standard [RFCtrill] specifies 16-bit
+   nicknames as abbreviations for RBridge IS-IS System IDs. In MT TRILL
+   the nickname is subdivided into two fields. The least significant TAS
+   (Topology Abbreviation Size) number of bits indicate the topology
+   constraints of the nickname while the most significant ( 16 - TAS )
+   bits continue to act as an abbreviation for an RBridge System ID.
+
+   The TAS value for an MT RBridge campus is dictated by the RBridge
+   that is the highest priority to be a distribution tree root.  The
+   value of TAS can vary from zero to seven. Zero is permitted and
+   indicates that only the base topology can be used.
+
+   In IS-IS, topologies have a 12-bit ID which we refer to as an
+   absolute topology number. Topology zero is the base topology. All
+   links are considered to be part of the base topology. Absolute
+   topology numbers are mapped into abbreviations by a table dictated by
+   the RBridge that is the highest priority to be a distribution tree
+   root. In the opening remarks to this Section 2, "topology" should be
+   read as referring to topology abbreviation.
+
+
+
+D. Eastlake, et al                                              [Page 4]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+   Multiple absoolute topology numbers MAY be mapped into the same
+   abbreviation. This may or may not result in the merger of the mapped
+   absolute topologies depending on whether their use is disjoint or
+   overlapping. Absolute topology zero and topology abbreviation zero
+   always refers to the base topology.
+
+   For example, assume that absolute topologies T1 and T2 exist and are
+   both mapped into the same abbreviation, say 3. If all RBridges
+   reachable by links labeled T1 or T2 are connected through such links,
+   then, since MT TRILL forwarding is based on the topology
+   abbreviation, T1 and T2 are necessarily merged to the extent both
+   topologies are in use. On the other hand, such RBridges could be
+   divided into disjoint islands with no connection via T1 or T2 links.
+   In that case, depending on how frames are topologically classified on
+   ingress and egress, each such island could independently be
+   exclusively T1, exclusively T2, merged T1 and T2, or unused.
+
+
+
+2.2 Nickname Allocation
+
+   RBridges indicate in their LSP whether they support MT by the
+   presence of the MT TLV [RFC5120]. If all RBridges in a campus support
+   MT, then RBridges can be configured for and contend for nicknames as
+   provided in [RFCtrill], but only for nicknames that have TAS number
+   of low order zero bits. If there are any RBridges in the campus that
+   do not support MT, then MT RBridges must hold all nicknames from ( k
+   * 2**TAS ) through ( (k+1) * 2**TAS - 1 ) in order to, in effect,
+   hold nickname ( k * 2**TAS ).
+
+   RBridges not supporting MT are unaware of the subdivision of the
+   TRILL nickname into subfields. Thus, they may hold artbirary 16-bit
+   allowed quanities as nicknames. MT aware RBridges know that the
+   bottom TAS bits of any nicknames held by such MT unaware RBridges are
+   not topologically significant.
+
+
+
+2.3 SPF and Distribution Tree Calculation
+
+   Since MT TRILL cannot impose any changes on MT unaware RBridges,
+   those RBridges will perform their SPF and distribution tree
+   calculations as specified in [RFCtrill]. For compatibility, MT aware
+   RBridge MUST perform their base topology SPF and distribution tree
+   calculations in the same way. MT aware RBridges do this even if one
+   or more non-zero absolute topologies are being mapped into the base
+   topology abbreviation zero.
+
+   For MT aware RBridges, least cost (SPF) paths are calculated per
+   topology abbreviation for the abbreviations labeling any link
+
+
+D. Eastlake, et al                                              [Page 5]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+   connected to that RBridge. For topologies other than the base
+   toplogy, link costs from the MT-ISN TLV (TLV #222 [RFC5120]) are
+   used; however, such costs are reported per absolute topology, not per
+   topology abbreviation.  This is resolved for non-zero abbreviations
+   by using, in SPF calculations, the lowest cost reported for the link
+   for any absolute topology corresponding the topology abbreviation for
+   which the calculation is being performed. Non-base topologies do not
+   necessarily span the campus and there may be RBridges that are
+   unreachable in such topologies. Frames destined for unreachable
+   RBridges are discarded.
+
+   Distribution trees are also calculated per topology abbreviation by
+   MT aware RBridges. Such trees are built as described in [RFCtrill]
+   with the following differences for non-zero topology abbreviations:
+
+   1. Link costs are as described in the preceding paragraph on TRILL MT
+      SPF calculations.
+
+   2. The tree root nicknames(s) for the distribution tree(s) for a
+      particular topology abbreviation are determined using the Trees
+      sub-TLVs and Tree Identifiers sub-TLVs for all of the absolute
+      topologies that are mapped into the topology abbreviation for
+      which distribution tree(s) are being calculated. All nicknames
+      appearing in these sub-TLVs MUST have their lower TAS number of
+      bits zero. more tbd
+
+   3. Number of trees. What happens if you have 25 topologies but some
+      of your RBridges only support 16 distribution trees?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+D. Eastlake, et al                                              [Page 6]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+3. Processing Multi-Topology Frames
+
+   This section specifies ingress, transit, and egress processing of MT
+   TRILL Data frames.
+
+
+
+3.1 Ingress Processing
+
+   On ingressing or creating a frame, an RBridge assigns it to an
+   absolute topology ID. The method by which this 12-bit topology ID is
+   assigned is beyond the scope of this document.
+
+   The resulting absolute ID is mapped to a topology abbreviation. That
+   abbreviation is used as the bottom TAS bits in the ingress nickname
+   field of the resulting TRILL Data frame. For a unicast native frame,
+   that abbreviation, the VLAN, and the destination MAC address are used
+   to look up the egress nickname field. If the destination is unknown,
+   or the native frame is multicast or broadcast, the ingress RBridge
+   selects a distribution tree
+
+
+
+4.2 Transit Processing
+
+   No change is required in transit frame processing assuming that SPF
+   and distribution tree calculations have been performed as specified
+   in Section 2.3.
+
+
+
+4.3 Egress Processing
+
+
+
+
+4.4 Address Learning
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+D. Eastlake, et al                                              [Page 7]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+5. IS-IS Extensions
+
+   For the general extension of TRILL use of IS-IS to make use of the
+   multi-topology features of IS-IS, see [trill-mt-control].
+
+   In addition, a topology mapping sub-TLV is required, as specified in
+   [trill-mt-control]. This sub-TLV is across all topologies and occurs
+   in the Router Capabilities TLV. It specifies the TAS for the campus
+   and provides a mapping from absolute topology IDs to topology
+   abbreviations. Absolute topology zero is always mapped to topology
+   abbreviation zero. No entry is needed for this base topology mapping
+   and any other mapping for topology zero is ignored. Multiple absolute
+   topologies may be mapped to the same abbreviation. If there are
+   mappings of the same absolute topology to multiple abbreviations, the
+   largest abbreviation, considered as an unsigned integer dominates.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+D. Eastlake, et al                                              [Page 8]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+6. IANA Considerations
+
+   TBD
+
+
+
+7. Security Considerations
+
+   See [RFCtrill] for general RBridge Security Considerations.
+
+   As with any communications system, end-to-end encryption and
+   authentication should be considered for particularly sensitive data.
+
+   More TBD
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+D. Eastlake, et al                                              [Page 9]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+8. References
+
+   The following sections list normative and informative references for
+   this document.
+
+
+
+8.1 Normative References
+
+   [IS-IS] - International Organization for Standardization,
+         "Intermediate system to Intermediate system intra-domain
+         routeing information exchange protocol for use in conjunction
+         with the protocol for providing the connectionless-mode Network
+         Service (ISO 8473)", ISO/IEC 10589:2002, Second Edition, Nov
+         2002.
+
+   [RFC1195] - Callon, R., "Use of OSI IS-IS for routing in TCP/IP and
+         dual environments", RFC 1195, December 1990.
+
+   [RFC2119] - Bradner, S., "Key words for use in RFCs to Indicate
+         Requirement Levels", BCP 14, RFC 2119, March 1997
+
+[RFC5120] - Przygienda, T., Shen, N., and N. Sheth, "M-ISIS: Multi
+         Topology (MT) Routing in Intermediate System to Intermediate
+         Systems (IS-ISs)", RFC 5120, February 2008.
+
+[RFC 5305] - Li, T. and H. Smit, "IS-IS Extensions for Traffic
+         Engineering", RFC 5305, October 2008.
+
+   [RFCtrill] - R. Perlman, D. Eastlake, D. Dutt, S. Gai, and A.
+         Ghanwani, "RBridges: Base Protocol Specification", draft-ietf-
+         trill-rbridge-protocol-16.txt, in RFC Editor's queue.
+
+   [ISIStrill] - Eastlake, D., A. Banerjee, D. Dutt, R. Perlman, A.
+         Ghanwani, "TRILL Use of IS-IS", draft-ietf-isis-trill-05.txt,
+         in RFC Editor's queue.
+
+   [trill-mt-control] - Manral, V., D. Eastlake, M. Zhang, A. Banerjee,
+         "Multi Topology Routing Extensions for Transparent
+         Interconnection of Lots of Links (TRILL)", draft-manral-isis-
+         trill-multi-topo-01.txt, work in progress.
+
+
+
+8.2 Informative References
+
+   [RFC4949] - Shirey, R., "Internet Security Glossary, Version 2", FYI
+         36, RFC 4949, August 2007.
+
+
+
+
+D. Eastlake, et al                                             [Page 10]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+9. Acknowledgements
+
+   The comments and contributions of the following are gratefully
+   acknowledged:
+
+      TBD.
+
+
+
+Authors' Addresses
+
+   Donald Eastlake 3rd
+   Huawei Technologies
+   155 Beaver Street
+   Milford, MA 01757 USA
+
+   Phone: +1-508-333-2270
+   EMail: d3e3e3@gmail.com
+
+
+   Mingui Zhang
+   Huawei Technologies Co., Ltd
+   HuaWei Building, No.3 Xinxi Rd., Shang-Di
+   Information Industry Base, Hai-Dian District,
+   Beijing, 100085 P.R. China
+
+   Email: zhangmingui@huawei.com
+
+
+   Radia Perlman
+   Intel Labs
+   2200 Mission College Blvd.
+   Santa Clara, CA 95054 USA
+
+   Phone: +1-408-765-8080
+   Email: radia@alum.mit.edu
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+D. Eastlake, et al                                             [Page 11]
+
+INTERNET-DRAFT                       RBridges: Multi-Topology Data Plane
+
+
+Copyright, Disclaimer, and Additional IPR Provisions
+
+   Copyright (c) 2011 IETF Trust and the persons identified as the
+   document authors. All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document. Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document. Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.  The definitive version of
+   an IETF Document is that published by, or under the auspices of, the
+   IETF. Versions of IETF Documents that are published by third parties,
+   including those that are translated into other languages, should not
+   be considered to be definitive versions of IETF Documents. The
+   definitive version of these Legal Provisions is that published by, or
+   under the auspices of, the IETF. Versions of these Legal Provisions
+   that are published by third parties, including those that are
+   translated into other languages, should not be considered to be
+   definitive versions of these Legal Provisions.  For the avoidance of
+   doubt, each Contributor to the IETF Standards Process licenses each
+   Contribution that he or she makes as part of the IETF Standards
+   Process to the IETF Trust pursuant to the provisions of RFC 5378. No
+   language to the contrary, or terms, conditions or rights that differ
+   from or are inconsistent with the rights and licenses granted under
+   RFC 5378, shall have any effect and shall be null and void, whether
+   published or posted by such Contributor, or included with or in such
+   Contribution.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+D. Eastlake, et al                                             [Page 12]
+

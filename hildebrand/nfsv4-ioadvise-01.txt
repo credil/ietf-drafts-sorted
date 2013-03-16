@@ -1,0 +1,748 @@
+NFSv4 Working Group                                       D. Hildebrand
+Internet Draft                                              IBM Almaden
+                                                               M. Eisler
+Intended status: Standards Track                           T. Myklebust
+Expires: March 2012                                              NetApp
+                                                              S. Falkner
+                                                                  Oracle
+                                                      September 26, 2011
+
+
+                      Support for Application IO Hints
+                  draft-hildebrand-nfsv4-ioadvise-01.txt
+
+
+Status of this Memo
+
+   This Internet-Draft is submitted to IETF in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   This document may contain material from IETF Documents or IETF
+   Contributions published or made publicly available before November
+   10, 2008. The person(s) controlling the copyright in some of this
+   material may not have granted the IETF Trust the right to allow
+   modifications of such material outside the IETF Standards Process.
+   Without obtaining an adequate license from the person(s) controlling
+   the copyright in such materials, this document may not be modified
+   outside the IETF Standards Process, and derivative works of it may
+   not be created outside the IETF Standards Process, except to format
+   it for publication as an RFC or to translate it into languages other
+   than English.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF), its areas, and its working groups.  Note that
+   other groups may also distribute working documents as Internet-
+   Drafts.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   The list of current Internet-Drafts can be accessed at
+   http://www.ietf.org/ietf/1id-abstracts.txt
+
+   The list of Internet-Draft Shadow Directories can be accessed at
+   http://www.ietf.org/shadow.html
+
+   This Internet-Draft will expire on March 26, 2011.
+
+
+
+Hildebrand, et al.      Expires March 26, 2012                 [Page 1]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+Copyright Notice
+
+   Copyright (c) 2011 IETF Trust and the persons identified as the
+   document authors. All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the BSD License.
+
+   This document may contain material from IETF Documents or IETF
+   Contributions published or made publicly available before November
+   10, 2008.  The person(s) controlling the copyright in some of this
+   material may not have granted the IETF Trust the right to allow
+   modifications of such material outside the IETF Standards Process.
+   Without obtaining an adequate license from the person(s) controlling
+   the copyright in such materials, this document may not be modified
+   outside the IETF Standards Process, and derivative works of it may
+   not be created outside the IETF Standards Process, except to format
+   it for publication as an RFC or to translate it into languages other
+   than English.
+
+Abstract
+
+   This document proposes a new IO_ADVISE operation for NFSv4.2 that
+   clients can use to communicate expected I/O behavior to the server.
+   By communicating future I/O behavior such as whether a file will be
+   accessed sequentially or randomly, and whether a file will or will
+   not be accessed in the near future, servers can optimize future I/O
+   requests for a file by, for example, prefetching or evicting data.
+   This operation can be used to support the posix_fadvise function as
+   well as other applications such as databases and video editors.
+
+Table of Contents
+
+
+   1. Introduction...................................................3
+      1.1. Requirements Language.....................................4
+   2. POSIX Requirements.............................................4
+   3. Additional Requirements........................................5
+   4. Operation TBD: IO_ADVISE - Application I/O access pattern
+      hints .........................................................6
+
+
+Hildebrand, et al.      Expires March 26, 2012                 [Page 2]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+      4.1. ARGUMENTS.................................................6
+      4.2. RESULTS...................................................7
+      4.3. DESCRIPTION...............................................7
+      4.4. IMPLEMENTATION............................................9
+      4.5. pNFS Considerations.......................................9
+      4.6. Number of Supported File Segments........................11
+      4.7. Possible Additional Hint - IO_ADVISE4_RECENTLY_USED......12
+   5. Security Considerations.......................................13
+   6. IANA Considerations...........................................13
+   7. References....................................................13
+      7.1. Normative References.....................................13
+      7.2. Informative References...................................13
+   8. Acknowledgments...............................................13
+
+1. Introduction
+
+   Applications currently have several options for communicating I/O
+   access patterns to the NFS client.  While this can help the NFS
+   client optimize I/O and caching for a file, it does not allow the NFS
+   server and its exported file system to do likewise.  Therefore, here
+   we put forth a proposal for the NFSv4.2 protocol to allow
+   applications to communicate their expected behavior to the server.
+
+   By communicating expected access pattern, e.g., sequential or random,
+   and data re-use behavior, e.g., data range will be read multiple
+   times and should be cached, the server will be able to better
+   understand what optimizations it should implement for access to a
+   file.  For example, if a application indicates it will never read the
+   data more than once, then the file system can avoid polluting the
+   data cache and not cache the data.
+
+   The first application that can issue client I/O hints is the
+   posix_fadvise operation.  For example, on Linux, when an application
+   uses posix_fadvise to specify a file will be read sequentially, Linux
+   doubles the readahead buffer size.
+
+   Another instance where applications provide an indication of their
+   desired I/O behavior is the use of direct I/O.  By specifying direct
+   I/O, clients will no longer cache data, but this information is not
+   passed to the server, which will continue caching data.
+
+   Application specific NFS clients such as those used by hypervisors
+   and databases can also leverage application hints to communicate
+   their specialized requirements.
+
+   This document adds a new IO_ADVISE operation to communicate the
+   client file access patterns to the NFS server.  The NFS server upon
+
+
+Hildebrand, et al.      Expires March 26, 2012                 [Page 3]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+   receiving a IO_ADVISE operation MAY choose to alter its I/O and
+   caching behavior, but is under no obligation to do so.
+
+   The XDR description is provided in this document in a way that makes
+   it simple for the reader to extract into a ready to compile form.
+   The reader can feed this document into the following shell script to
+   produce the machine readable XDR description of the metadata layout:
+
+   #!/bin/sh
+   grep "^  *///" | sed 's?^  *///  ??' | sed 's?^.*///??'
+
+   I.e. if the above script is stored in a file called "extract.sh", and
+   this document is in a file called "spec.txt", then the reader can do:
+
+    sh extract.sh < spec.txt > md.x
+
+   The effect of the script is to remove leading white space from each
+   line of the specification, plus a sentinel sequence of "///".
+
+1.1. Requirements Language
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC-2119 [1].
+
+2. POSIX Requirements
+
+   The first key requirement of the IO_ADVISE operation is to support
+   the posix_fadvise function [2], which is supported in Linux and many
+   other operating systems.  Examples and guidance on how to use
+   posix_fadvise to improve performance can be found here [3].
+
+   posix_fadvise is defined as follows,
+
+   int posix_fadvise(int fd, off_t offset, off_t len, int advice);
+
+   The posix_fadvise() function shall advise the implementation on the
+   expected behavior of the application with respect to the data in the
+   file associated with the open file descriptor, fd, starting at offset
+   and continuing for len bytes. The specified range need not currently
+   exist in the file. If len is zero, all data following offset is
+   specified. The implementation may use this information to optimize
+   handling of the specified data. The posix_fadvise() function shall
+   have no effect on the semantics of other operations on the specified
+   data, although it may affect the performance of other operations.
+
+
+
+
+Hildebrand, et al.      Expires March 26, 2012                 [Page 4]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+   The advice to be applied to the data is specified by the advice
+   parameter and may be one of the following values:
+
+   POSIX_FADV_NORMAL - Specifies that the application has no advice to
+   give on its behavior with respect to the specified data. It is the
+   default characteristic if no advice is given for an open file.
+
+   POSIX_FADV_SEQUENTIAL - Specifies that the application expects to
+   access the specified data sequentially from lower offsets to higher
+   offsets.
+
+   POSIX_FADV_RANDOM - Specifies that the application expects to access
+   the specified data in a random order.
+
+   POSIX_FADV_WILLNEED - Specifies that the application expects to
+   access the specified data in the near future.
+
+   POSIX_FADV_DONTNEED - Specifies that the application expects that it
+   will not access the specified data in the near future.
+
+   POSIX_FADV_NOREUSE - Specifies that the application expects to access
+   the specified data once and then not reuse it thereafter.
+
+   Upon successful completion, posix_fadvise() shall return zero;
+   otherwise, an error number shall be returned to indicate the error.
+
+3. Additional Requirements
+
+   Many use cases exist for sending application I/O hints to the server
+   that cannot utilize the POSIX supported interface.  This is because
+   some applications may benefit from additional hints not specified by
+   posix_fadvise, and some applications may not use POSIX altogether.
+
+   One use case is "Opportunistic Prefetch", which allows a stateid
+   holder to tell the server that it is possible that it will access the
+   specified data in the near future.  This is similar to
+   POSIX_FADV_WILLNEED, but the client is unsure it will in fact read
+   the specified data, so the server should only prefetch the data if it
+   can be done at a marginal cost.  For example, when a server receives
+   this hint, it could prefetch only the indirect blocks for a file
+   instead of all the data.  This would still improve performance if the
+   client does read the data, but with less pressure on server memory.
+
+   An example use case for this hint is a database that reads in a
+   single record that points to additional records in either other areas
+   of the same file or different files located on the same or different
+   server.  While it is likely that the application may access the
+
+
+Hildebrand, et al.      Expires March 26, 2012                 [Page 5]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+   additional records, it is far from guaranteed.  Therefore, the
+   database may issue an opportunistic prefetch (instead of
+   POSIX_FADV_WILLNEED) for the data in the other files pointed to by
+   the record.
+
+   Another use case is "Direct I/O", which allows a stated holder to
+   inform the server that it does not wish to cache data.  Today, for
+   applications that only intend to read data once, the use of direct
+   I/O disables client caching, but does not affect server caching.  By
+   caching data that will not be re-read, the server is polluting its
+   cache and possibly causing useful cached data to be evicted.  By
+   informing the server of its expected I/O access, this situation can
+   be avoid.  Direct I/O can be used in Linux and AIX via the open()
+   O_DIRECT parameter, in Solaris via the directio() function, and in
+   Windows via the CreateFile() FILE_FLAG_NO_BUFFERING flag.
+
+   Another use case is "Backward Sequential Read", which allows a stated
+   holder to inform the server that it intends to read the specified
+   data backwards, i.e., back the end to the beginning.  This is
+   different than POSIX_FADV_SEQUENTIAL, whose implied intention was
+   that data will be read from beginning to end.  This hint allows
+   servers to prefetch data at the end of the range first, and then
+   prefetch data sequentially in a backwards manner to the start of the
+   data range.  One example of an application that can make use of this
+   hint is video editing.
+
+4. Operation TBD: IO_ADVISE - Application I/O access pattern hints
+
+   The section introduces a new operation, named IO_ADVISE, which allows
+   NFS clients to communicate application I/O access pattern hints to
+   the NFS server.  This new operation will allow hints to be sent to
+   the server when applications use posix_fadvise, direct I/O, or at any
+   other point at which the client finds useful.
+
+4.1. ARGUMENTS
+
+         enum IO_ADVISE_type4 {
+               IO_ADVISE4_NORMAL                      = 0,
+               IO_ADVISE4_SEQUENTIAL                  = 1,
+               IO_ADVISE4_SEQUENTIAL_BACKWARDS        = 2,
+               IO_ADVISE4_RANDOM                      = 3,
+               IO_ADVISE4_WILLNEED                    = 4,
+               IO_ADVISE4_WILLNEED_OPPORTUNISTIC      = 5,
+               IO_ADVISE4_DONTNEED                    = 6,
+               IO_ADVISE4_NOREUSE                     = 7,
+               IO_ADVISE4_READ                        = 8,
+               IO_ADVISE4_WRITE                       = 9,
+
+
+Hildebrand, et al.      Expires March 26, 2012                 [Page 6]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+         };
+
+         struct IO_ADVISE4args {
+               /* CURRENT_FH: file */
+               stateid4        stateid;
+               offset4         offset;
+               length4         count;
+               bitmap4         hints;
+         };
+
+4.2. RESULTS
+
+         struct IO_ADVISE4resok {
+               bitmap4              hints_res;
+         };
+
+         union IO_ADVISE4res switch (nfsstat4 _status) {
+               case NFS4_OK:
+                     IO_ADVISE4resok  fadvise_resok4;
+          default:
+               void;
+         };
+
+4.3. DESCRIPTION
+
+   The IO_ADVISE operation sends an I/O access pattern hint to the
+   server for the owner of stated for a given byte range specified by
+   offset and count.  The byte range specified by offset and count need
+   not currently exist in the file, but the hint will apply to the byte
+   range when it does exist.  If count is zero, all data following
+   offset is specified.  The server MAY ignore the advice.
+
+   The following are the possible hints:
+
+   o  IO_ADVISE4_NORMAL - Specifies that the application has no advice
+      to give on its behavior with respect to the specified data. It is
+      the default characteristic if no advice is given.
+
+   o  IO_ADVISE4_SEQUENTIAL - Specifies that the stated holder expects
+      to access the specified data sequentially from lower offsets to
+      higher offsets.
+
+   o  IO_ADVISE4_SEQUENTIAL BACKWARDS - Specifies that the stated holder
+      expects to access the specified data sequentially from higher
+      offsets to lower offsets.
+
+
+
+
+Hildebrand, et al.      Expires March 26, 2012                 [Page 7]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+   o  IO_ADVISE4_RANDOM - Specifies that the stated holder expects to
+      access the specified data in a random order.
+
+   o  IO_ADVISE4_WILLNEED - Specifies that the stated holder expects to
+      access the specified data in the near future.
+
+   o  IO_ADVISE4_WILLNEED OPPORTUNISTIC - Specifies that the stated
+      holder expects to possibly access the data in the near future.
+      This is a speculative hint, and therefore the server should
+      prefetch data or indirect blocks only if it can be done at a
+      marginal cost.
+
+   o  IO_ADVISE_DONTNEED - Specifies that the stated holder expects that
+      it will not access the specified data in the near future.
+
+   o  IO_ADVISE_NOREUSE - Specifies that the stated holder expects to
+      access the specified data once and then not reuse it thereafter.
+
+   o  IO_ADVISE4_READ - Specifies that the stated holder expects to read
+      the specified data in the near future.
+
+   o  IO_ADVISE4_WRITE   - Specifies that the stated holder expects to
+      write the specified data in the near future.
+
+   The server will return success if the operation is properly formed,
+   otherwise the server will return an error.  The server MUST NOT
+   return an error if it does not recognize or does not support the
+   requested advice.  This is also true even if the client sends
+   contradictory hints to the server, e.g., IO_ADVISE4_SEQUENTIAL and
+   IO_ADVISE4_RANDOM in a single IO_ADVISE operation.  In this case, the
+   server MUST return success and a hints_res value that indicates the
+   hint it intends to optimize. For contradictory hints, this may mean
+   simply returning IO_ADVISE4_NORMAL for example.
+
+   The hints_res returned by the server is primarily for debugging
+   purposes since the server is under no obligation to carry out the
+   hints that it describes in the hints_res result.  In addition, while
+   the server may have intended to implement the hints returned in
+   hints_res, as time progresses, the server may need to change its
+   handling of a given file due to several reasons including, but not
+   limited to, memory pressure, additional IO_ADVISE hints sent by other
+   clients, and heuristically detected file access patterns.
+
+   The server MAY return different advice than what the client
+   requested.  If it does, then this might be due to one of several
+   conditions, including, but not limited to another client advising of
+   a different I/O access pattern; a different I/O access pattern from
+
+
+Hildebrand, et al.      Expires March 26, 2012                 [Page 8]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+   another client that that the server has heuristically detected; or
+   the server is not able to support the requested I/O access pattern,
+   perhaps due to a temporary resource limitation.
+
+   Each issuance of the IO_ADVISE operation overrides all previous
+   issuances of IO_ADVISE for a given byte range.  This effectively
+   follows a strategy of last hint wins for a given stated and byte
+   range.
+
+   Clients should assume that hints included in an IO_ADVISE operation
+   will be forgotten once the file is closed.
+
+4.4. IMPLEMENTATION
+
+   The NFS client may choose to issue and IO_ADVISE operation to the
+   server in several different instances.
+
+   The most obvious is in direct response to an applications execution
+   of posix_fadvise.  In this case, IO_ADVISE4_WRITE and IO_ADVISE4_READ
+   may be set based upon the type of file access specified when the file
+   was opened.
+
+   Another useful point would be when an application indicates it is
+   using direct I/O.  Direct I/O may be specified at file open, in which
+   case a IO_ADVISE may be included in the same compound as the OPEN
+   operation with the IO_ADVISE4_NOREUSE flag set.  Direct I/O may also
+   be specified separately, in which case a IO_ADVISE operation can be
+   sent to the server separately. As above, IO_ADVISE4_WRITE and
+   IO_ADVISE4_READ may be set based upon the type of file access
+   specified when the file was opened.
+
+4.5. pNFS Considerations
+
+   The IO_ADVISE considerations for pNFS are very similar to the COMMIT
+   considerations for pNFS. That is, as with COMMIT, some NFS server
+   implementations prefer IO_ADVISE be done on the DS, and some prefer
+   it be done on the MDS.
+
+   So for the file's layout type, it is proposed that NFSv4.2 include an
+   additional hint:
+
+      const NFL4_UFLG_MASK            = 0x0000003F;
+
+      const NFL4_UFLG_DENSE           = 0x00000001;
+
+
+
+
+Hildebrand, et al.      Expires March 26, 2012                 [Page 9]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+      const NFL4_UFLG_COMMIT_THRU_MDS = 0x00000002;
+
+      const NFL42_UFLG_IO_ADVISE_THRU_MDS
+
+                                      = 0x00000004;
+
+      const NFL4_UFLG_STRIPE_UNIT_SIZE_MASK
+
+                                      = 0xFFFFFFC0;
+
+      typedef uint32_t nfl_util4;
+
+      enum filelayout_hint_care4 {
+
+              NFLH4_CARE_DENSE        = NFL4_UFLG_DENSE,
+
+              NFLH4_CARE_COMMIT_THRU_MDS
+
+                                      = NFL4_UFLG_COMMIT_THRU_MDS,
+
+              NFL42_CARE_IO_ADVISE_THRU_MDS
+
+                                      = NFL42_UFLG_IO_ADVISE_THRU_MDS,
+
+              NFLH4_CARE_STRIPE_UNIT_SIZE
+
+                                      = 0x00000040,
+
+              NFLH4_CARE_STRIPE_COUNT = 0x00000080
+
+      };
+
+   The new hint is valid only on NFSv4.2 or higher. Any file's layout
+   obtained with NFSv4.1 MUST NOT have NFL42_UFLG_IO_ADVISE_THRU_MDS
+   set. Any file's layout obtained with NFSv4.2 MAY have
+   NFL42_UFLG_IO_ADVISE_THRU_MDS set. If the client does not implement
+   IO_ADVISE, then it MUST ignore NFL42_UFLG_IO_ADVISE_THRU_MDS.
+
+   If NFL42_UFLG_IO_ADVISE_THRU_MDS is set, then if the client
+   implements IO_ADVISE, then if it wants the DS to honor IO_ADVISE, the
+   client MUST send the operation to the MDS, and the server will
+   communicate the advice back each DS. If the client sends IO_ADVISE to
+   the DS, then the server MAY return NFS4ERR_NOTSUPP.
+
+
+Hildebrand, et al.      Expires March 26, 2012                [Page 10]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+   If NFL42_UFLG_IO_ADVISE_THRU_MDS is not set, then this indicates to
+   client that if wants to inform the server via IO_ADVISE of the
+   client's intended use of the file, then the client SHOULD send an
+   IO_ADVISE to each DS. While the client MAY always send IO_ADVISE to
+   the MDS, if the server has not set NFL42_UFLG_IO_ADVISE_THRU_MDS, the
+   client should expect that such an IO_ADVISE is futile. Note that a
+   client SHOULD use the same set of arguments on each IO_ADVISE sent to
+   a DS for the same open file reference.
+
+   The server is not required to support difference advice for
+   difference DSes of the same open file reference.
+
+4.6. Number of Supported File Segments
+
+   In theory IO_ADVISE allows a client and server to support multiple
+   file segments, meaning that different, possibly overlapping, byte
+   ranges of the same open file reference will support different hints.
+   This is not practical, and in general the server will support just
+   one set of hints, and these will apply to the entire file. However,
+   there are some hints that very ephemeral, and are essentially amount
+   to one time instructions to the NFS server, which will be forgotten
+   momentarily after IO_ADVISE is executed.
+
+   The following hints will always apply to the entire, regardless of
+   the specified byte range:
+
+                  IO_ADVISE4_NORMAL,
+
+                  IO_ADVISE4_SEQUENTIAL,
+
+                  IO_ADVISE4_SEQUENTIAL_BACKWARDS,
+
+                  IO_ADVISE4_RANDOM
+
+   The following hints will always apply to specified byte range, and
+   will treated as one time instructions:
+
+                  IO_ADVISE4_WILLNEED,
+
+                  IO_ADVISE4_WILLNEED_OPPORTUNISTIC,
+
+                  IO_ADVISE4_DONTNEED,
+
+                  IO_ADVISE4_NOREUSE
+
+
+
+Hildebrand, et al.      Expires March 26, 2012                [Page 11]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+   The following hints are modifiers to all other hints, and will apply
+   to the entire file and/or to a one time instruction on the specified
+   byte range:
+
+                  IO_ADVISE4_READ,
+
+                  IO_ADVISE4_WRITE
+
+4.7. Possible Additional Hint - IO_ADVISE4_RECENTLY_USED
+
+   Recently Used - The client has recently accessed the byte range in
+   its own cache.  This informs the server that the data in the byte
+   range remains important to the client.  When the server reaches
+   resource exhaustion, knowing which data is more important allows the
+   server to make better choices about which data to, for example purge
+   from a cache, or move to secondary storage.  It also informs the
+   server which delegations are more important, since if delegations are
+   working correctly, once delegated to a client, a server might never
+   receive another I/O request for the file.
+
+   A use case for this hint is that of the NFS client or application
+   restart. In the event of restart, the app's/client's cache will be
+   cold and it will need to fill it from the server. If the server is
+   maintaining a list (LRU most likely) of byte ranges tagged with
+   IO_ADVISE4_RECENTLY_USED, then the server could have stored the data
+   in these ranges into a storage medium that is less expensive than
+   DRAM, and faster than random access magnetic or optical media, such
+   as flash. This allows the end to end application to storage system to
+   co-operate to meet a service level agreement/objective contracted to
+   the end user by the IT provider.
+
+   On the other side, this is effectively a hint regarding multi-level
+   caching, and it may be more useful to specify a more formal multi-
+   level caching system.  In addition, the action to be taken by the
+   server file system with this hint, and hence its usefulness, is
+   unclear.  For example, as most clients already cache data that they
+   know is important, having this data cached twice may be unnecessary.
+   In fact, substantial performance improvements have been demonstrated
+   by making caches more exclusive between each other [5], not the other
+   way around.  This means that there is a strong argument to be made
+   that servers should immediately purge the described cached data upon
+   receiving this hint.  Other work showed that even infinite sized
+   secondary caches can be largely ineffective [4], but this of course
+   is subject to the workload.
+
+
+
+
+
+Hildebrand, et al.      Expires March 26, 2012                [Page 12]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+5. Security Considerations
+
+   None.
+
+6. IANA Considerations
+
+   The IO_ADVISE_type4 will be extended through an IANA registry.
+
+7. References
+
+7.1. Normative References
+
+   [1]   Bradner, S., "Key words for use in RFCs to Indicate Requirement
+         Levels", BCP 14, RFC 2119, March 1997.
+
+   [2]   The IEEE and The Open Group, "IEEE Std 1003.1, 2004 Edition,
+         The Open Group Technical Standard Base Specifications, Issue
+         6", 2004
+
+7.2. Informative References
+
+   [3]   S. VanDeBogart, C. Frost, E. Kohler, "Reducing Seek Overhead
+         with Application-Directed Prefetching", in Proceedings of
+         USENIX Annual Technical Conference, June 2009.
+
+   [4]   D. Muntz, P. Honeyman, "Multi-level Caching in Distributed File
+         Systems", in Proceedings of USENIX Annual Technical Conference,
+         1992.
+
+   [5]   T.M. Wong, J. Wilkes, "My cache or yours? Making storage more
+         exclusive", in Proceedings of the USENIX Annual Technical
+         Conference, 2002.
+
+
+
+8. Acknowledgments
+
+   This document was prepared using 2-Word-v2.0.template.dot. Valuable
+   input and advice was received from Benny Halevy and Pranoop Erasani.
+
+
+
+
+
+
+
+
+
+
+Hildebrand, et al.      Expires March 26, 2012                [Page 13]
+
+Internet-Draft     Support for Application IO Hints      September 2011
+
+
+Authors' Addresses
+
+   Dean Hildebrand
+   IBM Almaden
+   650 Harry Rd
+   San Jose, CA 95120
+
+   Phone: +1 408-927-2013
+   Email: dhildeb@us.ibm.com
+
+
+   Mike Eisler
+   NetApp
+   5765 Chase Point Circle
+   Colorado Springs, CO  80919
+   USA
+
+   Phone: +1-719-599-9026
+   EMail: mike@eisler.com
+   URI:   http://www.eisler.com
+
+
+   Trond Myklebust
+   NetApp
+   3215 Bellflower Ct
+   Ann Arbor, MI  48103
+   USA
+
+   Phone: +1-734-662-6608
+   Email: Trond.Myklebust@netapp.com
+
+
+   Sam Falkner
+   Oracle
+   500 Eldorado Blvd.
+   Broomfield, CO  80021
+
+   Phone: +1 720-279-4303
+   Email: sam.falkner@oracle.com
+
+
+
+
+
+
+
+
+
+
+Hildebrand, et al.      Expires March 26, 2012                [Page 14]
+
