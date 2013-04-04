@@ -1,0 +1,1046 @@
+<?xml version="1.0" encoding="UTF-8"?>
+  <?xml-stylesheet type="text/xsl" href="rfc2629.xslt" ?>
+
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" [
+]>
+
+<rfc ipr="trust200902" docName="draft-barnes-jose-key-wrapping-00" category="info">
+
+<?rfc toc="yes"?>
+<?rfc sortrefs="yes"?>
+<?rfc symrefs="yes"?>
+
+  <front>
+    <title abbrev="JOSE Refactor">Proposed Refactoring of JOSE to Align Encryption and Key Wrapping</title>
+
+    <author initials="R." surname="Barnes" fullname="Richard Barnes">
+      <organization>BBN</organization>
+      <address>
+        
+        
+        <email>rlb@ipv.sx</email>
+        
+      </address>
+    </author>
+
+    <date year="2013" month="April" day="03"/>
+
+    <area>Security</area>
+    <workgroup>JOSE Working Group</workgroup>
+    <keyword>Internet-Draft</keyword>
+
+    <abstract>
+
+
+<t>The discussions around key wrapping in the JOSE working group have raised new requirements for wrapped keys, namely: (1) Wrapping keys other than symmetric keys, (2) cryptographically binding attributes to keys, and (3) allowing the use of AEAD cryptographic algorithms for key wrapping (other than AES-KW). This document proposes a refactoring of the JOSE document set that provides a cleaner conceptual structure for JWS / JWE and transparent support for wrapped keys, all with a relatively minor impact on the compact form of JWS and JWE objects.</t>
+
+
+
+    </abstract>
+
+
+  </front>
+
+  <middle>
+
+
+<section anchor="introduction" title="Introduction">
+
+<t>The goal of a JOSE object is to provide the recipient with the result of a cryptographic operation (encryption or signature) and instructions for how to process that result.  These instructutions are in two main parts: (1) A cryptographic algorithm to be applied, and (2) the key to be used with that algorithm (in wrapped form).  </t>
+
+<t>The current structure of the JWE and JWS headers scatters these two information elements across several different header parameters.  For example, if an object has been encrypted with the “direct” mode of key agreement, then the recipient must reconstruct the algorithm from the “enc”, “epu”, and “epv” parameters.  If a developer wants to validate that a JOSE algorithm has all required parameters for a given algorithm, he must search through all header fields.</t>
+
+<t>It would help clarify the structure of JOSE objects if algorithm parameters and key parameters could be grouped together.  We propose to make two changes to the JWE and JWS headers:</t>
+
+<t><list style='numbers'>
+  <t>Re-define the “alg” parameter to contain all necessary parameters to describe the encryption algorithm.</t>
+  <t>Define a new “key” parameter to contain all necessary paramters to describe the CMK.</t>
+</list></t>
+
+<t>This restructuring also simplifies key wrapping, by using JWE for key wrapping.  Since the encrypted CMK is just another encrypted object, and because the wrapped key is encapsulated in the “key” object, it can re-use the “alg” and “enc” fields – making the encrypted key just another JWE.   The following example shows how the proposed refactoring changes the implicit grouping of key-related fields in JWE into an explicit grouping.</t>
+
+<figure anchor="current-enca128cbchs256-algrsa15kid1-proposed-alga128cbchs256keyalgrsa15key1"><artwork><![CDATA[
+Current:  {"enc":"A128CBC+HS256",       "alg":"RSA1_5","kid":"1" }
+Proposed: {"alg":"A128CBC+HS256","key":{"alg":"RSA1_5","key":"1"}}
+]]></artwork></figure>
+
+<t>This example JWE has three fields, “enc”, “alg”, and “kid”.  One of these fields relates to how the content of the JWE itself is encrypted; the other two relate to how the key is encrypted.  The proposed syntax groups the key-related fields together into a JSON object.  In fact, this new object can be thought of a second JWE, encrypting the key instead of the content.</t>
+
+<t>This change has a minimal impact on the JWE and JWS compact serializations, both in terms of representation and processing.  In the example above, the proposed header has the same information content as the original header, and is only 8 octets longer.  For JWE, the proposed form even offers a simplification in processing, since the encrypted key can be processed with the same code as the encrypted content – both are JWEs.</t>
+
+<t>The proposed form also allows for a much cleaner JSON representation than is currently allowed.  The following figure illustrates the current and proposed JSON serializations.  The proposed serialization is much more developer friendly, since it exposes header information directly, instead of in a base64-encoded string.</t>
+
+<figure anchor="currentrecipients-header-encryptedkey-integrityvalue-initializationvector-ciphertext-proposedalg-name-a128cbchs256iv-key-algrsa15key1data-data-mac-"><artwork><![CDATA[
+Current:
+{
+    "recipients": [{
+        "header": "....",
+        "encrypted_key": "...".
+        "integrity_value": "..."
+    }],
+    "initialization_vector": "...",
+    "ciphertext": "..."
+}
+
+Proposed:
+{
+    "alg": {
+        "name": "A128CBC+HS256",
+        "iv": "..."
+    },
+    "key": {
+        "alg":"RSA1_5",
+        "key":"1"
+        "data": "..."
+    }
+    "data": "...",
+    "mac": "..."
+}
+]]></artwork></figure>
+
+<t>The remainder of this document describes the rational for the proposed changes in more detail, and provides an outline of the detailed changes that would be needed to implement the proposal.</t>
+
+</section>
+<section anchor="requirements" title="Requirements">
+
+<t><list style='symbols'>
+  <t>Enable key wrapping with JWE</t>
+  <t>Avoid having more than one format for the same key wrapped with the same algorithm</t>
+  <t>Enable key wrapping with all AEAD algorithms, for JWE as well as external wrapped keys</t>
+  <t>Enable password-based encryption for JWE</t>
+</list></t>
+
+</section>
+<section anchor="proposed-changes" title="Proposed Changes">
+
+<t><list style='symbols'>
+  <t>JWE/JWS: Define required “alg” and “key” parameters
+  <list style='symbols'>
+      <t>“alg”: JWA algorithm object</t>
+      <t>“key”: Key identifier or JWE containing encrypted key</t>
+    </list></t>
+  <t>JWE/JWS: Define a revised JSON serialization and mapping to the compact serialization</t>
+  <t>JWA: Refactor to describe algorithm objects for JWE/JWS
+  <list style='symbols'>
+      <t>Move algorithm parameters from JWE to JWA</t>
+      <t>Define validation rules per algorithm (which parameters are required)</t>
+      <t>Add password-based encryption parameters</t>
+    </list></t>
+  <t>JWK: Define a procedure for using JWE to wrap keys
+  <list style='symbols'>
+      <t>OPTIONAL: Define a compact serialization for keys </t>
+    </list></t>
+</list></t>
+
+<t>Details of these proposals are described below.</t>
+
+</section>
+<section anchor="summary-of-benefits-costs" title="Summary of Benefits / Costs">
+
+<t><list style='symbols'>
+  <t>Costs: 
+  <list style='symbols'>
+      <t>Few (&lt;30) bytes of extra header overhead</t>
+      <t>Breaks compatibility with old code</t>
+    </list></t>
+  <t>Benefits: 
+  <list style='symbols'>
+      <t>Clean architecture covering JWE, JWS, wrapped JWK</t>
+      <t>Code re-use bewteen JWE processing and wrapped key processing</t>
+      <t>Easier validation rules for algorithm parameters</t>
+      <t>Key wrapping based on JWE in all cases</t>
+      <t>Support for new use cases in compact serialization</t>
+      <t>Key management for MAC</t>
+    </list></t>
+</list></t>
+
+</section>
+<section anchor="example-current-vs-proposed" title="Example: Current vs. Proposed">
+
+<t>In this section, we consider two examples of how the proposed serialization offers cleaner syntax and more flexibility than the current structure.  First, we look at a JWE encrypted with AES-GCM, using a key wrapped with AES-KW.  This allows us to directly compare the two formats.  Second, we consider the same JWE, but using a key that is also protected with AES-GCM.  This case is easily supported in the proposed syntax, but impossible to support in the current syntax.  In both cases, the parties have a pre-shared key with identifier “preSharedKey”.</t>
+
+<section anchor="aes-gcm-with-aes-kw-wrapping" title="AES-GCM with AES-KW wrapping">
+
+<t>To create an an object encrypted with AES-GCM and AES-KW, we need to specify the following parameters:</t>
+
+<t><list style='symbols'>
+  <t>Algorithm name (A128GCM)</t>
+  <t>Key wrapping algorithm (AES-KW)</t>
+  <t>Key wrapping key ID (“preSharedKey”)</t>
+  <t>96-bit initialization vector </t>
+  <t>Wrapped key</t>
+  <t>Ciphertext</t>
+  <t>Integrity check value</t>
+</list></t>
+
+<t>In the current compact form, the header encodes the first three of these, and the remainder are appended as base64url-encoded components.</t>
+
+<figure anchor="current-compact-headerenca128gcmalga128kwkidpresharedkeycurrent-compacteyjlbmmioijbmti4r0nniiwiywxnijoiqteyoetxiiwia2lkijoichjlu2hhcmvks2v5in0kpe15h6byj7sreq0ev8m9ce4vq4phlfjkhrskpf3rwfqmekq5jzphmf7ghbnysd5qijkbxwu6pohktn5b2ersuwujfiaoghd5kopww"><artwork><![CDATA[
+CURRENT-COMPACT-HEADER:
+{"enc":"A128GCM","alg":"A128KW","kid":"preSharedKey"}
+
+CURRENT-COMPACT:
+eyJlbmMiOiJBMTI4R0NNIiwiYWxnIjoiQTEyOEtXIiwia2lkIjoicHJlU2h
+hcmVkS2V5In0K
+.Pe15h6BYJ7SrEq0ev8m9ce4vq4phLFJK
+.hRskpf3RwFQmEKQ5
+.jZpHMF7GhBNYSD5QIJkBXWu6POh_KTN5
+.b2ersuWujfIaoghd5kOpWw
+]]></artwork></figure>
+
+<t>In the proposed compact form, the header would have the same information, but arranged so that the key-wrapping parameters (“alg”, “kid”) are gathered under a “key” parameter.  The remaining components are appended in the same way.</t>
+
+<figure anchor="proposed-compact-headeralga128gcmkeyalga128kwkeypresharedkeyproposed-compact-eyjhbgcioijbmti4r0nniiwia2v5ijp7imfszyi6ikexmjhlvyisimtlesiinbyzvnoyxjlzetlesj9fqope15h6byj7sreq0ev8m9ce4vq4phlfjkhrskpf3rwfqmekq5jzphmf7ghbnysd5qijkbxwu6pohktn5b2ersuwujfiaoghd5kopww"><artwork><![CDATA[
+PROPOSED-COMPACT-HEADER:
+{"alg":"A128GCM",
+ "key":{"alg":"A128KW","key":"preSharedKey"}}
+
+PROPOSED-COMPACT 
+eyJhbGciOiJBMTI4R0NNIiwia2V5Ijp7ImFsZyI6IkExMjhLVyIsImtleSI
+6InByZVNoYXJlZEtleSJ9fQo
+.Pe15h6BYJ7SrEq0ev8m9ce4vq4phLFJK
+.hRskpf3RwFQmEKQ5
+.jZpHMF7GhBNYSD5QIJkBXWu6POh_KTN5
+.b2ersuWujfIaoghd5kOpWw
+]]></artwork></figure>
+
+<t>The proposed compact form of this JWE object is 189 octets long, while the current form is 178.  So the overhead imposed by the refactoring is 11 octets, or 6%.</t>
+
+<t>The difference is clearer with regard to the JSON representations. The current JSON form is just as opaque as the compact form.  By contrast, the proposed JSON form provides the header information without base64-encoding, making it more easily accessible.  The UTF-8 serialization of the proposed JSON syntax is also 27% shorter than the serialization of the current JSON syntax (209 vs. 287 octets).</t>
+
+<figure anchor="current-jsonrecipients-header-eyjlbmmioijbmti4r0nniiwiywxnijoiqteyoetxiiwia2lkijoichjlu2hhcmvks2v5in0kencryptedkey-pe15h6byj7sreq0ev8m9ce4vq4phlfjkintegrityvalue-b2ersuwujfiaoghd5kopwwinitializationvector-hrskpf3rwfqmekq5ciphertext-jzphmf7ghbnysd5qijkbxwu6pohktn5"><artwork><![CDATA[
+CURRENT-JSON:
+{
+    "recipients": [{
+        "header": "eyJlbmMiOiJBMTI4R0NNIiwiYWxnIjoiQTEyOEtX
+                   Iiwia2lkIjoicHJlU2hhcmVkS2V5In0K",
+        "encrypted_key": "Pe15h6BYJ7SrEq0ev8m9ce4vq4phLFJK"
+        "integrity_value": "b2ersuWujfIaoghd5kOpWw"
+    }],
+    "initialization_vector": "hRskpf3RwFQmEKQ5",
+    "ciphertext": "jZpHMF7GhBNYSD5QIJkBXWu6POh_KTN5"
+}
+]]></artwork></figure>
+
+<figure anchor="proposed-jsonalg-name-a128gcmiv-hrskpf3rwfqmekq5key-alg-a128kwkey-presharedkeydata-pe15h6byj7sreq0ev8m9ce4vq4phlfjkdata-jzphmf7ghbnysd5qijkbxwu6pohktn5mac-b2ersuwujfiaoghd5kopww"><artwork><![CDATA[
+PROPOSED-JSON:
+{
+    "alg": {
+        "name": "A128GCM",
+        "iv": "hRskpf3RwFQmEKQ5"
+    },
+    "key": {
+        "alg": "A128KW",
+        "key": "preSharedKey",
+        "data": "Pe15h6BYJ7SrEq0ev8m9ce4vq4phLFJK"
+    },
+    "data": "jZpHMF7GhBNYSD5QIJkBXWu6POh_KTN5",
+    "mac": "b2ersuWujfIaoghd5kOpWw"
+}
+]]></artwork></figure>
+
+</section>
+<section anchor="aes-gcm-with-aes-gcm-wrapping" title="AES-GCM with AES-GCM wrapping">
+
+<t>The proposed syntax uses JWE to wrap the keys used for JWE.  This allows key wrapping to take advantage of all of the algorithms available for content encryption.  So while key wrapping with AES-GCM is impossible with current JWE specification, the proposed modification makes it possible, in both JSON and compact form.</t>
+
+<t>The JSON syntax shows how the parameters are laid out.  The “alg” parameter at the top level specifies the parameters for the content encryption.  The “key” parameter at the top level contains the wrapped key as a JWE, with its own “alg” parameter specifying independent parameters for GCM.  The “data” attribute of the “key” object (key.data) contains the wrapped key, and the “mac” attribute (key.mac) contains the GCM integrity check value over the key.  The “data” and “mac” attributes at the top level contain the encrypted content and its integrity check value.</t>
+
+<t>A recipient would process this JWE in the same manner as a normal JWE.  First, the recipient decrypts the key using the GCM parameters inside the “key” parameter and the key identified by “preSharedKey”.  Second, the recipient decrypts the content using the top-level GCM parameters and the unwrapped key.</t>
+
+<figure anchor="proposed-jsonalg-name-a128gcmiv-wkir6xyeu2uyfcrmkey-alg-name-a128gcmiv-f6va6e3mfryvrk34key-presharedkeydata-r1mdiihjvi98dh634xpn4qmac-ia5yaj6xnisl3wgbslbkxadata-6j1uz-lhim0gsdvv6o-s1p2mkjfq5mac-e3lqkzrivwh-ohtsa1tstq"><artwork><![CDATA[
+PROPOSED-JSON:
+{
+    "alg": {
+        "name": "A128GCM",
+        "iv": "wkir6xYeu2uYfCRM"
+    },
+    "key": {
+        "alg": {
+            "name": "A128GCM",
+            "iv": "F6va6e3mFryvrk34"
+        }
+        "key": "preSharedKey",
+        "data": "R1mdiiHJvI98Dh634xPN4Q",
+        "mac": "Ia5YAJ6XniSL3WGBSlbkXA"
+    },
+    "data": "6J1u_z-LhIm0GsDVV6o-s_1p2MKJFq5_",
+    "mac": "e3LqKZrivwH-oHtsa1TStQ"
+}
+]]></artwork></figure>
+
+<t>Even though this object uses parameters that cannot be accounted for in the current JWE compact encoding, it can still be rendered in the compact encoding.  The parameters that the compact encoding accommodates are moved out of the header, including the top-level IV, the encrypted key, the ciphertext, and the integrity check value.  The other binary parameters (the key wrapping IV and integrity check value) remain in the header.</t>
+
+<figure anchor="proposed-compact-headeralga128gcmkeyalgnamea128kwivf6va6e3mfryvrk34keypresharedkeymacia5yaj6xnisl3wgbslbkxaproposed-compacteyjhbgcioijbmti4r0nniiwia2v5ijp7imfszyi6eyjuyw1lijoiqteyoetxiiwiaxyioijgnnzhnmuzbuzyexzyazm0in0simtlesi6inbyzvnoyxjlzetlesisim1hyyi6iklhnvlbsjzybmlttdnxr0jtbgjrweeifx0kr1mdiihjvi98dh634xpn4qwkir6xyeu2uyfcrmj1uz-lhim0gsdvv6o-s1p2mkjfq5e3lqkzrivwh-ohtsa1tstq"><artwork><![CDATA[
+PROPOSED-COMPACT-HEADER:
+{"alg":"A128GCM","key":{"alg":{"name":"A128KW",
+ "iv":"F6va6e3mFryvrk34"},"key":"preSharedKey",
+ "mac":"Ia5YAJ6XniSL3WGBSlbkXA"}}
+
+PROPOSED-COMPACT:
+eyJhbGciOiJBMTI4R0NNIiwia2V5Ijp7ImFsZyI6eyJuYW1lIjoiQTEyOEt
+XIiwiaXYiOiJGNnZhNmUzbUZyeXZyazM0In0sImtleSI6InByZVNoYXJlZE
+tleSIsIm1hYyI6IklhNVlBSjZYbmlTTDNXR0JTbGJrWEEifX0K
+.R1mdiiHJvI98Dh634xPN4Q
+.wkir6xYeu2uYfCRM
+.6J1u_z-LhIm0GsDVV6o-s_1p2MKJFq5_
+.e3LqKZrivwH-oHtsa1TStQ
+]]></artwork></figure>
+
+<t>This compact encoding is larger than the one in the previous example (264 vs. 209 octets), but 25% shorter than the base64url-encoded serialization of the JSON form (264 vs. 352 octets).</t>
+
+</section>
+</section>
+<section anchor="rationale" title="Rationale">
+
+<section anchor="requirements-and-goals" title="Requirements and Goals">
+
+<t>In the course of the key wrapping discussions in JOSE, a few new requirements have arisen:</t>
+
+<t><list style='symbols'>
+  <t>Wrap private and symmetric keys </t>
+  <t>Wrap keys with attributes attached.</t>
+  <t>Wrap keys using general AEAD algorithms (e.g., AES-GCM)</t>
+  <t>Encrypt keys and JWEs with password-based encryption</t>
+</list></t>
+
+<t>A design goal in meeting these requirements should be to duplicate functionality as little as possible.  For example, it would violate this goal to have JWE define one way of encrypting a symmetric key with no attributes, and for a JWK key wrapping specification to define another.  In addition, we would like to avoid the need for obscure algorithms, in particular RSA-KEM.</t>
+
+<t>With the above requirements and goals in mind, compare the algorithm requirements of JWE and wrapped JWK:</t>
+
+<figure anchor="jwe-jwkaes-gcm-other-aead-x-xaes-key-wrap-xrsa-encryption-xkey-agreement-xpassword-based-enc-x-x"><artwork><![CDATA[
+                       JWE     JWK
+AES-GCM & other AEAD    X       X
+AES Key Wrap                    X
+RSA Encryption                  X
+Key Agreement                   X
+Password-based Enc.     X       X
+]]></artwork></figure>
+
+<t>It makes one wonder whether it might make sense to use the same framework for both of these.</t>
+
+</section>
+<section anchor="jwe-vs-key-wrapping" title="JWE vs Key Wrapping">
+
+<t>As a starting point for considering whether we can align JWE and wrapped JWKs, let’s compare a JWE performing direct encryption with AES-GCM with a notional wrapped key using AES-KW derived from the JWE wrapped key format:</t>
+
+<figure anchor="jwe-notional-jwe-key-wrap-notionalalg-dir-enc-a128gcm-alg-a128kwiv-kid-this-kid-thatdata-datamac-"><artwork><![CDATA[
+JWE (notional)                            JWE Key Wrap (notional)
+-------------------------------------   ----------------------------
+{                                        {
+  alg: "dir"                                 
+  enc: "A128GCM",                          alg: "A128KW",
+  iv:  "...",                            
+  kid: "this",                             kid: "that",
+  data:"..."                               data:"..."
+  mac: "..."
+}                                        }
+-------------------------------------   ----------------------------
+]]></artwork></figure>
+
+<t>Here I’ve assigned some names in JSON to fields that don’t have names in JWE.  I’ve labeled the JWE Initialization Vector as “iv”, the JWE Ciphertext as “data”, and the JWE Integrity Value as “mac”.</t>
+
+<t>Now, suppose we say that a missing “alg” parameter means that “alg” is assumed to be direct.  This isn’t too unreasonable, since “alg” indicates a key wrapping algorithm, and there’s no key wrapping going on here.  Then we can omit the alg parameter:</t>
+
+<figure anchor="jwe-modified-jwe-key-wrap-notionalenc-a128gcm-iv-alg-a128kwkid-this-kid-thatdata-datamac-"><artwork><![CDATA[
+JWE (modified)                          JWE Key Wrap (notional)
+-------------------------------------   ----------------------------
+{                                        {
+  enc: "A128GCM", iv: "...",               alg: "A128KW",
+  kid: "this",                             kid: "that",
+  data:"..."                               data:"..."
+  mac: "..."
+}                                        }
+-------------------------------------   ----------------------------
+]]></artwork></figure>
+
+<t>The two objects start to look very similar now.  They each have three critical sections:</t>
+
+<t><list style='numbers'>
+  <t>A specification of the encryption algorithm and any necessary parameters. (AES-KW requires no parameters, of course.)</t>
+  <t>An identifier for the key being used</t>
+  <t>The ciphertext output of the algorithm
+We can make the syntax match this conceptual model if we just put the parameters in an object together with the algorithm name.  For symmetry, we’ll call the algorithm parameter “alg” in both cases; we’ll rename “kid” to “key” for reasons that will be apparent in a moment.</t>
+</list></t>
+
+<figure anchor="jwe-modified-jwe-key-wrap-notionalalg-name-a128gcm-iv-alg-a128kwkey-this-key-thatdata-datamac-"><artwork><![CDATA[
+JWE (modified)                          JWE Key Wrap (notional)
+-------------------------------------   ----------------------------
+{                                        {
+  alg: {name: "A128GCM", iv: "..."},       alg: "A128KW",
+  key: "this",                             key: "that",
+  data:"..."                               data:"..."
+  mac: "..."
+}                                        }
+-------------------------------------   ----------------------------
+]]></artwork></figure>
+
+<t>So with a few minor simplifications to the JWE header format, we’ve created a structure that applies naturally to both general encryption (JWE) and key encryption specifically (JWK Key Wrap).  The only difference is the “mac” field, which can be optional, since AES-KW has an internal integrity check, much like AES-CCM.</t>
+
+</section>
+<section anchor="jwe-with-wrapped-keys" title="JWE with Wrapped Keys">
+
+<t>Now, how do we deal with JWEs that use a wrapped CMK in this framework?  Well, the whole point of the last section was to make JWEs the same as wrapped keys – so we allow the “key” attribute to be a JWE containing the wrapped CMK.  For example, if we combine the two objects from the previous section, we can have a JWE representing an encryption with AES-GCM under a key protected with AES-KW.</t>
+
+<figure anchor="alg-name-a128gcm-iv-key-alg-a128kwkey-thatdata-data-mac-"><artwork><![CDATA[
+{
+    alg: { 
+        name: "A128GCM", 
+        iv: "..." 
+    },
+    key: {
+        alg: "A128KW",
+        key: "that",
+        data: "..."
+    },
+    data: "..."
+    mac: "..."
+}
+]]></artwork></figure>
+
+<t>This gives a simple, self-similar structure for wrapped keys.  The self-similarity allows us to transparently account for more advanced use cases.  For example, if someone wanted to use a CMK that came along with a bunch of attributes, they could use RSA to wrap another symmetric key, and use AES-GCM to wrap the CMK.</t>
+
+<figure anchor="alg-name-a128gcm-iv-key-alg-a128gcmkey-alg-rsa-oaepkey-jwk-public-key-data-data-data-mac-"><artwork><![CDATA[
+{
+    alg: { 
+        name: "A128GCM", 
+        iv: "..." 
+    },
+    key: {
+        alg: "A128GCM",
+        key: {
+            alg: "RSA-OAEP",
+            key: /* JWK public key */
+            data: "..."
+        },
+        data: "..."
+    },
+    data: "..."
+    mac: "..."
+}
+]]></artwork></figure>
+
+<t>The example looks kind of ridiculous, but it’s not entirely far-fetched.  You could imagine it happening, for example, if a system were distributing content decryption keys with attributes, and a recipient patched one into a JWE to decrypt it with a JWE library.</t>
+
+<t>The decryption process can handle the self-similarity naturally with recursion. If the “key” value in the JWE you’re processing is a key you know (e.g., a “kid” for a key you have), then you use that key. Otherwise, you process the “key” value as a JWE and use the decrypted content to decrypt the JWE you started with. In other words, you recursively process encrypted keys until you hit a key you know, then work your way back up the stack decrypting as you go.</t>
+
+<figure anchor="alg-alg-alg-key-key-key-known-key-iddata-data-data-decrypts-decrypts-decrypts"><artwork><![CDATA[
++------+      +------+      +------+      
+| alg  |  +-->| alg  |  +-->| alg  |  
++------+  |   +------+  |   +------+     
+| key  |--+-->| key  |--+-->| key  |---+ = known key / ID
++------+  |   +------+  |   +------+   |   
+| data |  +-->| data |  +-->| data |<--+ decrypts  
++------+      +------+      +------+      
+     ^           | ^           |
+     |           | |           |
+     +-----------+ +-----------+
+        decrypts      decrypts
+]]></artwork></figure>
+
+<t>Obviously, this sort of recursion could be dangerous, since you could end up with many levels of recursion, resulting in memory overflows, etc.  However, it doesn’t seem likely that many levels will be necessary in practice, so we could specify that implementations should impose limits on the number of levels of recursion that they will allow.</t>
+
+<t>To see how the format outlined above compares to JWE, let’s look at how the normal JWE fields map to the fields in the example object above.</t>
+
+<figure anchor="alg-name-a128gcm-enciv-jwe-initialization-vectorkey-alg-a128kw-algkey-that-kiddata-jwe-encrypted-keydata-jwe-ciphertextmac-jwe-integrity-value"><artwork><![CDATA[
+{
+    alg: { 
+        name: "A128GCM",    <--- "enc"
+        iv: "..."           <--- JWE Initialization Vector
+    },
+    key: {
+        alg: "A128KW",      <--- "alg"
+        key: "that",        <--- "kid"
+        data: "..."         <--- JWE Encrypted Key
+    },
+    data: "..."             <--- JWE Ciphertext
+    mac: "..."              <--- JWE Integrity Value
+}
+]]></artwork></figure>
+
+<t>As you can see, there’s no new information here, just the same fields rearranged so that there’s less need for special handling of IVs or Encrypted Keys – they’re just a natural part of the format.</t>
+
+<t>One last thing: We’ve said that the “data” value corresponding to the JWE Encrypted Key contains a JWK representing the CMK.  In order for that value not to impose additional overhead for symmetric keys (by wrapping a JSON-encoded key instead of the raw key octets), it will be necessary to have a compact format for JWKs.  Such a format should produce a raw octet string for symmetric keys with now attributes, and may produce an optimized JSON format for other types of keys.  A few candidate algorithms are discussed in the detailed considerations below.</t>
+
+</section>
+<section anchor="impact-on-the-compact-format" title="Impact on the Compact Format">
+
+<t>So far, we’ve been talking about a JSON format, equivalent to the current JSON serialization.  How does one take one of these and serialize it to something like the JWE compact encoding?  The obvious answer is to keep the other fields the same, and just change the header to accommodate the revised JSON form.  So the example we just considered would serialize as a normal JWE, but with the above JSON object as the header, and JWE Initialization Vector, JWE Encrypted Key, and JWE Ciphertext removed (since they’ll be binary components afterward).</t>
+
+<figure anchor="alg-name-a128gcm-enckey-alg-a128kw-algkey-that-kid"><artwork><![CDATA[
+{
+    alg: { 
+        name: "A128GCM",    <--- "enc"
+    },
+    key: {
+        alg: "A128KW",      <--- "alg"
+        key: "that",        <--- "kid"
+    },
+}
+]]></artwork></figure>
+
+<t>To see the impact on header size, let’s compare this header with the comparable normal JWE header:</t>
+
+<figure anchor="algnamea128gcmkeyalga128kwkeythatenc-a128gcm-alga128kwkidthat-"><artwork><![CDATA[
+{"alg":{"name":"A128GCM"},"key":{"alg":"A128KW","key":"that"}}
+{"enc":        "A128GCM" ,       "alg":"A128KW","kid":"that" }
+       ........         . .......                           .
+]]></artwork></figure>
+
+<t>The overhead of this proposed change is thus 17 octets of header, which comes to 20 octets after base64url encoding.  So while this does change the header structure – so it will break compatibility with existing implementations – it doesn’t change the overall structure of a JWE, and doesn’t add a dramatic amount of overhead.</t>
+
+<t>In fact, one could argue that this makes the compact form even more flexible.  The current compact form has no way to accommodate, for example, the double-wrapped case above.  In the revised header structure, the double-wrapped key would still work: The wrapped CMK would be removed to a binary part, and the secondary wrapped key would remain in the header.  It would be gigantic, but it would work.</t>
+
+</section>
+<section anchor="jws" title="JWS">
+
+<t>The same story makes sense for JWS, with a couple of revisions.  First, JWS signatures with asymmetric keys don’t need wrapped keys, so their “key” values would just be a JWK for the public key.  (Other metadata parameters, such as “x5c” could live at the same level as the “alg”, and “key” parameters, or in the JWK.)  On the other hand, JWS objects that encode MACs could benefit from having wrapped keys in the “key” field.</t>
+
+<t>The second major difference is that for JWS, it is sometimes desirable to store the input to to cryptographic operation (the signed data) in addition to the output (the signature).  In the JWE examples above, the “data” field represents the output of the cryptographic operation.  So it would be good to define an additional, optional field for JWS, which would contain an octet string for the protected data.  If that field were present, the JWS could be process directly; otherwise, it would represent a detached signature.</t>
+
+</section>
+<section anchor="summary" title="Summary">
+
+<t>In the above, we’ve described a proposed change to the JWE and JWS headers to move away from a flat bag of parameters, toward a structure with two required fields and two optional fields:</t>
+
+<t><list style='numbers'>
+  <t>REQUIRED: “alg”, containing parameters to describe the algorithm used to process the JWE/JWS object</t>
+  <t>REQUIRED: “key”, containing the key used to process the JWE/JWS, either directly, in wrapped form, or as an ID</t>
+  <t>OPTIONAL: “data”, containing the ciphertext (JWE) or signed data (JWS)</t>
+  <t>OPTIONAL: “mac”, containing the MAC or signature value for the JWE/JWS object</t>
+</list></t>
+
+<t>This revised structure doesn’t lose any features relative to the current format, since other header fields like “zip” can still be added to the header.  And it imposes low length overhead, in the low tens of octets.</t>
+
+<t>This simpler structure makes it possible to address all of the requirements above with out significant changes to JWE and JWS.  In fact, it goes beyond the design goals – instead of having one way to encrypt keys, we have one way to encrypt anything at all.</t>
+
+</section>
+</section>
+<section anchor="revised-json-format-and-translation-to-compact" title="Revised JSON Format and Translation to Compact">
+
+<t>In the discussion above, we’ve outlined a JSON structure that provides some richer structure than the current JWE header.  This requires us to modify somewhat the mapping between a JSON-serialized JWE or JWS object and its compact encoding.  In this section, we describe the mapping in detail for JWE.  With a minor change to the JWS compact serializatoin (adding fields for IV and encrypted key, which can be left empty), the same translation can be used for both JWE and JWS.</t>
+
+<section anchor="translation-from-json-to-compact" title="Translation from JSON to Compact">
+
+<t>Input: JSON object X representing a JWE object in the JSON serialization</t>
+
+<t><list style='symbols'>
+  <t>Set the Encoded JWE Encrypted Key to X.key.data.  If X.key is not present, set it to the empty string.</t>
+  <t>Set the Encoded JWE Initialization Vector to X.alg.iv.  If X.alg is not present, set it to the empty string.</t>
+  <t>Set the Encoded JWE Ciphertext to X.data</t>
+  <t>Set the Encoded JWE Integrity Value to X.mac</t>
+  <t>Delete the “data” field from X.key, the “iv” field from X.alg, and the “data” and “mac” fields from X</t>
+  <t>Base64url encode the bytes of the UTF-8 representation of the X to create the Encoded JWE Header. </t>
+  <t>Assemble the final representation: The Compact Serialization of this result is the concatenation of the Encoded JWE Header, the Encoded JWE Encrypted Key, the Encoded JWE Initialization Vector, the Encoded JWE Ciphertext, and the Encoded JWE Integrity Value in that order, with the five strings being separated by four period (‘.’) characters.</t>
+</list></t>
+
+<t>Output: Text string representing a JWE object in the compact serialization</t>
+
+<t>The following JavaScript functions implement this translation, first for the current JSON serialization and second for the proposed serialization (as described above).</t>
+
+<figure anchor="function-json2compactcurrentobj-var-jwekey-objrecipients0encryptedkeyvar-jweiv-objinitializationvectorvar-jwedata-objciphertextvar-jwemac-objrecipients0integrityvaluevar-jweheader-objrecipients0headerreturn-jweheaderjwekeyjweivjwedatajwemacjoinfunction-json2compactproposedobj-var-jwekey-objkeydatavar-jweiv-objalgivvar-jwedata-objvar-jwemac-objmacdelete-objkeydata-delete-objalgiv-delete-objdata-delete-objmac-var-jweheader-base64urljsonstringifyobjreturn-jweheaderjwekeyjweivjwedatajwemacjoin"><artwork><![CDATA[
+function json2compact_current(obj) {
+    var JWE_key  = obj.recipients[0].encrypted_key;
+    var JWE_iv   = obj.initialization_vector;
+    var JWE_data = obj.ciphertext;
+    var JWE_mac  = obj.recipients[0].integrity_value;
+
+    var JWE_header = obj.recipients[0].header;
+    
+    return [
+        JWE_header,
+        JWE_key,
+        JWE_iv,
+        JWE_data,
+        JWE_mac
+    ].join(".");
+}
+
+function json2compact_proposed(obj) {
+    var JWE_key  = obj.key.data;
+    var JWE_iv   = obj.alg.iv;
+    var JWE_data = obj;
+    var JWE_mac  = obj.mac;
+
+    delete obj.key.data;   
+    delete obj.alg.iv;     
+    delete obj.data;       
+    delete obj.mac;        
+    var JWE_header = base64url(JSON.stringify(obj));
+
+    return [
+        JWE_header,
+        JWE_key,
+        JWE_iv,
+        JWE_data,
+        JWE_mac
+    ].join(".");
+}
+]]></artwork></figure>
+
+</section>
+<section anchor="translation-from-compact-to-json" title="Translation from Compact to JSON">
+
+<t>Input: Text string representing a JWE object in the compact serialization</t>
+
+<t><list style='symbols'>
+  <t>Split the string on the period (‘.’) character to obtain the Encoded JWE Header, the Encoded JWE Ciphertext, and the Encoded JWE Integrity Value.</t>
+  <t>Base64url decode the Encoded JWE Header and parse it into a JSON object X</t>
+  <t>Set the field X.key.data to the Encoded JWE Encrypted Key</t>
+  <t>Set the field X.alg.iv to the Encoded JWE Initialization Vector</t>
+  <t>Set the field X.data to the Encoded JWE Ciphertext</t>
+  <t>Set the field X.mac to the Encoded JWE Integrity Value</t>
+</list></t>
+
+<t>Output: JSON object X representing a JWE object in the JSON serialization</t>
+
+<t>The following JavaScript functions implement this translation, first for the current JSON serialization and second for the proposed serialization (as described above).</t>
+
+<figure anchor="function-compact2jsoncurrentstr-var-parts-strsplitvar-obj-recipients-objrecipients0header-parts0objrecipients0encryptedkey-parts1objrecipients0integrityvalue-parts4objinitializationvector-parts2objciphertext-parts3return-objfunction-compact2jsonproposedstr-var-parts-strsplitvar-obj-jsonparseparts0objkeydata-parts1objalgiv-parts2objdata-parts3objmac-parts4return-obj"><artwork><![CDATA[
+function compact2json_current(str) {
+    var parts = str.split(".");
+    var obj = { recipients: [{}], };
+    
+    obj.recipients[0].header = parts[0];
+    obj.recipients[0].encrypted_key = parts[1];
+    obj.recipients[0].integrity_value = parts[4];
+    obj.initialization_vector = parts[2];
+    obj.ciphertext = parts[3];
+
+    return obj;
+}
+
+function compact2json_proposed(str) {
+    var parts = str.split(".");
+    var obj = JSON.parse(parts[0]);
+
+    obj.key.data = parts[1];
+    obj.alg.iv   = parts[2];
+    obj.data     = parts[3];
+    obj.mac      = parts[4];
+    
+    return obj;
+}
+]]></artwork></figure>
+
+</section>
+</section>
+<section anchor="disposition-of-header-fields-proposal-part-3" title="Disposition of Header Fields (Proposal Part 3)">
+
+<t>The refactoring of the JWE and JWS headers described above requires adding one new field to the header (“key”) and redefining one field (“alg”).  </t>
+
+<t>The new “key” header subsumes the functionality of the “kid” and “jwk” headers; it allows a key to be expressed either directly (as a “jwk” object) or indirectly (as a “kid” string).  (We could also just require that either “kid” or “jwk” be present.)  With the extension of JWK to wrapped keys, “key” would also support the use of wrapped keys.</t>
+
+<t>The re-defined “alg” header would collect all the parameters describing an algorithm into a single object, whose format would be defined in the revised JWA document.  For example, an “alg” value for a key agreement algorithm would have a “name” field indicating the key agreement algorithm (as in the current “alg” field), as well as the “epk”, “apu”, and “apv” fields from the current JWE object.  An “alg” value for symmetric encryption with AES-GCM would include a “name” field and an “iv” field with an Initialization Vector.</t>
+
+<t>The refactoring has no effect on the many JWE and JWS fields that are secondary to cryptographic processing.  For example, the “cty” field remains at the top level of the header.</t>
+
+<t>In the following tables, we assign each of the current JWS and JWE header fields one of the following dispositions:</t>
+
+<t><list style='symbols'>
+  <t>Key: Subsumed by “key” field (or an alternative instantiation of it)</t>
+  <t>Alg: Subsumed by “alg” field (move to the JWA)</t>
+  <t>Hdr: Remains as a header parameter</t>
+</list></t>
+
+<figure anchor="jws-fields-key-alg-hdralg-xjku-xjwk-xx5u-xx5t-xx5c-xkid-xtyp-xcty-x"><artwork><![CDATA[
+JWS Fields     Key     Alg     Hdr
+  "alg"                         X
+  "jku"                         X
+  "jwk"         X
+  "x5u"                         X
+  "x5t"                         X
+  "x5c"                         X
+  "kid"         X
+  "typ"                         X
+  "cty"                         X
+]]></artwork></figure>
+
+<figure anchor="jwe-fields-key-alg-hdralg-xenc-xepk-xzip-xjku-xjwk-xx5u-xx5t-xx5c-xkid-xtyp-xcty-xapu-xapv-xepu-xepv-x"><artwork><![CDATA[
+JWE Fields     Key     Alg     Hdr
+  "alg"                         X
+  "enc"         X
+  "epk"         X
+  "zip"                         X
+  "jku"                         X
+  "jwk"         X
+  "x5u"                         X
+  "x5t"                         X
+  "x5c"                         X
+  "kid"         X
+  "typ"                         X
+  "cty"                         X
+  "apu"                 X
+  "apv"                 X
+  "epu"                 X
+  "epv"                 X
+]]></artwork></figure>
+
+</section>
+<section anchor="key-wrapping-procedure-proposal-part-4" title="Key Wrapping Procedure (Proposal Part 4)">
+
+<t>At a high level, there are two steps in the key wrap.  First, the JSON dictionary for the original JWK is split into “public” and “private” dictionaries, by dictionary key.  The private dictionary is marshaled using a marshaling algorithm (see below), then encrypted in a JWE.  The public dictionary becomes the “kat” attribute of the JWE.</t>
+
+<t>Key unwrapping proceeds in the opposite direction, retrieving the public and private dictionaries from the “kat” and “wk” attributes (unwrapping the private part), then merging the two into a final JWK.</t>
+
+<figure anchor="pub-katkey-priv-marshal-encrypt-data"><artwork><![CDATA[
+      +--> pub  -----------------------> "kat"
+      |
+key --+
+      |
+      +--> priv -> marshal -> encrypt -> "data"
+]]></artwork></figure>
+
+<t>The procedures in this section do not presume a given marshaling algorithm.  Instead we discuss several possible options below.  Each marshaling procedure has the same interface:</t>
+
+<t><list style='symbols'>
+  <t>Inputs: 
+  <list style='symbols'>
+      <t>Key type (“kty”)</t>
+      <t>JSON dictionary</t>
+    </list></t>
+  <t>Output: 
+  <list style='symbols'>
+      <t>Octet string with the marshaled value</t>
+      <t>Binary flag indicating whether the marshaled value contains JSON content</t>
+    </list></t>
+</list></t>
+
+<t>The corresponding unmarshaling procedures have corresponding inputs and outputs (octet string + binary and JSON dictionary, respectively). </t>
+
+<section anchor="wrapping-procedure" title="Wrapping procedure">
+
+<t>Parameters: Marshaling algorithm</t>
+
+<t>Input: JWK object, wrapping algorithm, wrapping key, list of private fields</t>
+
+<t><list style='symbols'>
+  <t>Construct a private object by copying all private fields (listed in the list of private fields) from the input JWK to a new dictionary</t>
+  <t>Construct a public object by copying all other fields from the input JWK to a new dictionary</t>
+  <t>Marshal the private object using the marshaling algorithm, and record the value of the returned “wj” flag</t>
+  <t>Create a JWE encrypting the marshaled private object with the wrapping algorithm and wrapping key</t>
+  <t>If the “wj” flag is set to true, add it to the JWE as the “wj” attribute</t>
+  <t>If the public object is non-empty, add it to the JWE as the “kat” attribute</t>
+  <t>Return the JWE</t>
+</list></t>
+
+<t>Output: JWE object with optional “kat” and “wj” attributes</t>
+
+</section>
+<section anchor="unwrapping-procedure" title="Unwrapping Procedure">
+
+<t>Parameters: Marshaling algorithm</t>
+
+<t>Input: JWE object with optional “kat” and “wj” attributes</t>
+
+<t><list style='symbols'>
+  <t>Initialize the unwrapped key to an empty JSON dictionary</t>
+  <t>If the “kat” field is present in the JWE, copy its contents into the unwrapped key</t>
+  <t>Set the “wj” flag to false if it is not present in the JWE</t>
+  <t>Decrypt the JWE to obtain the marshalled private dictionary</t>
+  <t>Unmarshal the private dictionary, using the marshaling algorithm and the “wj” flag </t>
+  <t>Copy all fields from the private dictionary into the unwrapped key dictionary, overwriting existing fields if necessary</t>
+  <t>Return the unwrapped key dictionary</t>
+</list></t>
+
+<t>Output: Unwrapped dictionary</t>
+
+</section>
+</section>
+<section anchor="compact-jwk-marshaling-proposal-part-4" title="Compact JWK Marshaling (Proposal Part 4)">
+
+<t>There are several possible compact serializations for JWK, which offer different trade-offs between size and complexity.</t>
+
+<t><list style='symbols'>
+  <t>JWKS0: UTF-8</t>
+  <t>JWKS1: UTF-8, or raw binary for symmetric keys with no attributes</t>
+  <t>JWKS2: UTF-8, or raw binary for one  field per key type</t>
+  <t>JWKS3: UTF-8, with raw binary for a fixed list of fields per key type</t>
+  <t>JWKS4: UTF-8, with raw binary for an arbitrary list of fields </t>
+</list></t>
+
+<t>In this section, we describe details for JWKS2 and JWKS3, since JWKS2 doesn’t have significantly more complexity than JWKS1, and JWKS3 is much simpler than JWKS4.  For brevity, we list only the encoding procedures.  </t>
+
+<t>To illustrate the trade-offs of these algorithms, we consider three test cases:</t>
+
+<t><list style='symbols'>
+  <t>A 256-bit AES key</t>
+  <t>A 256-bit EC private key</t>
+  <t>A 2048-bit RSA private key</t>
+</list></t>
+
+<t>In addition to the two above algorithms, we also consider the simple wrapping procedure in which the entire JWK is serialized to UTF-8 and wrapped as a JWE.</t>
+
+<section anchor="jwks2" title="JWKS2">
+
+<t>Parameters: Table with one binary field for each key type</t>
+
+<t>Input: JSON dictionary, key type</t>
+
+<t><list style='symbols'>
+  <t>If the key type is in the table, and the only field in the dictionary is the binary field for the key type
+  <list style='symbols'>
+      <t>Set the “wj” flag to false</t>
+      <t>Set the marshaled JSON to the binary contents of the field</t>
+    </list></t>
+  <t>Else
+  <list style='symbols'>
+      <t>Set the “wj” flag to true</t>
+      <t>Set the marshaled JSON to the UTF-8 serialization of the JSON dictionary</t>
+    </list></t>
+</list></t>
+
+<t>Output: Marshaled JSON, “wj” flag</t>
+
+</section>
+<section anchor="jwks3" title="JWKS3">
+
+<t>Parameters: Table with a list of binary fields for each key type</t>
+
+<t>Input: JSON dictionary, key type</t>
+
+<t><list style='symbols'>
+  <t>If the key type is not in the table:
+  <list style='symbols'>
+      <t>Set the “wj” flag to true</t>
+      <t>Set the marshaled JSON to the UTF-8 serialization of the JSON dictionary</t>
+    </list></t>
+  <t>If the key type is in the table and there is only one binary field in the list for this key type, and that field is the only field in the JSON dictionary:
+  <list style='symbols'>
+      <t>Set the “wj” flag to false</t>
+      <t>Set the marshalled JSON to the binary contents of the field</t>
+    </list></t>
+  <t>Else if the key type is in the table:
+  <list style='symbols'>
+      <t>Set the “wj” flag to false</t>
+      <t>Copy all binary fields from the JSON dictionary to a new dictionary, then remove them from the JSON dictionary</t>
+      <t>If the JSON dictionary is non-empty, compute its UTF-8 serialization and set the “wj” flag to true</t>
+      <t>Construct a list of binary components containing:
+      <list style='symbols'>
+          <t>The serialized JSON dictionary, if non-empty</t>
+          <t>The cached binary field values, in the order of the list of fields</t>
+        </list></t>
+      <t>Prefix each binary component with a two-octet length field</t>
+      <t>Set the marshaled JSON to the concatenation of the length-prefixed binary components</t>
+    </list></t>
+</list></t>
+
+<t>Output: Marshaled JSON, “wj” flag</t>
+
+</section>
+<section anchor="test-cases" title="Test Cases">
+
+<t>Test case 1: A 32-bit symmetric key, with the single private field “k”</t>
+
+<figure anchor="kty-oct-k-csax0mqz66lgh7hmsgnm8mchsdplww7oyuvviinu-"><artwork><![CDATA[
+{ "kty": "oct", "k": "cSax0MQz66lGh7hMsgNm8mC+hS+DplWW7o+yUVVIINU=" }
+]]></artwork></figure>
+
+<t>Test case 2: A 256-bit EC private key, with the single private field “d”</t>
+
+<figure anchor="kty-eccrv-p-256kid-1x-mkbctnickusdii11yss3526idz8aito7tu6kpaqv7d4y-4etl6srw2yilurn5vfvvhuhp7x8pxltmwwlbbm4ifymd-870mb6gfutj4htunuvymyjpr5euznp4bk43bvdj3eae"><artwork><![CDATA[
+{
+    "kty": "EC",
+    "crv": "P-256",
+    "kid": "1",
+    "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+    "y": "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM",
+    "d": "870MB6gfuTJ4HtUnUvYMyJpr5eUZNP4Bk43bVdj3eAE"
+}
+]]></artwork></figure>
+
+<t>Test case 3: A 2048-bit RSA private key, with six private fields “d”, “p”, “q”, “dp”, “dq”, “qi”.</t>
+
+<figure anchor="kty-rsaalg-rs256kid-2011-04-29n-256-octets-e-aqabd-256-octets-p-128-octets-q-128-octets-dp-128-octets-dq-128-octets-qi-128-octets-"><artwork><![CDATA[
+{
+    "kty": "RSA",
+    "alg": "RS256",
+    "kid": "2011-04-29",
+    "n": /* 256 octets */,
+    "e": "AQAB",
+    "d": /* 256 octets */,
+    "p": /* 128 octets */,
+    "q": /* 128 octets */,
+    "dp": /* 128 octets */,
+    "dq": /* 128 octets */,
+    "qi": /* 128 octets */,
+}
+]]></artwork></figure>
+
+</section>
+<section anchor="performance-on-test-cases" title="Performance on Test Cases">
+
+<t>To characterize the performance of the marshaling algorithms on the test cases, we compute the number of octets used to represent the wrapped key in the JWE (omitting other JWE parameters, which are constant).</t>
+
+<t>We consider four cases:</t>
+
+<t><list style='numbers'>
+  <t>Baseline: Length of the UTF-8 serialization of the JWK</t>
+  <t>Simple: Length of the base64url-encoded UTF-8 serialization of the JWK</t>
+  <t>JWKS2: Length of UTF-8 serialization of the public half of the JWK (as would be in the “kat” field), plus the length of the base64url-encoded output of JWKS2 on the private half</t>
+  <t>JWKS3: Same as JWKS2, but using JWKS3 instead</t>
+</list></t>
+
+<t>The results of this analysis are as follows:</t>
+
+<figure anchor="test-case-1-2-3aes-ec-rsabaseline-64-186-1648simple-88-248-2200jwks2-44-180-2066jwks3-44-180-1634"><artwork><![CDATA[
+Test Case      1     2     3
+             AES    EC   RSA
+============================
+Baseline      64   186  1648
+Simple        88   248  2200
+JWKS2         44   180  2066
+JWKS3         44   180  1634
+]]></artwork></figure>
+
+<t>As expected, the compact JWKS serializations are more compact in general than the simple approach, because they avoid double-base64 encoding.  For test case 2, which involves multiple binary fields in the wrapped key, JWKS2 does a little better than the simple approach because it can handle one field (“d”), and JWKS3 does notably better because it can handle all of the binary fields.</t>
+
+</section>
+</section>
+<section anchor="security-considerations" title="Security Considerations">
+
+<t>The refactoring proposed in this document has several security benefits.</t>
+
+<t>First, by using the JWE format for wrapped keys in JWE, JWE can benefit from general AEAD algorithms for key wrapping, for example, AES-GCM as opposed to AES key wrap.  These other AEAD algorithms are more widely available than AES key wrap, and offer better security properties in some situations.  This benefit is available to the compact serialization as well as the revised JSON format.</t>
+
+<t>Second, by using the same format for key encryption and content encryption, code for processing objects in the proposed format will only have to have support one way of decrypting objects.  This simplification will reduce the chance for bugs in implementations.</t>
+
+<t>Third, the use of consolidated algorithm and key objects allows for simpler validation rules on JOSE objects, again reducing the chance that an improperly-constructed JOSE object will be able to trigger implementation bugs.</t>
+
+<t>The current JWE and JWS specifications require header information to be protected under the integrity check provided by the signature, MAC, or AEAD algorithm.  This proposal makes the header computation slightly more difficult in the JSON case, since the recipient will have to reconstruct the header by removing some fields from the JSON object.  However, no concrete security benefit has been proposed for header integrity, so it may be better to remove header integrity protection in order to allow for cleaner architecture.</t>
+
+</section>
+<section anchor="iana-considerations" title="IANA Considerations">
+
+<t>This memo makes no request of IANA.  However, changes to the JOSE specs resulting from this proposal might require adjustments to some IANA registrations.</t>
+
+</section>
+
+
+  </middle>
+
+  <back>
+
+    <references title='Normative References'>
+
+
+
+
+
+<reference anchor='I-D.ietf-jose-json-web-encryption'>
+<front>
+<title>JSON Web Encryption (JWE)</title>
+
+<author initials='M' surname='Jones' fullname='Michael Jones'>
+    <organization />
+</author>
+
+<author initials='E' surname='Rescorla' fullname='Eric Rescorla'>
+    <organization />
+</author>
+
+<author initials='J' surname='Hildebrand' fullname='Joe Hildebrand'>
+    <organization />
+</author>
+
+<date month='December' day='28' year='2012' />
+
+<abstract><t>JSON Web Encryption (JWE) is a means of representing encrypted content using JavaScript Object Notation (JSON) data structures. Cryptographic algorithms and identifiers for use with this specification are described in the separate JSON Web Algorithms (JWA) specification.  Related digital signature and MAC capabilities are described in the separate JSON Web Signature (JWS) specification.</t></abstract>
+
+</front>
+
+<seriesInfo name='Internet-Draft' value='draft-ietf-jose-json-web-encryption-08' />
+<format type='TXT'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-jose-json-web-encryption-08.txt' />
+<format type='PDF'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-jose-json-web-encryption-08.pdf' />
+</reference>
+
+
+
+<reference anchor='I-D.ietf-jose-json-web-signature'>
+<front>
+<title>JSON Web Signature (JWS)</title>
+
+<author initials='M' surname='Jones' fullname='Michael Jones'>
+    <organization />
+</author>
+
+<author initials='J' surname='Bradley' fullname='John Bradley'>
+    <organization />
+</author>
+
+<author initials='N' surname='Sakimura' fullname='Nat Sakimura'>
+    <organization />
+</author>
+
+<date month='December' day='28' year='2012' />
+
+<abstract><t>JSON Web Signature (JWS) is a means of representing content secured with digital signatures or Message Authentication Codes (MACs) using JavaScript Object Notation (JSON) data structures.  Cryptographic algorithms and identifiers for use with this specification are described in the separate JSON Web Algorithms (JWA) specification. Related encryption capabilities are described in the separate JSON Web Encryption (JWE) specification.</t></abstract>
+
+</front>
+
+<seriesInfo name='Internet-Draft' value='draft-ietf-jose-json-web-signature-08' />
+<format type='TXT'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-jose-json-web-signature-08.txt' />
+<format type='PDF'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-jose-json-web-signature-08.pdf' />
+</reference>
+
+
+
+<reference anchor='I-D.ietf-jose-json-web-algorithms'>
+<front>
+<title>JSON Web Algorithms (JWA)</title>
+
+<author initials='M' surname='Jones' fullname='Michael Jones'>
+    <organization />
+</author>
+
+<date month='December' day='28' year='2012' />
+
+<abstract><t>The JSON Web Algorithms (JWA) specification enumerates cryptographic algorithms and identifiers to be used with the JSON Web Signature (JWS), JSON Web Encryption (JWE), and JSON Web Key (JWK) specifications.</t></abstract>
+
+</front>
+
+<seriesInfo name='Internet-Draft' value='draft-ietf-jose-json-web-algorithms-08' />
+<format type='TXT'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-jose-json-web-algorithms-08.txt' />
+<format type='PDF'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-jose-json-web-algorithms-08.pdf' />
+</reference>
+
+
+
+<reference anchor='I-D.ietf-jose-json-web-key'>
+<front>
+<title>JSON Web Key (JWK)</title>
+
+<author initials='M' surname='Jones' fullname='Michael Jones'>
+    <organization />
+</author>
+
+<date month='December' day='28' year='2012' />
+
+<abstract><t>A JSON Web Key (JWK) is a JavaScript Object Notation (JSON) data structure that represents a public key.  This specification also defines a JSON Web Key Set (JWK Set) JSON data structure for representing a set of JWKs.  Cryptographic algorithms and identifiers for use with this specification are described in the separate JSON Web Algorithms (JWA) specification.</t></abstract>
+
+</front>
+
+<seriesInfo name='Internet-Draft' value='draft-ietf-jose-json-web-key-08' />
+<format type='TXT'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-jose-json-web-key-08.txt' />
+<format type='PDF'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-jose-json-web-key-08.pdf' />
+</reference>
+
+
+
+
+    </references>
+
+
+
+
+  </back>
+</rfc>
+
