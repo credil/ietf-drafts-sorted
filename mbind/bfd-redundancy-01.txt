@@ -1,0 +1,503 @@
+
+
+
+
+Internet Engineering Task Force                          M. Binderberger
+Internet-Draft                                                  N. Akiya
+Intended status: Standards Track                           Cisco Systems
+Expires: November 08, 2013                                  May 07, 2013
+
+
+                         Redundant BFD sessions
+                     draft-mbind-bfd-redundancy-01
+
+Abstract
+
+   This document defines a second or "shadow" BFD session to an existing
+   "primary" BFD session, providing resiliency against BFD failures that
+   are not legitimate.
+
+   Scenarios will be discussed on how presence of a shadow BFD session
+   will be beneficial in the context of high availability.
+
+Requirements Language
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC 2119 [RFC2119].
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on November 08, 2013.
+
+Copyright Notice
+
+   Copyright (c) 2013 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+
+
+
+Binderberger & Akiya   Expires November 08, 2013                [Page 1]
+
+Internet-Draft           Redundant BFD sessions                 May 2013
+
+
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   2
+   2.  Failure scenarios . . . . . . . . . . . . . . . . . . . . . .   3
+   3.  Differentiating primary and shadow sessions . . . . . . . . .   5
+   4.  BFD version 2 packets . . . . . . . . . . . . . . . . . . . .   6
+   5.  BFD discriminators  . . . . . . . . . . . . . . . . . . . . .   6
+   6.  Using primary and shadow BFD sessions . . . . . . . . . . . .   6
+   7.  LSP ping bootstrapped BFD sessions  . . . . . . . . . . . . .   7
+   8.  Scale aspect  . . . . . . . . . . . . . . . . . . . . . . . .   8
+   9.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .   8
+   10. Security Considerations . . . . . . . . . . . . . . . . . . .   8
+   11. Acknowledgements  . . . . . . . . . . . . . . . . . . . . . .   8
+   12. Normative References  . . . . . . . . . . . . . . . . . . . .   8
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .   9
+
+1.  Introduction
+
+   Bidirectional Forwarding Detection [RFC5880] is used to detect
+   network failures.  Link failures and peer system outages are some
+   examples of failures which can be detected with BFD technology.
+   Although undesirable, the BFD technology may falsely declare failure
+   in some scenarios: BFD process crash, FPGA reset on hardware based
+   BFD, or a card running the BFD functionality fails or gets removed
+   accidentally.  In all these cases, the forwarding being monitored by
+   BFD may remain functional.  Unnecessary rerouting of traffic, while
+   not a problem per-se, can be a problem at a large scale of false BFD
+   triggers, e.g.  tens of thousands of traffic path.  A serious outcome
+   may be seen if a network outage occurs in a time window in which BFD
+   is not detecting failures.  For example, during software updates an
+   extended timer value may be used, leaving the system and it's peer
+   "blind" for any real liveliness problem until the BFD functionality
+   is restored.
+
+   This draft proposes to run a second "shadow" BFD session, in parallel
+   to the existing "primary" BFD session.  This additional session will
+   have it's own unique discriminator value(s).  The method used to
+   differentiate discriminator zero primary and shadow sessions is
+   discussed in the following sections.
+
+
+
+
+Binderberger & Akiya   Expires November 08, 2013                [Page 2]
+
+Internet-Draft           Redundant BFD sessions                 May 2013
+
+
+2.  Failure scenarios
+
+   BFD technology requires continuous transmission of control packets in
+   both directions.  The rate at which both systems are required to
+   transmit these packets will vary depending on operational
+   requirements and configurations: BFD mode and interval.  If a BFD
+   module on one system is unable to transmit BFD control packets for
+   amount of time greater than the negotiated failure detection time,
+   then the BFD module on the other system will declare a session
+   failure.  Sometimes the cause of such a session failure is not
+   related to the functionality of the path being monitored by BFD.
+
+   Some failure scenarios which can exhibit such behaviors are described
+   in this section.
+
+   1.  Software based BFD: BFD process crash - Software entity handling
+       BFD packets may crash unexpectedly.  Time it takes for same, or
+       possibly alternative software entity, to become functional is a
+       time window where BFD packets will not be handled.  If this time
+       window is larger than negotiated failure detection time, sessions
+       will be declared as failure even though monitored paths may still
+       be valid.  If there existed another software entity, running on
+       same CPU or different CPU, validating same paths, false failure
+       can be avoided as long as two software entities do not crash
+       around same time.
+
+   2.  Software based BFD: CPU starvation - CPU starvation may cause BFD
+       packets from being handled in timely manner.  During this period,
+       packets may not get transmitted or received packets may not get
+       processed.  If length of time CPU starvation affecting BFD
+       software entity is larger than negotiated failure detection time,
+       sessions will be declared as failure even though monitored paths
+       may still be valid.  If there existed another software entity,
+       running on different CPU, validating same paths, false failure
+       for this scenario can be avoided as long as two software entities
+       do not become CPU starved around same time.
+
+   3.  Hardware based BFD: FPGA reset - In a scenario where hardware BFD
+       and actual forwarding are performed on separate chips, it may be
+       desirable to reset just FPGA which runs BFD.  Planned such FPGA
+       reset can be handled locally.  Sessions can be migrated to
+       another chip set, failure detection times can be extended during
+       absence of local BFD functionality, combination of both or some
+       other means.  However, any solution will require additional
+       proprietary logics to be implemented.  Users, operating multiple
+       products, may need to understand expected behavior of each.  In
+       addition, extending failure detection times mean that system can
+       no longer detect true failure within desired failure detection
+
+
+
+Binderberger & Akiya   Expires November 08, 2013                [Page 3]
+
+Internet-Draft           Redundant BFD sessions                 May 2013
+
+
+       times.  A consistent solution which does not compromise
+       configured failure detection time is desired.
+
+   4.  System using centralized BFD architecture: Route processor card
+       fault - A product with redundant route processor card could
+       implement a standby BFD entity to run on the other route
+       processor card.  Implementation may set BFD entity on standby
+       route processor to be partially active or dormant until it is
+       determined to be active.  In both cases, data synchronization
+       between the two entities is essential to ensure standby "take
+       over" happens seamlessly.  Additionally, "take over" detection
+       and "take over" procedures themselves becoms essential, as any
+       slowness in such may cause remote peers to take down sessions.
+       If there existed two fully active BFD entities, one on active
+       route processor and another on standby route processor,
+       validating same paths, potentially complex "take over" logics can
+       be avoided.
+
+   5.  System using distributed BFD architecture: Linecard fault - BFD
+       may run on logical interfaces which are comprised of physical
+       interfaces spanning multiple linecards.  BFD may run on paths
+       which are comprised of nexthops hosted on multiple linecards.
+       BFD may run on logical interfaces or paths which nexthops change
+       dynamically, jumping from one linecard to another.  In all cases,
+       a linecard hosting a certain BFD session may not be hosting
+       actual outgoing interface corresponding to that BFD session at
+       any given time.  In such cases, failure of a linecard may not
+       have any impact to the paths being monitored by some or all
+       hosted BFD sessions.  One implementation may attempt to solve
+       this problem by trying to move BFD sessions to a linecard where
+       nexthops reside.  Unfortunately this only solves subset of the
+       problem since it will not cover the scenario where there are
+       valid multiple nexthops hosted on multiple linecards (ex: LAG,
+       ECMP).  Another implementation may attempt to solve this problem
+       by running a standby BFD entity on another linecard.  However,
+       this solution has same issues as described in the centralized BFD
+       architecture section.  Again, if there existed two fully active
+       BFD entities, running on different linecards, validating same
+       paths, potentially complex synchronization, "take over" or
+       "migration" logics can be avoided.
+
+   Failure scenarios are not limited to the ones described above.  In
+   all cases, the reliability of BFD sessions will increase
+   significantly if a second fully active BFD instance existed.  It is
+   possible to address some, or potentially all, failure scenarios
+   locally.  However, multiple proprietary solutions are likely required
+   to cover wide problematic areas.  Result may not be desirable from
+   operator perspective, as expected behavior will deviate from a
+
+
+
+Binderberger & Akiya   Expires November 08, 2013                [Page 4]
+
+Internet-Draft           Redundant BFD sessions                 May 2013
+
+
+   failure to failure, and from a device to device.  Therefore, this
+   specification defines a simple and consistent redundancy mechanism
+   which can be used with wide range of local failure scenarios.
+
+3.  Differentiating primary and shadow sessions
+
+   For a single target monitored by BFD, a system needs to run two
+   instances of the BFD sessions: a primary session and a shadow
+   session.  This requires BFD control packets to have an indication on
+   which role they belong.  In other words, every control packet needs
+   to have an indication on whether it belongs to the primary or the
+   shadow session.
+
+   When looking at the BFD version 1 packet in [RFC5880], there are no
+   unused bits left to store a shadow flag to distinguish the primary
+   from the shadow session.  One could take away a bit from e.g.  the
+   Diag, the Multiplier or the Length field, even claiming the least
+   significant bit from one of the interval fields.  But none of these
+   proposals would be safe against interoperability problems with BFD
+   speakers not supporting this draft.
+
+   That leaves three possible options.
+
+   a.  Use of existing BFD version 1 control packet definition will
+       indicate a primary BFD session.  Shadow BFD sessions will use
+       version 2 in the BFD packets.  Besides usage of different version
+       number, all operation will conform to the behaviors described in
+       BFD RFCs.  Shadow BFD sessions only handle version 2 BFD packets.
+       Primary BFD sessions only handle version 1 BFD packets as
+       specified in section 6.8.6 of [RFC5880].
+
+   b.  Define a new BFD packet header for version 2.  This new version
+       is to include bits to indicate the session type: primary session
+       or shadow session.  Shadow BFD sessions only handle version 2 BFD
+       packets with shadow bits set.  Primary BFD sessions handle
+       version 1 BFD packets or version 2 BFD packets with primary bits
+       set.
+
+   c.  Use information outside the BFD packet.  For IP/UDP encapsulated
+       BFD packets this could be a UDP destination port different from
+       the well-known ports defined in [RFC5881] and [RFC5883].  For BFD
+       over Pseudo Wires [RFC5885] or BFD for MPLS-TP OAM [RFC6428] new
+       type values could be used in the PW-ACH and G-ACH to
+       differentiate shadow BFD packets from the primary BFD session
+       packets.
+
+   Option b redefines the BFD packet contents.  Although it is a clean
+   solution, this approach can have a significant impact to existing BFD
+
+
+
+Binderberger & Akiya   Expires November 08, 2013                [Page 5]
+
+Internet-Draft           Redundant BFD sessions                 May 2013
+
+
+   implementations.  Introduction of BFD redundancy capability at
+   significant costs is thought to be undesirable, thus this option is
+   not recommended.  However, when there is a discussion on defining new
+   version of BFD packet contents, addition of redundancy capability
+   would be recommended.  Option c will create dependencies with current
+   and future BFD RFCs since each will need to define a way shadow
+   session can be specified.  Therefore, this option is also not
+   recommended.  That leaves option a as the recommended choice.
+
+4.  BFD version 2 packets
+
+   BFD version 2 packets follow exactly the definition given in
+   [RFC5880] and other BFD-related RFCs, with one difference that the
+   version field contains the value "2".  The packet format is the same
+   as described in section 4.1 of [RFC5880].  Implementations following
+   this draft MUST be able to receive BFD packets with the version field
+   values "1" and "2" and MUST drop BFD packets with any other version
+   value.
+
+   BFD packets with a version value of "1" are named "primary" packets
+   while BFD packets with a version value of "2" are named "shadow"
+   packets within this document.  The primary session MUST only transmit
+   and receive primary packets.  The shadow session MUST only transmit
+   and receive shadow packets.
+
+5.  BFD discriminators
+
+   As primary sessions and shadow sessions are operating independently,
+   they have different my discriminator values.  My discriminator values
+   assigned to BFD sessions are unique per system, across the combined
+   set of primary and shadow sessions.  In other words, a system will
+   have one discriminator pool to be used for both primary and shadow
+   sessions, not a pool per session type.
+
+6.  Using primary and shadow BFD sessions
+
+   A shadow BFD session is associated to exactly one primary BFD
+   session.  The parameters used by shadow sessions SHOULD be the same
+   as the parameters of associated primary session.  Purpose for such is
+   to ensure that two sessions operate using the same mode, interval and
+   failure detection time.  This allows for the two sessions to behave
+   as similar as possible to reduce the chance of them concluding
+   deviating state in valid failure scenarios.
+
+   When the BFD shadow capability is enabled to a target, two session
+   instances to that target are created: primary and shadow.  A logic
+   SHOULD be applied to identify where in the system to host the two
+   sessions.  The logic should maximize the failure detection validity
+
+
+
+Binderberger & Akiya   Expires November 08, 2013                [Page 6]
+
+Internet-Draft           Redundant BFD sessions                 May 2013
+
+
+   by minimizing the chances of both sessions being impacted by a single
+   local failure.  For example, if there are multiple CPU instances,
+   there will be more benefits to run the two sessions on different CPU
+   instances.  Details of this logic, however, is outside the scope of
+   this document.
+
+   Both the primary and the shadow session are to operate as per
+   specified in other BFD RFCs.  A differentiator comes into play
+   between state changes of the two sessions and the action taken when
+   reachability of the BFD enabled target changes.  This differentiator
+   will be referred as the state consolidation module from here onward.
+   The purpose of the state consolidation module is to consolidate the
+   state of the primary and the shadow session, and to produce a final
+   state to be used by the system to take action on.  The logic of the
+   state consolidation module is as follows:
+
+   Final state is UP when the state of the primary session is UP or the
+   state of the shadow session is UP.
+
+   Final state is DOWN when both the state primary session is DOWN and
+   the state of the shadow sessions is DOWN.
+
+7.  LSP ping bootstrapped BFD sessions
+
+   This specification aims to introduce BFD redundancy concept to
+   various flavors of BFD while minimizing disruption to existing
+   implementations.  There is, however, one additional change required
+   in order to support LSP ping bootstrapped BFD sessions described by
+   [RFC5884].
+
+   This specification defines a new optional TLV to be carried in LSP
+   ping packet.
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                        Discriminator                          |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+
+   This TLV has a length of 4.  The value contains the 4-byte local
+   discriminator that the LSR, sending the LSP ping message, associates
+   with the shadow BFD session.  TBD: IANA to assign optional type.
+
+   Upon reception of this optional TLV, LSP egress is to create a shadow
+   session for specified FEC, if local constraints allow, with your
+   discriminator set to value specified in the TLV.  This TLV MAY be
+   included in the LSP ping which carries BFD discriminator TLV of
+
+
+
+Binderberger & Akiya   Expires November 08, 2013                [Page 7]
+
+Internet-Draft           Redundant BFD sessions                 May 2013
+
+
+   corresponding primary session, or this TLV MAY be carried in a
+   separate LSP ping packet which does not carry BFD discriminator TLV
+   of corresponding primary session.  In both cases, egress LSR MUST
+   associate both primary and shadow sessions in the state consolidation
+   module.
+
+8.  Scale aspect
+
+   The BFD module becomes more resilient by enabling the shadow BFD
+   capability.  However, when the shadow BFD capability is enabled on a
+   system, the total number of BFD sessions hosted on a system will be
+   increased by the number of shadow BFD sessions.  For the same number
+   of BFD monitored targets, more system resources will be used.
+   Solving a scale issue is outside the scope of this document.
+   However, below lists some techniques which can be considered:
+
+   1.  Reduce the configured BFD intervals of some or all BFD sessions.
+
+   2.  Allow an implementation to run shadow sessions at a slower rate.
+
+9.  IANA Considerations
+
+   IANA to assign optional type for new LSP ping TLV.
+
+10.  Security Considerations
+
+   This document does not introduce any additional security issues and
+   the security mechanisms defined in [RFC5880] apply in this document.
+
+11.  Acknowledgements
+
+   Authors would like to thank Aswatnarayan Raghuram from AT&T for
+   providing requirements and helpful comments.
+
+   Authors would like to thank Gregory Mirsky and Alexander Vainshtein
+   for providing insightful comments.
+
+   Authors would like to thank Srihari Raghavan and Mallik Mudigonda
+   from Cisco Systems for providing valuable comments regarding LSP ping
+   bootstrapped sessions.
+
+12.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC5880]  Katz, D. and D. Ward, "Bidirectional Forwarding Detection
+              (BFD)", RFC 5880, June 2010.
+
+
+
+Binderberger & Akiya   Expires November 08, 2013                [Page 8]
+
+Internet-Draft           Redundant BFD sessions                 May 2013
+
+
+   [RFC5881]  Katz, D. and D. Ward, "Bidirectional Forwarding Detection
+              (BFD) for IPv4 and IPv6 (Single Hop)", RFC 5881, June
+              2010.
+
+   [RFC5883]  Katz, D. and D. Ward, "Bidirectional Forwarding Detection
+              (BFD) for Multihop Paths", RFC 5883, June 2010.
+
+   [RFC5884]  Aggarwal, R., Kompella, K., Nadeau, T., and G. Swallow,
+              "Bidirectional Forwarding Detection (BFD) for MPLS Label
+              Switched Paths (LSPs)", RFC 5884, June 2010.
+
+   [RFC5885]  Nadeau, T. and C. Pignataro, "Bidirectional Forwarding
+              Detection (BFD) for the Pseudowire Virtual Circuit
+              Connectivity Verification (VCCV)", RFC 5885, June 2010.
+
+   [RFC6428]  Allan, D., Swallow Ed. , G., and J. Drake Ed. , "Proactive
+              Connectivity Verification, Continuity Check, and Remote
+              Defect Indication for the MPLS Transport Profile", RFC
+              6428, November 2011.
+
+Authors' Addresses
+
+   Marc Binderberger
+   Cisco Systems
+
+   Email: mbinderb@cisco.com
+
+
+   Nobo Akiya
+   Cisco Systems
+
+   Email: nobo@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Binderberger & Akiya   Expires November 08, 2013                [Page 9]
