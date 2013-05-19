@@ -1,0 +1,697 @@
+<?xml version="1.0" encoding="US-ASCII"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" [
+<!ENTITY RFC2119 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.2119.xml">
+<!ENTITY RFC2246 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.2246.xml">
+<!ENTITY RFC3207 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.3207.xml">
+<!ENTITY RFC3546 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.3546.xml">
+<!ENTITY RFC4033 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.4033.xml">
+<!ENTITY RFC4034 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.4034.xml">
+<!ENTITY RFC4035 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.4035.xml">
+<!ENTITY RFC4346 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.4346.xml">
+<!ENTITY RFC5246 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.5246.xml">
+<!ENTITY RFC5280 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.5280.xml">
+<!ENTITY RFC5321 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.5321.xml">
+<!ENTITY RFC6125 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.6125.xml">
+<!ENTITY RFC6186 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.6186.xml">
+<!ENTITY RFC6394 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.6394.xml">
+<!ENTITY RFC6409 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.6409.xml">
+<!ENTITY RFC6698 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.6698.xml">
+<!ENTITY I-D.ietf-dane-srv SYSTEM "http://xml.resource.org/public/rfc/bibxml3/reference.I-D.ietf-dane-srv.xml">
+<!ENTITY I-D.ietf-dane-smtp SYSTEM "http://xml.resource.org/public/rfc/bibxml3/reference.I-D.ietf-dane-smtp.xml">
+]>
+
+<!-- rfc xmlns:x="http://purl.org/net/xml2rfc/ext" category="exp" -->
+<rfc category="exp" docName="draft-dukhovni-smtp-opportunistic-tls-00" ipr="trust200902">
+
+<?xml-stylesheet type="text/xsl" href="rfc2629.xslt" ?>
+
+<?rfc strict="yes" ?>
+<?rfc toc="yes"?>
+<?rfc tocdepth="2"?>
+<?rfc symrefs="yes"?>
+<?rfc sortrefs="yes" ?>
+<?rfc compact="yes" ?>
+<?rfc subcompact="no" ?>
+
+<front>
+<title>SMTP security via opportunistic DANE TLS</title>
+<author fullname="Viktor Dukhovni" initials="V." surname="Dukhovni">
+<organization>Unaffiliated</organization>
+<address>
+<email>ietf-dane@dukhovni.org</email>
+</address>
+</author>
+<date year="2013" />
+<area>sec</area>
+<workgroup>DANE</workgroup>
+<keyword>DANE</keyword>
+<keyword>TLSA</keyword>
+<keyword>SMTP</keyword>
+
+<abstract> <t>
+This memo describes an experimental protocol for opportunistic TLS
+security based on the DANE TLSA PKI.  The design goal is an incremental
+transition of the Internet email backbone (MTA to MTA SMTP traffic)
+from today's unauthenticated and typically unencrypted connections
+to TLS encrypted and authenticated delivery when the client is DANE
+TLSA aware and the server domain publishes DANE TLSA records for
+its MX hosts.  This protocol has been implemented by author in the
+Postfix MTA.  It is hoped that other MTA implementations will find
+this protocol well suited to their needs and will adopt interoperable
+implementations.  This protocol may be suited to other use-cases
+for opportunistic TLS beyond SMTP, but such use-cases are not covered
+here, and will need to be defined in separate specifications.
+</t> </abstract>
+
+</front>
+
+<middle>
+<section title="Introduction">
+
+<section title="Background">
+<t>
+The Domain Name System Security Extensions (DNSSEC) add data origin
+authentication and data integrity to the Domain Name System.  DNSSEC
+is defined in <xref target="RFC4033"/>, <xref target="RFC4034"/> and
+<xref target="RFC4035"/>.
+</t>
+
+<t>
+As described in the introduction of <xref target="RFC6698"/> TLS
+authentication via the existing public CA PKI suffers from an
+over-abundance of trusted certificate authorities capable of issuing
+certificates for any domain of their choice.  DNS-Based Authentication
+of Named Entities (DANE) leverages the DNSSEC infrastructure to
+publish trusted keys and certificates for use with TLS via a new
+TLSA record type.  DNSSEC validated DANE TLSA records
+yield a new PKI designed to augment or replace the trust model of
+the existing public CA PKI.
+</t>
+
+<t>
+In the context of this memo channel security is assumed to be
+provided by TLS.  The Transport Layer Security (TLS) protocol
+provides communications privacy over the Internet.  Used without
+authentication, TLS provides protection only against eavesdropping.
+With authentication, TLS also provides protection against
+man-in-the-middle (MITM) attacks.  Since the publication of the TLS
+1.0 specification in <xref target="RFC2246"/>, two updates to the
+protocol have been published: TLS 1.1 <xref target="RFC4346"/> and
+TLS 1.2 <xref target="RFC5246"/>.
+</t>
+
+</section><!-- Background -->
+
+<section title="SMTP Channel Security">
+
+<t>
+With SMTP neither the recipient address, nor the MX records directly
+imply or preclude delivery via TLS.  The same SMTP TCP endpoint can
+serve both TLS and non-TLS clients, with TLS negotiated via the
+SMTP STARTTLS command (<xref target="RFC3207"/>).
+</t>
+
+<t>
+An MTA may need to forward a message to a particular email recipient
+&lt;user@example.com&gt;.  To deliver the message the MTA needs to
+retrieve the MX hosts of example.com from DNS, and then deliver the
+message to one of these.  Absent DNSSEC the MX lookup is vulnerable
+to man-in-the-middle and cache poisoning attacks.  As a result,
+securing delivery by verifying the authenticity of the MX host is
+futile as the attacker can simply forge DNS replies.
+</t>
+
+<t>
+One might try to harden STARTTLS with SMTP against DNS attacks by
+requiring each MX host to posess an X.509 certificate for the
+recipient domain which is obtained from the message envelope and
+is not subject to DNS reply forgery.  Unfortunately, this is
+impractical as email for many domains is handled by third parties,
+which are not in a position to obtain certificates for all the
+domains they serve.  Deployment of SNI (see <xref target="RFC3546"/>
+Section 3.1) is no panacea, since the key management
+is too difficult unless the email service provider is also the
+domain's registrar and its certificate issuer; this is rarely the
+case for email.
+</t>
+
+<t>
+A man-in-the-middle can also suppress the MX host's STARTTLS EHLO
+response.  Unless the sending MTA is statically configured to use
+TLS for mail sent to example.com, the message will be sent in the
+clear.  Sender-side configuration of peer-domains for which TLS
+must be used, can protect an organization and a few of its business
+partners, but is not a viable approach to securing the Internet
+email backbone.
+</t>
+
+<t>
+Since with the existing public CA PKI neither the recipient domain,
+nor the MX hostname are suitable SMTP server authentication identities,
+large scale deployment of authenticated TLS based on this PKI is
+not possible in the context of MTA to MTA SMTP.  SMTP secure channels
+authenticated via the public CA PKI are used by a handful of domains
+that make bilateral arrangements with their business partners.  At
+this time, MTA to MTA traffic between Internet connected organizations
+typically does not use TLS at all, or uses TLS opportunistically
+without authentication, for protection only against passive
+eavesdropping.
+</t>
+
+<t>
+Note, the above is does not apply to submission <xref target="RFC6409"/>,
+where a mail user agent is pre-configured to send all email to a
+fixed submission server.  Submission servers typically offer TLS
+and the MUA can be statically configured to use TLS with its
+submission server of choice.  The situation changes with (as yet
+not widely deployed) submission configured dynamically via SRV
+records (see <xref target="RFC6186"/> Section 6).  We'll
+discuss applications to submission via SRV records later in this
+memo.
+</t>
+
+<t>
+With no incentive to use the existing public CA PKI, MX hosts that
+support STARTTLS often use self-signed or private-CA issued X.509
+certificates, are not configured with a comprehensive list of trusted
+CAs and do not check CRLs or implement OCSP.  In essence they don't
+and can't use the existing public CA PKI.  This is not simply a
+result of complacency on the part SMTP server administrators and
+MTA developers.  Nor is it just a result of the relative maturity
+of the SMTP infrastructure (as compared to the then young HTTP)
+when TLS was introduced.  Rather, as we've explained, the use of
+DNS MX records in SMTP limits the use of public CA PKI with SMTP
+to a small set of sender-configured peer domains.
+</t>
+
+<t>
+This does not mean that the Internet email backbone cannot benefit
+from TLS.  The fact that transport security is not explicitly
+specified in either the recipient address or the MX record means
+that new protocols can furnish out-of-band information to SMTP,
+making it possible to discover both which peer domains support
+secure delivery via TLS and simultaneously how to verify the
+authenticity of the associated MX hosts.  The first such mechanism
+that can work an Internet scale is DANE TLSA, but use of DANE TLSA
+with MTA to MTA SMTP must be cognizant of the lack of any realistic
+role for the existing public CA PKI.
+</t>
+
+</section><!-- SMTP Channel Security -->
+
+<section title="Terminology">
+
+<t>
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in
+this document are to be interpreted as described in <xref target="RFC2119"/>.
+</t>
+
+</section><!-- Terminology -->
+
+</section><!-- Introduction -->
+
+<section title="Opportunistic TLS discovery">
+
+<t>
+This section describes opportunistic TLS security, where traffic
+from DANE TLSA aware SMTP clients to domains that implement DANE
+TLSA records in accordance with this memo is secure, while traffic
+to other domains continues to be sent in the same manner as before.
+It is hoped that over time more domains will implement DNSSEC and
+publish DANE TLSA records for their MX hosts.  This will enable an
+incremental transition of the email backbobe to authenticated TLS
+delivery.
+</t>
+
+<t>
+Since email addresses and MX hostnames (or submission SRV records)
+neither signal nor deny support for TLS by the receiving domain,
+it is possible to use DANE TLSA records to securely signal TLS
+support and simultaneously to provide the means by which SMTP clients
+can successfully authenticate legitimate SMTP servers.
+</t>
+
+<t>
+The following requirements suffice to enable secure opportunistic TLS:
+</t>
+
+<t>
+<list style="symbols">
+
+<t>
+When in addition to the TLSA query made by the SMTP client, each
+DNSSEC lookup, (e.g.  MX, SRV or CNAME) used to obtain the TLSA
+base domain is DNSSEC validated, and at least one TLSA record is
+found (even if not usable) the client SHOULD assume the server to
+be TLS capable.
+</t>
+
+<t>
+When at least one usable TLSA record is found, the client SHOULD
+use TLSA records to authenticate the server, in which case the
+client MUST send the TLS SNI extension containing the TLSA base
+domain to elicit the correct certificate chain from the server.
+The client MUST NOT expect the server to confirm the extension.
+</t>
+
+<t>
+SMTP servers for which DANE TLSA records are published MUST support
+TLS 1.0 or later with any client authorized to use the service.
+</t>
+
+<t>
+Each SMTP server MUST present a certificate trust chain (see <xref
+target="RFC2246"/> Section 7.4.2) that matches at least
+one of the TLSA records.  The server MAY rely on SNI to determine
+which certificate chain to present to the client.  Clients that
+don't send SNI information may not see the expected certificate
+chain.
+</t>
+
+<t>
+If the server's TLSA RRset includes records with a matching type
+other than "0" (that is digest records), the SHA-256 digest of any
+object SHOULD be provided along with any other digest published,
+since clients may not support SHA-512.
+</t>
+
+<t>
+If the server's TLSA records match the server's default certificate
+chain, the server need not support SNI, and is need not acknowledge
+the extension, simply returning a matching certificate chain is
+sufficient.  Servers MUST NOT enforce the use of SNI by clients,
+if the client sends no SNI extension, or sends an SNI extension for
+an unsupported domain the server MUST simply use its default
+certificate chain.  The client may be using unauthenticated
+opportunistic TLS and may not expect any particular certificate
+from the server.
+</t>
+
+<t>
+The client may even even offer to use anonymous TLS ciphersuites
+and servers SHOULD support these, no security is gained by forcing
+the use of a certificate the client will ignore.  Indeed support
+for anonymous ciphersuites in the server makes audit trails more
+useful if the chosen ciphersuite is logged, as this will in many
+cases record which clients did not care to authenticate the server.
+(The Postfix SMTP server supports anonymous TLS ciphersuites by
+default, and the Postfix SMTP client offers these at its highest
+preference when server authentication is not applicable).
+</t>
+
+</list>
+</t>
+
+<t>
+With other protocols where TLS is negotiated separately from the
+associated PKI (existing public CA vs. DANE), servers need to be
+compatible with two different PKI systems mechanisms and clients
+need to be prepared for servers that may not fully support the PKI
+they intend to use.  In the protocol defined in this memo both the
+TLS support implied by the presence of DANE TLSA records and the
+verification parameters necessary to authenticate the TLS peer are
+obtained together, therefore authentication via this protocol is
+expected to be robust.
+</t>
+
+<t>
+When a server is assumed to support TLS, but all TLSA records are
+unusable, the client SHOULD either establish an unauthenticated TLS
+session or use any other sufficiently robust authentication mechanism
+at its disposal (possibly the existing public CA PKI).  A DANE-aware
+client SHOULD NOT make unecrypted connections to such a server.
+</t>
+
+<t>
+When usable TLSA records are available, a client SHOULD NOT make
+use of a server connection that fails to match at least one TLSA
+record.
+</t>
+
+<t>
+We say SHOULD not MUST in the case of the client, since clients may
+incrementally deploy opportunistic DANE TLS only for selected peer
+domains.  At times clients may need to disable opportunistic DANE
+TLS for peers that fail to interoperate due to misconfiguration or
+software defects on either end.  For opportunistc DANE TLS to be a
+robust protocol, servers MUST live up to their promises, but it is
+not possible to compel clients to use a security policy chosen by
+the server.  We assume instead that given a robust security protocol,
+clients will over time choose to adopt it.
+</t>
+
+</section><!-- Opportunistic TLS discovery -->
+
+<section title="Locating TLSA records">
+
+<t>
+The party responsible for creating TLSA records for a given service
+MUST ensure that at least one of these TLSA records will match
+either the server's default certificate chain if SNI is not employed
+on the server, or the server's certificate chain when the client
+signals the base domain of the TLSA RRset via SNI and a name type
+of "host_name" (<xref target="RFC3546"/> Section 3.1).
+</t>
+
+<t>
+When, for example, the TLSA RRset is published at _25._tcp.mx1.example.com
+the base domain is mx1.example.com.  At least one of the TLSA records
+in the RRset MUST match the server certificate chain, provided the
+SMTP client's TLS hanshake included the SNI extension with a domain
+of mx1.example.com.
+</t>
+
+<t>
+Since the server's ability to respond with the right certificate
+chain may be predicated on the TLS client providing the correct SNI
+information, DANE PKI aware clients SHOULD send the SNI extension
+with a host_name value of the base domain of the TLSA RRset (otherwise
+they risk failure to authenticate the server).  Since SNI is not
+available with SSLv2 or SSLv3, the server MUST support at least TLS
+1.0; ensuring this is the case is the responsibility of the creator
+of the TLSA records.
+</t>
+
+<t>
+Complications arise when TLSA records for a service are created by
+someone other than the server operator.  In this situation the
+server operator and TLSA record creator must cooperate to ensure
+that TLSA records don't fall out of step with the server certificate
+configuration.
+</t>
+
+<t>
+When the server operator is a hosting provider, the customer's MX
+records should contain the primary hostnames of the provider's SMTP
+servers.  This way, any associated TLSA records will be found in
+the hosting provider's DNSSEC zone, thus avoiding the complexity
+of bilateral coordination of server certificate configuration and
+TLSA record management.  If the customer's DNS zone is signed, the
+provider hostnames in customer domain's MX records can be securely
+used as the base names for locating TLSA records managed by the
+hosting provider.
+</t>
+
+<t>
+Redirection of SMTP service from one domain to another is usually
+accomplished via MX records (or perhaps SRV records in the case of
+submission).  Alternatively, the domain part of an email address
+may be a CNAME (see <xref target="RFC5321"/> Section 2.3.5).
+CNAMEs are a more blunt instrument for this purpose, since unlike
+MX or SRV records they remap the origin host to the target host for
+all protocols.  Also Unlike MX or SRV records CNAME records may
+chain (though clients will generally impose implementation dependent
+maximum nesting depths).
+</t>
+
+<t>
+Though CNAMEs are illegal on the right hand side of MX and SRV
+records, they are supported by some SMTP software.  If the MX or
+SRV host is a CNAME alias from a customer's domain to a server in
+the provider's domain, the client SHOULD follow the CNAME and SHOULD
+use the target hostname as the base domain for TLSA records as well
+as the host_name in SNI.
+</t>
+
+<t>
+When CNAMEs are employed the sensible place to seek DANE TLSA records
+is in the providers domain, as that is the party that best knows
+which certificates are deployed on the server.  Therefore, clients
+implementing opportunistic DANE TLS connecting to a server whose
+DNS name is a CNAME alias SHOULD follow the CNAME hop-by-hop to its
+ultimate target host (noting at each step whether the CNAME is
+DNSSEC validated) and use the resulting target host as the base
+domain for TLSA lookups.
+</t>
+
+<t>
+If CNAMEs were not followed, to support DANE validation the origin
+domain would have to publish TLSA records that match the server
+certificate chain.  Since the origin domain may not be operationally
+responsible for the server this imposes complex operational burdens
+on the provider and customer even with SNI.
+</t>
+
+<t>
+Accordingly, TLSA records SHOULD NOT be published for a base domain
+that is a CNAME.  Such TLSA records are not operationally robust,
+and MUST NOT be used by opportunistic DANE TLS clients.
+</t>
+
+</section><!-- Locating TLSA records -->
+
+<section title="PKIX certificate usages">
+
+<t>
+Since opportunistic DANE TLS will be used by non-interactive SMTP
+agents, with no user to "press OK" when authentication fails,
+protocol robustness is paramount.  The most robust choice of TLSA
+record type for opportunistic DANE TLS is "3 1 1", that is a record
+which specifies a SHA-256 digest of the server's public key.  This
+involves no CA signature checks, and no server name checks, and
+does not require SNI when the TLSA record matches the server's
+default certificate.  It uses the required to support SHA-256 digest,
+and works across certificate renewals with the same key.  TLSA
+records for SMTP servers SHOULD be "3 1 1" records.
+</t>
+
+<t>
+As noted in the introduction, the existing public CA PKI is not
+viable for the Internet email backbone.  TLSA records for MX hosts
+or submission servers that are to be found via SRV records SHOULD
+NOT include certificate usage "0" or "1", as clients cannot be
+expected to perform <xref target="RFC5280"/> PKIX validation or
+<xref target="RFC6125"/> identity verification.
+</t>
+
+<t>
+Clients employing opportunistic DANE TLS MAY choose to treat any
+TLSA records with certificate usage "0" as unusable.  They may then
+choose to connect via unauthenticated mandatory TLS if no alternative
+authentication mechanisms are available.
+</t>
+
+<t>
+If despite this recommendation servers for non-PKIX protocols
+do publish TLSA records with certificate usage "0" or "1", clients
+SHOULD make use of these to the fullest extent possible.
+</t>
+
+<section title="Certificate usage 1">
+
+<t>
+SMTP clients that implement this specification SHOULD ignore the
+PKIX validation requirement with certificate usage "1", and
+authenticate the server per the content of the TLSA record alone.
+Since some servers may rely on SNI to select the correct certificate,
+the client SHOULD use the SNI extension to signal the base domain
+of the TLSA RRset.
+</t>
+
+</section><!-- Certificate usage 1 -->
+
+<section title="Certificate usage 0">
+
+<t>
+With certificate usage "0" the usability of the TLSA records depends
+on its matching type.
+</t>
+
+<t>
+If the matching type is "0" the TLSA record contains the full
+certificate or full public key of the trusted certificate authority.
+In this case the client has all the information it needs to match
+the server trust-chain to the TLSA record.  The client SHOULD in
+this case ignore the PKIX validation requirement, and authenticate
+the server via its DANE TLSA records alone (sending SNI with the
+base domain as usual).
+</t>
+
+<t>
+If the matching type is not "0", the TLSA record contains only a digest of
+the trust certificate authority certificate or public key.  The full
+certificate may not be included in the server's certificate chain and the
+client may not be able to match the server trust chain against the TLSA
+record.  SMTP clients that implement this specification SHOULD generally
+treat such TLSA records as unusable, but MAY be explicitly configured to
+support them when it is believed that the client posesses a sufficiently
+complete set of trusted public CA certificates.  This is most likely with
+an MUA which only needs enough CA certificates to authenticate its chosen
+submission service.
+</t>
+
+</section><!-- Certificate usage 0 -->
+
+</section><!-- PKIX certificate usages -->
+
+<section title="Opportunistic TLS for Submission">
+
+<t>
+Prior to <xref target="RFC6409"/> the SMTP submission protocol was
+poster child for PKIX TLS.  The MUA typically connects to one or
+sometimes a few submission servers explicitly configured by the
+user.  There is no indirection via insecure MX records, and unlike
+the web brower no need to authenticate a large set of TLS servers.
+Once TLS is enabled for the desired submission server or servers,
+provided the server certificate is correctly maintained, the MUA
+is able to reliably use TLS to authenticate the submission server.
+</t>
+
+<t>
+<xref target="RFC6409"/> aims to simplify the configuration of the MUA
+submission service by dynamically deriving the submission service from
+the user's email address.  This is done via SRV records, but at the cost
+of introducing the same TLS security problems faced by MTA to MTA SMTP.
+Prompting the user when the SRV record domain is different from the email
+domain is not a robust solution.
+</t>
+
+<t>
+The protocol proposed in this memo can be used to opportunistically secure
+the submission service association.  If the email domain is DNSSEC signed,
+the SRV records are "secure" and the SRV host publishes secure TLSA records
+for submission, the MUA can safely auto-configure to authenticate the
+submission server via DANE.  When DANE TLSA records are not available, the
+client SHOULD fall back to legacy behavior.
+</t>
+
+</section><!-- Opportunistic TLS for Submission -->
+
+<section title="Hardening opportunistic DANE TLS">
+
+<t>
+An MTA implementing this protocol for sending email to the internet
+at large may need a greater security assurance when sending email
+to selected destinations to which the sending organization sends
+sensitive email and may have regulatory obligations to protect its
+content.  This protocol is not in conflict with this requirement,
+in fact it can often simplify authenticated delivery to such
+destinations.
+</t>
+
+<t>
+Specifically, with domains that publish DANE TLSA records for their MX hosts
+a sending MTA can be configured to use the receiving domains's DANE TLSA
+records to authenticate the corresponding MX hosts, thereby obviating a
+complex manual provisioning process.  In anticipation of or in response to
+failure to obtain the expected TLSA records the sending system's
+administrator may choose from a menu of fallback options if supported by the
+sending MTA:
+</t>
+
+<t>
+<list style="symbols">
+
+<t>
+Defer mail if no usable TLSA records are found.  This is useful when the
+destination is known to publish TLSA records, and lack of TLSA records is
+most likely a transient misconfiguration.
+</t>
+
+<t>
+Authenticate the peer via a manually configured certificate digest.  The
+digest may be a saved copy from a previous successful TLSA lookup, or may be
+obtained after a problem is detected and confirmed to be valid by some
+out-of-band mechanism.
+</t>
+
+<t>
+Authenticate the peer via the existing public CA PKI, if the peer server has
+usable CA issued certificates.  In many cases the sending MTA will need
+custom certificate name matching rules to match the destination's gateways.
+</t>
+
+<t>
+Send via unauthenticated mandatory TLS.  If the requirement is merely to
+always encrypt, and the possibility of MITM attacks is less of a concern
+than timely email delivery.
+</t>
+
+</list>
+</t>
+
+<t>
+It should be noted that barring administrator intervention email
+SHOULD be deferred when DNSSEC lookups fail, (as distinct from
+"secure" non-existence of TLSA records, or secure evidence that the
+domain is no longer signed).  In addition to configuring fallback
+strategies when TLSA records are absed administrators may in some
+cases need to disable DNSSEC lookups for a destination to work
+around a DNSSEC outage.
+</t>
+
+</section><!-- Hardening opportunistic DANE TLS -->
+
+<section anchor="Acknowledgements" title="Acknowledgements">
+
+<t>
+Thanks to Tony Finch who finally prodded me into participating in
+DANE working group discussions. Thanks to Paul Hoffman who motivated
+me to produce this memo and provided feedback on early drafts.
+Thanks also to Wietse Venema who created Postfix, and patiently
+guided the Postfix DANE implementation to production quality.
+</t>
+
+</section><!-- Acknowledgements -->
+
+<section anchor="Security" title="Security Considerations">
+
+<t>
+This protocol leverages DANE TLSA records to implement MITM resistant
+opportunistic channel security for SMTP.  For destination domains
+that sign their MX records and publish signed TLSA records for their
+MX hosts this protocol allows sending MTAs (and perhaps dynamically
+configured MUAs) to securely discover both the availability of TLS
+and how to authenticate the destination.
+</t>
+
+<t>
+This protocol does not aim to secure all SMTP traffic, that will
+not be practical until DNSSEC and DANE adoption are universal
+(universal SMTP TLS security via the existing public CA PKI is even
+less realistic).  The fact that it can be deployed incrementally
+is a feature, not a bug.  This protocol coexists and interoperates
+with the existing insecure Internet email backbone, if the protocol
+proves successful, a growing portion of email traffic will be
+protected over time.
+</t>
+
+<t>
+The protocol does not preclude existing non-opportunistic SMTP TLS security
+arrangements, these can continue as before, or may be used as fallback
+strategies when this protocol fails to locate the desired security
+parameters.
+</t>
+
+</section><!-- Security Considerations -->
+
+</middle>
+
+<back>
+<references title="Normative References">
+&RFC2119;
+&RFC2246;
+&RFC3207;
+&RFC3546;
+&RFC4033;
+&RFC4034;
+&RFC4035;
+&RFC4346;
+&RFC5246;
+&RFC5280;
+&RFC5321;
+&RFC6125;
+&RFC6186;
+&RFC6409;
+&RFC6698;
+</references>
+<!--
+<references title="Informative References">
+&RFC6394;
+&I-D.ietf-dane-srv;
+&I-D.ietf-dane-smtp;
+</references>
+-->
+</back>
+</rfc>
