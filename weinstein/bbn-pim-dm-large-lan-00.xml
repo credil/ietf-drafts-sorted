@@ -1,0 +1,510 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rfc SYSTEM 'rfc2629.dtd' [
+<!ENTITY RFC2119 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.2119.xml">
+<!ENTITY RFC3973 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.3973.xml">
+<!ENTITY RFC6559 SYSTEM "http://xml.resource.org/public/rfc/bibxml/reference.RFC.6559.xml">
+]>
+<?xml-stylesheet type='text/xsl' href='rfc2629.xslt' ?>
+
+<?rfc toc='yes'?>
+<?rfc submissiontype="independent"?>
+<?rfc symrefs="yes"?>
+<?rfc sortrefs="yes" ?>
+<?rfc compact="yes" ?>
+<rfc category="exp" ipr="noDerivativesTrust200902" docName="draft-weinstein-bbn-pim-dm-large-lan-00">
+  <front>
+    <title>PIM-DM Optimizations for Large LANs</title>
+    <author initials="J." surname="Weinstein"  fullname="Joseph Weinstein">
+      <organization abbrev="BBN Technologies">Raytheon BBN Technologies</organization>
+      <address>
+	<postal>
+	  <street>10 Moulton Street</street>
+	  <city>Cambridge</city>
+	  <region>MA</region>
+	  <code>02138</code>
+	  <country>USA</country>
+	</postal>
+	<email>weinstein@bbn.com</email>
+      </address>
+    </author>
+    <author initials="J." surname="Keller"  fullname="Joseph Keller">
+      <organization abbrev="BBN Technologies">Raytheon BBN Technologies</organization>
+      <address>
+	<postal>
+	  <street>10 Moulton Street</street>
+	  <city>Cambridge</city>
+	  <region>MA</region>
+	  <code>02138</code>
+	  <country>USA</country>
+	</postal>
+	<email>jkeller@bbn.com</email>
+      </address>
+    </author>
+    <date month="June" year="2013" />
+    <area>Routing</area>
+    <workgroup>Independent Submission</workgroup>
+    <keyword>PIM-DM></keyword>
+    <keyword>PIM</keyword>
+    <keyword>R-PIM</keyword>
+    <keyword>scaling</keyword>
+    <keyword>multicast</keyword>
+    <keyword>wireless</keyword>
+    <keyword>radio</keyword>
+    <abstract>
+      <t>
+	Optimizations to the PIM-DM protocol <xref target="RFC3973" /> are proposed that
+	dramatically reduce the PIM-DM routing overhead on local area networks
+	containing large numbers of PIM routers. These optimizations reduce
+	the likelihood of two or more routers emitting redundant JOIN or PRUNE
+	messages onto the same LAN. While these optimizations are of general
+	applicability to large LANs, they were motivated in particular by
+	performance requirements for supporting PIM-DM across LANs emulated by
+	IP tunneling over large wireless MANETs.
+	</t><t>
+	PIM-DM routers supporting these optimizations will interoperate with
+	standard PIM-DM as defined in <xref target="RFC3973" format="none">RFC 3973</xref>, even on the same LAN. However,
+	to obtain maximum benefit from these optimizations, all PIM-DM routers
+	on the LAN SHOULD support them.
+      </t>
+    </abstract>
+  </front>
+
+  <middle>
+    <section title='Introduction'>
+      <t>
+	PIM-DM <xref target="RFC3973" /> is an IP multicast routing protocol optimized for situations where group members (receivers) are fairly densely distributed throughout the multicast distribution domain and there are not too many sources per group. It is based upon the reversed-shortest-path broadcast paradigm, in which multicast traffic from each source is distributed along a tree rooted at that source and consisting of the shortest paths from each potential destination in the multicast distribution domain back to that source. It optimizes this reversed-shortest-path broadcast tree by pruning unneeded branches that do not lead to any actual group members. Pruning of unneeded branches is accomplished through use of JOIN/PRUNE messages, sent by downstream routers towards the source in a direction opposite to that of data flow.   
+	</t><t>
+	When large numbers of PIM-DM routers are attached to a single LAN, PIM-DM as described in <xref target="RFC3973" format="none">RFC 3973</xref> becomes vulnerable to storms of redundant JOIN/PRUNE messages on the LAN. These storms can arise when more than one of the routers on the LAN lack downstream members for a particular (S,G) pair, and each sends a separate PRUNE message to the upstream router towards the source S. Each of these PRUNE messages may, in turn, trigger an overriding JOIN from one or more routers that do have downstream members for the (S,G) pair. Since IP multicast forwarding decisions are made on a per-interface basis, not a per-downstream-router basis, all except one of these PRUNE messages is unnecessary. Likewise, all except one of the overriding JOIN messages, if any, are redundant.
+	</t><t>
+	These excess JOIN/PRUNE messages are particularly problematic because they tend to be emitted in a synchronous burst by all downstream routers on the LAN when the first user data packet or STATE REFRESH message arrives, potentially causing a temporary overload on the LAN. Furthermore, these JOIN/PRUNE storms will repeat periodically if STATE REFRESH messages are lost or otherwise unavailable. Since a separate set of JOIN/PRUNE messages is used for each (source, group) pair, the load from these redundant JOIN/PRUNE messages scales approximately as the product [number_of_groups] * [number_of_sources ] * [number_of_routers_per_LAN] * [rate_of_prune_cycles]. As such, this load becomes the key constraint limiting the number of sources and groups that can be supported within a single PIM-DM multicast domain. 
+	</t><t>
+	The PIM-DM specification <xref target="RFC3973" /> includes a mechanism for avoiding redundant overriding JOINs, but it is sub-optimal when the number of PIM routers on a single LAN is large or propagation delays on the LAN are non-negligible. This mechanism is built into the upstream state machine <xref target="RFC3973" format="none">[RFC3973 Sec. 4.4.1]</xref> through the Override Timer. When a router in the Forwarding state or AckPending state overhears an upstream PRUNE that must be overridden, it sets this timer to a random value between 0 and Override_Interval. It then sends an overriding JOIN to the upstream router if and only if this timer expires before it overhears another overriding JOIN from some other router on the same interface to the same upstream router for the same (S,G) pair. We shall refer to this mechanism as redundant JOIN suppression.
+	</t><t>
+	As will be explained in <xref target="JOIN_suppression" /> of this document, the effectiveness of redundant JOIN suppression is extremely sensitive to the algorithm used to determine the setting for the Override Timer. <xref target="RFC3973" format="none">RFC 3973</xref> specifies that this timer is to be set to a random value between 0 and Override_Interval. It does not specify the probability distribution to use, but most implementations probably use a linear distribution. If the number of routers on the LAN is sufficiently large compared to the inverse propagation delay, large numbers of redundant messages may still be sent. The likelihood of this occurring can be greatly reduced by employing a deterministic algorithm for setting the Override_Timer that approximates an exponential probability distribution. <xref target="JOIN_suppression" /> of this document specifies this algorithm.
+	</t><t>
+	PIM-DM as specified in <xref target="RFC3973" format="none">RFC 3973</xref> does not, however, include any mechanism for avoiding redundant PRUNEs. <xref target="PRUNE_suppression" /> of this document describes a proposed mechanism, which is very similar to the strategy used for avoiding redundant JOINs. Instead of sending a PRUNE message upstream as soon as a router receives an incoming data packet from a LAN, the router may instead defer sending this PRUNE for a short period of time. The router then sends this PRUNE if, and only if, it does not overhear a PRUNE message from another router on the same LAN to the same upstream router for the same (S,G) pair before this timer expires. By using a deterministic algorithm for computing this delay, the delay before the first such router emits a PRUNE can be made effectively zero for the only case where the delay length impacts overall protocol performance -- those situation where there are no group members downstream of any router on the LAN. We shall refer to this proposed mechanism as redundant PRUNE suppression.
+	</t><t>
+	Although the mechanisms described in this document should be beneficial in any situation where there are a large number of PIM-DM routers on a single LAN, these optimizations were motivated by the need to support PIM-DM across LANs emulated by multicast-capable IP tunneling over wireless mobile ad-hoc networks (MANETs) <xref target="Weinstein_In_Progress_a" />. LANs emulated in this way are motivated by the desire to hide most mobility-related wireless network topology changes from IP by handling such changes through a custom MANET routing protocol at a lower layer. As the effectiveness of mobility hiding is dependent upon including all mobile routers in the theater of operation within a single emulated LAN, the number of PIM-DM routers on such a LAN can become quite large. At the same time, the capacity of such networks can be very limited, so that minimizing the overhead from PIM-DM can be crucially important. Finally, the propagation delays for traffic across such a network may be significantly larger than those typical of high-capacity wired LANs, reducing the efficacy of the redundant JOIN suppression mechanisms specified by <xref target="RFC3973" format="none">RFC 3973</xref>. A separate document will deal with adaptations to PIM-DM necessitated by the multi-layer routing structure itself <xref target="Weinstein_In_Progress_b" />.
+	</t>
+    </section>
+    <section  title="Conventions used in this document">
+      <t>
+	This document describes optimizations to PIM-DM with reference to its current specification in <xref target="RFC3973" format="none">RFC 3973</xref>. The terminology of that reference is adopted in its entirety. Concepts and terms not defined herein should be understood as having the meaning specified in <xref target="RFC3973" format="none">RFC 3973</xref>. Algorithms and protocol elements not discussed herein should be understood to be identical to those specified in <xref target="RFC3973" />.
+	</t><t>
+	The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in <xref target="RFC2119" format="none">RFC2119</xref>.
+	</t><t>
+	In this document, these words will appear with that interpretation   only when in ALL CAPS. Lower case uses of these words are not to be    interpreted as carrying <xref target="RFC2119" format="none">RFC2119</xref> significance.
+      </t>
+    </section>
+    <section title="Optimized Redundant JOIN suppression" anchor="JOIN_suppression">
+      <section title="Motivation">
+	<t>
+	  If a PIM-DM router with a non-null outgoing interface list (e.g., possible downstream members) for some (S,G) pair overhears a PRUNE on its incoming interface from some other router for the same (S,G) pair, then it must cancel that PRUNE by sending an overriding (S,G) JOIN to the upstream router U towards S. If there is more than one PIM-DM router with a non-null outgoing interface list for (S,G) with its incoming interface on the same network, more than one such router may send an overriding (S,G) JOIN to the upstream router U. All except the first of these is unnecessary, as the receipt of even one overriding JOIN is sufficient to prevent the upstream router from pruning its outgoing interface onto the LAN.
+	  </t><t>
+	  The PIM-DM specification includes a mechanism for avoiding redundant overriding JOINs, but it is sub-optimal when the number of PIM routers on a single LAN is large and propagation delays on the LAN are non-trivial. This mechanism is built into the upstream state machine <xref target="RFC3973" format="none">[RFC3973 Sec. 4.4.1]</xref> through the Override Timer. When a router in the Forwarding state or AckPending state overhears an upstream PRUNE that must be overridden, it sets this timer to a random value between 0 and Override_Interval. It then sends an overriding JOIN to the upstream router if and only if this timer expires before it overhears another overriding JOIN from some other router on the same interface to the same upstream router for the same (S,G) pair. <xref target="RFC3973" format="none">RFC 3973</xref> does not specify the probability distribution to use when setting the Override Timer for redundant JOIN suppression, although most implementations probably use a linear distribution. 
+	  </t><t>
+	  If the number of routers on the LAN is sufficiently large compared to the inverse propagation delay, redundant messages may still be sent. The likelihood of this occurring can be greatly reduced by employing a deterministic algorithm for setting the Override_Timer that approximates an exponential distribution. 
+	  </t><t>
+	  It is not difficult to estimate the expected number of redundant JOIN messages for any given algorithm from the propagation delay, the number of routers N on the LAN, and the number of routers on the LAN with downstream group members. The worst case occurs when only one router lacks downstream members for some source and group, and hence sends a PRUNE message upstream. In this case, N-2 other routers will overhear this PRUNE and schedule possible origination of an overriding JOIN message. As PIM-DM is optimized for use in situations where group members are densely distributed throughout the multicast distribution domain, this worst-case scenario and/or near-worst-case scenarios will be common.
+	  </t><t>
+	  Using a linear probability distribution for the Override Timer as implied by <xref target="RFC3973" format="none">RFC 3973</xref>, the expected delay before the first overriding JOIN is sent by some router will be given by Override_Interval/(N-2). However, it will typically take Propagation_Delay seconds for other routers to overhear this overriding JOIN. In the meantime, (N-3) * Propagation_Delay / Override_Interval other routers can be expected to emit overriding JOINs of their own. If the Propagation Delay is non-trivial, the number of overriding JOINs sent will increase linearly with the number N of routers on the LAN, and can be quite large if the number of routers N on the LAN is also large.
+	  </t><t>
+	  The number of redundant JOINs can be dramatically reduced by employing a deterministic algorithm for picking the delay, which mimics an exponential probability distribution. We begin by considering an arbitrary index function J that assigns to each router on the LAN (except the upstream router towards the source S) a unique integer in the closed interval [0,N-2], where N is the total number of PIM routers on the LAN (including the current router). Such a function can be constructed, for example, by having each router count the number of other routers (other than the upstream router) with higher-addressed interfaces on the LAN, and using that count as the value of J. Then, when the Override Timer is to be set, consider setting it to the value
+	  <list><t>
+	  Override_timer = Override_interval*ln(1+J)/ln(N-1)
+	  </t></list>
+	  With this choice, the number of other routers that will also send a JOIN during the interval of length propagation_delay before they overhear this JOIN will be given by  exp((ln(N)/Override_Interval)*propagation_delay)) - 1 = N ** (propagation_delay/override_interval). For propagation_delay &lt; override_interval, as it must be for redundant JOIN suppression to work, this grows less rapidly than N and hence results in a much smaller number of redundant JOIN messages when N is large. This formula also guarantees that the Override Timer will never be set to a value greater than Override_interval, thus ensuring that an overriding JOIN is received by the upstream router before the upstream router prunes its outgoing interface.
+	</t>
+      </section>
+      <section title="Modifications to PIM-DM Timers [RFC 3973 Sec. 4.8]">
+	<t>
+	  In order to implement the optimizations to redundant JOIN suppression describe above, the subsection of <xref target="RFC3973"  format="none">RFC 3973 Sec. 4.8</xref> entitled "Timer Name: Upstream Override Timer (OT(S,G))" is modified to read as follows:
+	  <list>
+	    <t>
+	      <figure>
+		<preamble>
+		  Timer Name: Upstream Override Timer (OT(S,G))
+		</preamble>
+		<artwork>
++------------+----------------+----------------------------------------+
+| Value Name | Value          | Explanation                            |
++------------+----------------+----------------------------------------|
+| t_override | OI(I)*         | Randomized delay to prevent response   |
+|            |  ln(1+J)/      | implosion when sending a join message  |
+|            |  ln(N-1)       | to override someone else's prune       |
++------------+----------------+----------------------------------------+
+		</artwork>
+	      </figure>
+	      </t><t>
+	      t_override is a value between 0 and the incoming interface's Override_Interval (OI(I)) computed from the formula t_override = OI(I)*ln(1+J)/ln(N-1), where N is the total number of PIM routers on incoming interface I (including this router), and J is a count of the number of PIM routers on incoming interface I (other than the upstream router towards source S) with addresses greater than the address of this router. If all routers on a LAN are using the LAN Prune Delay option, the Override_Interval (OI(I)) MUST be set to the largest value on the LAN.  Otherwise, the Override_Interval (OI(I)) MUST be set to 2.5 seconds.
+	      </t><t>
+	      Note that, if N &le; 2, no router will ever need to send a join message to override someone else's prune, and so neither an attempt to take the logarithm of a negative number nor an attempt to divide by zero can ever occur in this computation.
+	    </t>
+	  </list>
+	</t>
+      </section>
+      <section title="Other modifications">
+	<t>
+	  No other sections of <xref target="RFC3973" format="none">RFC 3973</xref> need to be modified to support optimized redundant JOIN suppression.
+	</t>
+      </section>
+    </section>
+    <section title="Redundant PRUNE suppression" anchor="PRUNE_suppression">
+      <section title="Motivation">
+	<t>
+	  When a PIM-DM router with a null outgoing interface list for a source S and group G receives a data packet for that source and group from the upstream interface towards that source, and its Prune Limit timer is not running, then it sends a PRUNE for that source and group to the upstream router towards that source <xref target="RFC3973" format="none">[RFC3973 Sec. 4.4.1]</xref>. Similarly, if a PIM-DM router receives a STATE REFRESH message for a source S and group G from the upstream router towards that source, the Prune Indicator bit in that STATE REFRESH message is clear, the upstream interface is in the Pruned state, and its Prune Limit timer is not running, then the router sends a PRUNE for that source and group to the upstream router towards that source <xref target="RFC3973" format="none">[RFC3973 Sec. 4.4.1]</xref>.
+	  </t><t>
+	  Unfortunately, this behavior can lead to multiple redundant PRUNE messages being sent if there is more than one router on a LAN with a null outgoing interface list for the (S,G) pair. Each of these routers will send its own PRUNE to the upstream router towards S. All except the first of these, is unnecessary. Even worse, each of these PRUNEs can trigger a storm of overriding JOIN messages.
+	  </t><t>
+	  These unnecessary PRUNEs can be avoided by employing a strategy similar to that which is employed for avoiding redundant JOINs. Instead of sending a PRUNE message upstream as soon as it receives an incoming data packet from a LAN as specified in <xref target="RFC3973" format="none">RFC 3973</xref>, the router may instead defer sending this PRUNE for a short period of time. The router then sends this PRUNE if, and only if, it does not overhear a PRUNE message from another router on the same LAN to the same upstream router for the same (S,G) pair before this timer expires. 
+	  </t><t>
+	  However, in the case where no downstream router has any downstream group members, it is absolutely essential that the time delay before emission of the first PRUNE by some downstream router be kept to an absolute minimum. Until that PRUNE is received by the upstream router, unnecessary user traffic will continue to be admitted to the LAN and, possibly, upstream networks as well, consuming unnecessary resources. Forutunately, this time delay is relevant only if no downstream router has any downstream members. Otherwise the PRUNE will be overridden anyway by a JOIN from one of the downstream routers with downstream members, and data will continue to flow.
+	  </t><t>
+	  By using a deterministic algorithm for computing this delay, the delay before some router sends the first PRUNE can, as required, be kept to zero for the situation where there are no group members downstream of any router on the LAN. This cannot be guaranteed by any probabilistic algorithm.	  </t><t>
+	  Since a deterministic algorithm is required, we consider again the algorithm described in sec. 3.1.  above, restated as:
+	  </t><t>
+	  Prune_deferral_timer = Prune_deferral_interval*ln(1+J)/ln(N-1)
+	  </t><t>
+	  As before, J is an index function that assigns to each router on the LAN (except the upstream router towards the source S) a unique integer in the interval [0,N-2], where N is the total number of PIM routers on the LAN. Such a function can be constructed, for example, by having each router count the number of other routers (other than the upstream router) with higher-addressed interfaces on the LAN, and using that count as the value of J.
+	  </t><t>
+	  Due to its deterministic character and the definition of the index function J, this algorithm guarantees that there will always be some router on the LAN for which J=0, so that Prune_deferral_timer is also zero. Consequently, when every router (other than the upstream router) lacks downstream group members, this algorithm guarantees that some router will as required emit a PRUNE with zero delay.
+	  </t><t>
+	  Since the time delay before some router emits a first PRUNE is irrelevant if one or more downstream routers have downstream group members, the value of Prune_deferral_interval can safely be made fairly large, thus minimizing the risk that redundant PRUNEs will be sent. In fact, if there were no concern for the possibility that PRUNEs might be lost, there would be no need for any router other than the highest-addressed router to ever send a PRUNE. If it had failed to send a PRUNE, then it could be concluded that it had downstream group members, and hence would itself generate an overriding JOIN if some other router then sent a PRUNE. Using an algorithm that provides for other routers to send PRUNEs adds a measure of redundancy, that helps protect against the possibility that a PRUNE from the highest-addressed router might simply be lost.
+	  </t><t>
+	  The order in which a router sees an incoming (S,G) data packet, a PRUNE emitted by some other router in response to that packet, and
+	  an overriding JOIN from a third router, may vary depending upon propagation delays in the network. In particular, one must also address
+	  the situation wherein a router sees an overriding JOIN from another before it sees either the PRUNE that triggered that overriding JOIN
+	  or the data packet that triggered the PRUNE. This can be handled through judicious use of the Prune Limit Timer.
+	  </t><t>
+	  Hence, to avoid unnecessary PRUNEs without increasing the time delay before pruning can occur, the operation of the Upstream Prune, Join, and Graft State Machine <xref target="RFC3973"  format="none">[RFC3973 sec. 4.4.1]</xref> SHOULD be modified as described in this section.
+	</t>
+      </section>
+      <section title="Modifications to the state-machine-specific timers [RFC3973 Sec. 4.4.1]">
+	<t>
+	  In the description of the state-machine-specific timers <xref target="RFC3973" format="none">[RFC3973 sec. 4.4.1]</xref>, the following timer is added:
+	  <list>
+	    <t>
+	      Prune Deferral Timer (PDT(S,G))
+	      <list>
+		<t>
+		  This timer is used to support redundant PRUNE suppression on a LAN. If a data packet arrives on the upstream interface towards S (RPF_Interface(S)) while the outgoing interface list olist(S,G) is NULL and the prune limit timer PLT(S,G) is not running, and redundant PRUNE suppression is enabled on that interface, then this timer is set to a value t_deferral between 0 and Prune Deferral Interval.  If redundant PRUNE suppression is not enabled on that interface, then this timer is set to zero (0) and expires immediately. This timer is also set if a STATE REFRESH message is received with its Prune Indicator is clear, and the upstream interface is in the Pruned state. If an (S,G) PRUNE is seen on the upstream interface towards S (RPF_Interface(S)) and is directed towards RPF'(S), then this timer is cancelled. If this timer expires, a PRUNE is sent to the upstream router towards S (RPF'(s)).
+		  </t><t>
+		  The computation` of t_deferral is described in Sec. 4.8.
+		</t>
+	      </list>
+	    </t>
+	  </list>
+	</t>
+      </section>
+      <section title="Modifications to the tabular description of the state machine [RFC3973 Sec. 4.4.1]">
+	<figure>
+	  <preamble>
+	    In the tabular description of the state machine <xref target="RFC3973" format="none">[RFC3973 sec. 4.4.1]</xref>, the following entries are added:
+	  </preamble>
+	  <artwork>
++-------------------------------+--------------------------------------+
+|                               |            Previous State            |
+|                               +------------+------------+------------+
+|            Event              | Forwarding |   Pruned   | AckPending |
++-------------------------------+------------+------------+------------+
+| PDT(S,G) expires              | N/A        | ->P Send   | N/A        |
+|                               |            | Prune(S,G) |            |
++-------------------------------+------------+------------+------------+
+	  </artwork>
+	</figure>
+	<figure>
+	  <preamble>
+	    The following entries, identified by event and previous state,  are modified:
+	  </preamble>
+	  <artwork>
++-------------------------------+--------------------------------------+
+|                               |            Previous State            |
+|                               +------------+------------+------------+
+|            Event              | Forwarding |   Pruned   | AckPending |
++-------------------------------+------------+------------+------------+
+| Data packet arrives on        | ->P Set    | ->P Set    | N/A        |
+| RPF_Interface(S) AND          | PDT(S,G)   | PDT(S,G)   |            |
+| olist(S,G) == NULL AND        |Set PLT(S,G)|Set PLT(S,G)|            |
+| PLT(S,G) not running          |            |            |            |
++-------------------------------+------------+------------+------------+
+| State Refresh(S,G) received   | ->F        | ->P Set    |->F Cancel  |
+| from RPF`(S) AND              |            | PDT(S,G)   |  GRT(S,G)  |
+| Prune Indicator == 0 AND      |            |Set PLT(S,G)|            |
+| PLT(S,G) not running          |            |            |            |
++-------------------------------+------------+------------+------------+
+| See Join(S,G) to RPF'(S)      | ->F Cancel | ->P Cancel |->AP Cancel |
+|                               |    OT(S,G) | PDT(S,G)   |    OT(S,G) |
+|                               |Set PLT(S,G)|Set PLT(S,G)|Set PLT(S,G)|
++-------------------------------+------------+------------+------------+
+| See Prune(S,G)                | ->F Set    | ->P Cancel |->AP Set    |
+|                               |    OT(S,G) | PDT(S,G)   |    OT(S,G) |
+|                               |Set PLT(S,G)|Set PLT(S,G)|Set PLT(S,G)|
++-------------------------------+------------+------------+------------+
+| olist(S,G)->non-NULL          | N/A        | ->AP Send  | N/A        |
+|                               |            | Graft(S,G) |            |
+|                               |            |Set GRT(S,G)|            |
+|                               |            |Cancel      |            |
+|                               |            |    PDT(S,G)|            |
++-------------------------------+------------+------------+------------+
+| RPF'(S) Changes AND           | ->AP Send  | ->AP Send  |->AP Send   |
+| olist(S,G) != NULL            | Graft(S,G) | Graft(S,G) | Graft(S,G) |
+|                               |Set GRT(S,G)|Set GRT(S,G)|Set GRT(S,G)|
+|                               |            |Cancel      |            |
+|                               |            |    PDT(S,G)|            |
++-------------------------------+------------+------------+------------+
+	  </artwork>
+	</figure>
+      </section>
+      <section title="Modifications to Transitions from the Forwarding (F) State [RFC3973 Sec. 4.4.1]">
+	<t>
+	  In the description of Transitions from the Forwarding (F) State <xref target="RFC3973" format="none">[RFC 3973 Sec. 4.4.1.1]</xref>, the following sections are modified as follows:
+	  <list>
+	    <t>
+	      Data Packet arrives on RPF_Interface(S) AND olist(S,G) == NULL AND S NOT directly connected
+	      <list>
+		<t>
+		  The Upstream(S,G) state machine MUST transition to the Pruned (P) state, set the Prune Deferall Timer PDT(S,G) to t_deferall seconds, and set PLT(S,G) to t_limit seconds.
+		</t>
+	      </list>
+	    </t>
+	    <t>
+	      See Join(S,G) to RPF'(S)
+	      <list>
+		<t>
+		  This event is only relevant if RPF_interface(S) is a shared
+		  medium.  This router sees another router on RPF_interface(S) send
+		  a Join(S,G) to RPF'(S,G).  If the OT(S,G) is running, then it
+		  means that the router had scheduled a Join to override a
+		  previously received Prune.  Another router has responded more
+		  quickly with a Join, so the local router SHOULD cancel its
+		  OT(S,G), if it is running.  The Upstream(S,G) state machine
+		  remains in the Forwarding (F) state.
+		</t>
+		<t>
+		  In addition, there is no sense in sending a PRUNE to RPF'(S) in the near-term,
+		  as that PRUNE would only be overridden by another JOIN. Hence, the upstream
+		  (S,G) state machine SHOULD set the Prune Limit Timer PLT(S,G) to t_limit.
+		</t>
+	      </list>
+	    </t>
+	    <t>
+	      See Prune(S,G) AND S NOT directly connected
+	      <list>
+		<t>
+		  This event is only relevant if RPF_interface(S) is a shared
+		  medium.  This router sees another router on RPF_interface(S) send
+		  a Prune(S,G).  As this router is in Forwarding state, it must
+		  override the Prune after a short random interval.  If OT(S,G) is
+		  not running, the router MUST set OT(S,G) to t_override seconds.
+		  The Upstream(S,G) state machine remains in Forwarding (F) state.
+		  The router MAY reset its PLT(S,G) to the value in the Holdtime field
+		  of the received message if it is greater than the current value of the PLT(S,G).
+		</t>
+	      </list>
+	    </t>
+	  </list>
+	</t>
+      </section>
+      <section title="Modifications to Transitions from the Pruned (P) State [RFC3973 Sec. 4.4.1]">
+	<t>
+	  In the description of Transitions from the Pruned (P) State <xref target="RFC3973" format="none">[RFC 3973 Sec. 4.4.1.1]</xref>, the following sections are added:
+	  <list>
+	    <t>
+	      Prune Deferral Timer PDT(S,G) expires
+	      <list>
+		<t>
+		  Send a PRUNE(S,G) to RPF'(S) 
+		</t>
+	      </list>
+	    </t>
+	    <t>
+	      See Join(S,G) to RPF'(S)
+	      <list>
+		<t>
+		  A Join(S,G) is seen on RPF_interface(S) to RPF'(S).  The Upstream(S,G) state machine stays in the Pruned (P) state.  If the Prune Deferral Timer PDT(S,G) is set, it SHOULD be cancelled. 
+		</t>
+		<t>
+		  In addition, there is no sense in sending another PRUNE to RPF'(S) in the near-term,
+		  as that PRUNE would only be overridden by another JOIN. Hence, the upstream
+		  (S,G) state machine SHOULD set the Prune Limit Timer PLT(S,G) to t_limit.
+		</t>
+	      </list>
+	    </t>
+	  </list>
+	</t>
+	<t>
+	  In the description of Transitions from the Pruned (P) State <xref target="RFC3973" format="none">[RFC 3973 Sec. 4.4.1.1]</xref>, the following sections are modified as follows:
+	  <list>
+	    <t>
+	      Data arrives on RPF_interface(S) AND PLT(S,G) not running AND S NOT directly connected
+	      <list>
+		<t>
+		  Either another router on the LAN desires traffic from S addressed to G or a previous Prune was lost.  To prevent generating a Prune(S,G) in response to every data packet, the Prune Limit Timer  (PLT(S,G)) is used. To prevent multiple routers from generating Prune(S,G) messages, the Prune Deferral Timer is used (PDT(S,G)).  Once the PLT(S,G) expires, some router needs to send another prune in response to a data packet not received directly from the source.  The Prune Deferral Timer PDT(S,G) MUST be set to t_deferral, and the PLT(S,G) MUST be set to t_limit.
+		</t>
+	      </list>
+	    </t>
+	    <t>
+	      State Refresh(S,G) Received from RPF'(S) 
+	      <list>
+		<t>
+		  The Upstream(S,G) state machine remains in a Pruned state.  If        the State Refresh has its Prune Indicator bit set to zero and        PLT(S,G) is not running, The Prune Deferral Timer PDT(S,G) MUST be set to t_deferral, and the PLT(S,G) MUST be set to t_limit. If the State Refresh has its Prune Indicator bit set to one, the router MUST reset PLT(S,G) to t_limit.
+		</t>
+	      </list>
+	    </t>
+	    <t>
+	      See Prune(S,G) to RPF'(S)
+	      <list>
+		<t>
+		  A Prune(S,G) is seen on RPF_interface(S) to RPF'(S).  The Upstream(S,G) state machine stays in the Pruned (P) state.  If the Prune Deferral Timer PDT(S,G) is set, it SHOULD be cancelled. The router MAY reset its PLT(S,G) to the value in the Holdtime field of the received message if it is greater than the current value of the PLT(S,G).
+		</t>
+	      </list>
+	    </t>
+	    <t>
+	      olist(S,G)->non-NULL AND S NOT directly connected
+	      <list>
+		<t>
+		  The set of interfaces defined by the olist(S,G) macro becomes non-empty, indicating that traffic from S addressed to group G must be forwarded.  The Upstream(S,G) state machine MUST cancel PLT(S,G), transition to the AckPending (AP) state and unicast a Graft message to RPF'(S).  The Graft Retry Timer (GRT(S,G)) MUST be set to Graft_Retry_Period. If the Prune Deferral timer PDT(S,G) is set, it MUST be cancelled.
+		</t>
+	      </list>
+	    </t>
+	    <t>
+	      RPF'(S) Changes AND olist(S,G) == non-NULL AND S NOT directly connected
+	      <list>
+		<t>
+		  Unicast routing or Assert state causes RPF'(S) to change, including changes to RPF_Interface(S).  The Upstream(S,G) state machine MUST cancel PLT(S,G), cancel the Prune Deferral Timer PDT(S,G), transition to the AckPending (AP)state, send a Graft unicast to the new RPF'(S), and set the GraftRetry Timer (GRT(S,G)) to Graft_Retry_Period.
+		</t>
+	      </list>
+	    </t>
+	  </list>
+	</t>
+      </section>
+      <section title="Modifications to PIM-DM Timers [RFC 3973 Sec. 4.8]">
+	<t>
+	  A new timer must be added to the list of PIM-DM Timers at the head of <xref target="RFC3973">RFC 3973 Sec. 4.8</xref>:
+	  <list>
+	    <t>
+	      Per (S,G) Pair:
+	      <list>
+		<t>
+		  ...
+		</t>
+		<t>
+		  (S,G) Prune Deferral Timer : PDT(S,G)
+		</t>
+	      </list>
+	    </t>
+	  </list>
+	</t>
+	<t>
+	  A new subsection must be added to <xref target="RFC3973">RFC 3973 Sec. 4.8</xref>:
+	  <list>
+	    <t>
+	      <figure>
+		<preamble>
+		  Timer Name: Prune Deferral Timer (PDT(S,G))
+		</preamble>
+		<artwork>
++------------+----------------+----------------------------------------+
+| Value Name | Value          | Explanation                            |
++------------+----------------+----------------------------------------|
+| t_deferral | PDI(I)*        | Randomized delay to prevent response   |
+|            |  ln(1+J)/      | implosion when sending a prune in      |
+|            |  ln(N-1)       | response to incoming user traffic or   |
+|            |                | an incoming state refresh message      |
++------------+----------------+----------------------------------------+
+		</artwork>
+	      </figure>
+	    </t>
+	    <t>
+	      t_deferall is a value between 0 and the incoming interface's Prune_Deferall_Interval (PDT(I)) computed from the formula t_deferall = PDT(I)*ln(1+J)/ln(N-1), where N is the total number of PIM routers on incoming interface I (including this router), and J is a count of the number of PIM routers on incoming interface I (other than the upstream router towards source S) with addresses greater than the address of this router. The Prune_Deferall_Interval SHOULD be set by configuration and SHOULD have a value significantly greater than the expected propagation delay (PD(I)) but significantly less than the Prune Limit Timer. All routers on the same LAN SHOULD be assigned the same value of Prune_Deferall_Interval. Recommended default: 10 seconds.
+	      </t><t>
+	      Note that, if N &le; 1, there will be no router to send a prune on the incoming interface I, and so an attempt to take the logarithm of a negative number will never occur. If N = 2, then the only possible value of J will be J = 0, so the formula given above will result in a divide of zero by zero (ln(1) / ln(1) ). This should be resolved by letting t_deferral = 0 in this case.
+	    </t>
+	  </list>
+	</t>
+      </section>
+      <section title="Other modifications">
+	<t>
+	  No other modifications to <xref target="RFC3973" format="none">RFC 3973</xref> are required.
+	</t>
+      </section>
+    </section>
+    <section title="Compatibility with RFC 3973">
+      <t>
+	PIM-DM routers may implement the optimizations described herein on certain interfaces, while implementing standard PIM-DM as described in <xref target="RFC3973" format="none">RFC 3973</xref> on others. Hence, PIM-DM routers supporting the optimization described herein SHOULD provide a per-interface configuration mechanism for selectively enabling or disabling these optimizations. 
+	</t><t>
+	PIM-DM routers implementing the optimizations described herein will interoperate with those implementing standard PIM-DM, as described in <xref target="RFC3973" format="none">RFC 3973</xref>, even if intermixed on the same LAN. However, to obtain the full benefit of these optimizations, all PIM routers on the LAN should implement these optimizations. Mixed LANs may exhibit degraded performance, especially if several PIM-DM routers implementing only standard PIM are assigned higher-numbered addresses on the LAN than any of those implementing these optimizations.
+      </t>
+    </section>
+    <section title='Security Considerations'>
+      <t>
+	The optimizations described in this document should not have any
+	impact upon the security of the PIM-DM protocol or the lack thereof.
+      </t>
+    </section>
+    <section title='IANA Considerations'>
+      <t>
+	There are no IANA considerations.
+      </t>
+    </section>
+    <section title='Conclusions'>
+      <t>This document has described several optimizations to the PIM-DM protocol for LANs
+      with large numbers of attached PIM-DM routers. These optimizations more fully exploit
+      the potential for suppressing redundant JOIN/PRUNE messages inherent in the use of link-local 
+      multicast to transport these messages. These optimizations provide maximum benefit when the
+      number of PIM routers attached to a single LAN is large, and the propagation delay on the LAN
+      is non-trivial but much shorter than the LAN Prune Delay.
+      </t>
+      <t>The optimized JOIN/PRUNE suppression described here will in most cases scale much better to large LANs than possible alternatives in which JOIN/PRUNE messages are unicast to the upstream router instead  (as proposed by <xref target = "RFC6559" format="none">RFC6559</xref> for PIM-SM). The use of unicast obviates all possibility of redundant JOIN/PRUNE suppression, resulting in an implosion at the upstream router of N-1 unicast JOIN and PRUNE messages. By contrast, the offered load from multicast JOIN/PRUNE messages with the optimizations described here should scale roughly as N ** (propagation_delay/override_interval), with propagation_delay &lt;&lt; override_interval. 
+      </t><t>
+      On a classical Ethernet the resource consumption from unicast and multicast messages is the same. Consequently, the
+      optimized JOIN/PRUNE suppression described here will almost always be preferable to use of unicast JOIN/PRUNE messages
+      without redundant message suppression.
+      </t><t>
+      For LANs emulated by multicast-capable IP tunneling across wireless mobile ad-hoc networks (MANETs)
+      the resource consumption depends upon the lower-layer mechanisms used to implement multicast, the network topology,
+      the MAC protocol, the routing protocol, and
+      the opportunities for spatial reuse <xref target="BBN-TM-2031" />. Nevertheless, as long as link-local multicast is implemented at
+      the lower layer via reversed-shortest-path-forwarding or some other mechanism that is more efficient
+      than packet replication at the source, the optimized JOIN/PRUNE suppression will still usually be preferable
+      to use of unicast JOIN/PRUNE messages without redundant message suppression. However, exceptions can occur
+      if propagation delay and/or packet loss on the emulated LAN are too high to permit effective suppression
+      of redundant JOIN/PRUNE messages.
+      </t>
+      <t>
+      The authors have examined the behavior of the modified protocol in LANs with up to 100 attached PIM routers, with propagation delays on the order of a few tens of milliseconds. We have found that, with the optimizations proposed herein, it is unusual for any redundant JOINs or PRUNEs to be emitted. In most cases, only one PRUNE and, if needed, one overriding JOIN is emitted onto the network in each prune cycle.
+    </t>
+    </section>
+  </middle>
+  <back>
+    <references title='Normative References'>
+      &RFC2119;
+      &RFC3973;
+    </references>
+    <references title='Informative References'>
+      <reference anchor="Weinstein_In_Progress_a">
+	<front>
+	  <title>Mobility Hiding through IP Tunneling Across Wireless MANETs</title>
+	  <author initials="J." surname="Weinstein" />
+	</front>
+	<seriesInfo name="Work in Progress" value="a" />
+      </reference>
+      <reference anchor="Weinstein_In_Progress_b">
+	<front>
+	  <title>PIM-DM over Multi-Layer Networks such as MANETs and VPLS emulated LANs</title>
+	  <author initials="J." surname="Weinstein" />
+	</front>
+	<seriesInfo name="Work in Progress" value="b" />
+      </reference>
+      <reference anchor="BBN-TM-2031" target="http://www.ir.bbn.com/~ramanath/pdf/symptotics-techreport.pdf">
+	<front>
+	  <title>An Approximate Model for Analyzing Real-World Wireless Network Scalability</title>
+	  <author initials = "R." surname="Ramanathan" fullname="Ram Ramanathan"/>
+	  <date year="2012" month="March" />
+	</front>
+	<seriesInfo name="BBM Technical Memo" value="2031" />
+      </reference>
+      &RFC6559;
+    </references>
+  </back>
+</rfc>
