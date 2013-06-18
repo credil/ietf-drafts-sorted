@@ -1,0 +1,410 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+<?rfc toc="yes" tocompact="yes" tocdepth="3" tocindent="yes" symrefs="yes" sortrefs="no" comments="yes" inline="yes" compact="yes" subcompact="no"?>
+<rfc category="info" docName="draft-rogge-baccelli-olsrv2-ett-metric-00" ipr="trust200902">
+	<front>
+		<title abbrev="Directional ETT for OLSRv2">Packet Sequence Number based directional ETT Metric for OLSRv2</title>
+		<author initials="H.R." surname="Rogge" fullname="Henning Rogge">
+			<organization>Fraunhofer FKIE</organization>
+			<address>
+				<email>henning.rogge@fkie.fraunhofer.de</email>
+				<uri>http://www.fkie.fraunhofer.de</uri>
+			</address>
+		</author>
+		<author initials="E.B." surname="Baccelli" fullname="Emmanuel Baccelli">
+			<organization>INRIA</organization>
+			<address>
+				<email>Emmanuel.Baccelli@inria.fr</email>
+				<uri>http://www.emmanuelbaccelli.org/</uri>
+			</address>
+		</author>
+		<date month="June" year="2013"/>
+		<area>Routing Area</area>
+		<workgroup>MANET</workgroup>
+		<keyword>metric</keyword>
+		<keyword>ad hoc network</keyword>
+		<keyword>MANET</keyword>
+		<keyword>routing</keyword>
+		<keyword>IP networks</keyword>
+		<keyword>OLSR</keyword>
+		<keyword>ETT</keyword>
+		<keyword>ETX</keyword>
+		<keyword>Funkfeuer</keyword>
+		<abstract>
+			<t>This document specifies an Estimated Travel Time (ETT) link metric for usage in OLSRv2.</t>
+		</abstract>
+	</front>
+	<middle>
+		<section anchor="introduction" title="Introduction">
+			<t>The Funkfeuer <xref target="FUNKFEUER"/> and Freifunk networks <xref target="FREIFUNK"/> are OLSR-based <xref target="RFC3626"/> wireless community networks with hundreds of routers in permanent operation. The Vienna Funkfeuer network in Austria, for instance, consists of 400 routers (around 600 routes) covering the whole city of Vienna and beyond, spanning roughly 40km in diameter. It has been in operation since 2003 and supplies its users with Internet access. The particularity of the Vienna Funkfeuer network is that it manages to provide Internet access through a city wide, large scale Wi-Fi mesh cloud, with just a single uplink.</t>
+			<t>Operational experience with such a network has revealed that the use of hop-count as routing metric leads to unsatisfactory network performance. Experiments with the ETX metric <xref target="MOBICOM03"/> were therefore undertaken in parallel in the Berlin Freifunk network as well as in the Vienna Funkfeuer network, and found satisfactory, i.e. sufficiently easy to implement and providing sufficiently good performance. This metric has now been in operational use in these networks for more than 2 years. </t>
+			<t>This ETX metric of a link is the estimated number of transmissions required to successfully send a packet (each packet smaller than MTU) over that link, until an acknowledgement is received. The ETX metric is additive, i.e. the ETX metric of a path is the sum of the ETX metrics for each link on this path.</t>
+			<t>While the ETX metric delivers a reasonable performance, it doesn't handle networks with heterogeneous links that have different linkspeed well. Every link is only measured by its packet loss, the metric prefers long and slow links over short and fast links, which can degrade the performance of a network considerably.</t>
+			<t>Based on the ETX metric this document describes an Estimated Travel Time (ETT) metric <xref target="MOBICOM04"/> for the usage with the Optimized Link State Routing Protocol Version 2, which also takes the link-speed into account. More precisely, this document specifies the processing for NHDP <xref target="RFC6130"/> in order to establish the ETT metric value for a link.</t>
+		</section>
+		<section anchor="terminology" title="Terminology">
+			<t>The key words 'MUST', 'MUST NOT', 'REQUIRED', 'SHALL', 'SHALL NOT','SHOULD', 'SHOULD NOT', 'RECOMMENDED', 'NOT RECOMMENDED', 'MAY', and 'OPTIONAL' in this document are to be interpreted as described in<xref target="RFC2119"/>.</t>
+			<t>The terminology introduced in <xref target="RFC5444"/>, <xref target="olsrv2"/> and <xref target="RFC6130"/>, including the terms "packet", "message", "Address Block", "TLV Block","TLV", "address", "address prefix", and "address object" are to be interpreted as described therein.</t>
+			<t>Additionally, this document uses the following terminology and notational conventions:
+			<list style="hanging">
+				<t hangText="LIFO"> - a last in, first out queue of numbers.</t>
+				<t hangText="LIFO[current]"> - the most recent entry added to the queue.</t>
+				<t hangText="push(LIFO, value)"> - an operation which removes the oldest entry in the queue and places a new entry at the head of the queue.</t>
+				<t hangText="sum(LIFO)"> - an operation which returns the sum of all elements in a LIFO.</t>
+				<t hangText="diff_seqno(new, old)"> - an operation which returns the positive distance between two elements of the circular sequence number space defined in Section 5.1 of <xref target="RFC5444"/>. Its value is either (new - old) if this result is positive, or else its value is (new - old + 65536).</t>
+				<t hangText="UNDEFINED">- a constant for -1.</t>
+			</list></t>
+		</section>
+		<section anchor="applicable" title="Applicability Statement">
+			<t>The mechanism specified in this document is based on the ETX metric used daily by hundreds of routers in the Funkfeuer network <xref target="FUNKFEUER"/>, as well as in similar OLSR-based wireless community networks which use the OLSR.org <xref target="OLSR.org"/> code base, such as <xref target="FREIFUNK"/>, <xref target="AWMN"/>, <xref target="NINUX"/>, <xref target="GUIFI"/> and <xref target="OPENAIR"/>. Operational experience suggests that this mechanism is viable in (at least) these kinds of networks.</t>
+			<t>The ETT metric of the new OLSRv2 implementation of Olsr.org is a refinement of the ETX metric, providing a directional metric that takes into account the speed of the link to compute the link cost.</t>
+			<t>The ETX metric value of a link is established by measuring the rate of successful exchange of OLSRv2 control packets over that link, which use the format defined in <xref target="RFC5444"/>. ETX metric computation is thus based only on layer 3 signaling, and is therefore independent from underlying link layer technologies. Moreover, ETX metric computation does not require inspection of data traffic.</t>
+			<t>The ETT metric value can only be computed if the outgoing linkspeed to each one-hop neighbor is known to the routing daemon, either by measurement or from a configuration file.</t>
+		</section>
+		<section anchor="interpretation" title="Directional Packet-Size Agnostic ETT ">
+			<t>The metric specified in this document is based on the Estimated Travel Time (ETT) metric published in <xref target="MOBICOM04"/>.</t>
+			<t>The paper describes the metric as 'ETX divided by link-speed', but introduce a 'packet size' variable in the formula representation, describing the metric as 'ETX times packet-size divided by link-speed'.</t>
+			<t>This document specifies the use of a variant of the ETT metric without any packet-size variable integrated into the link costs. There are two reasons for this decision:
+			
+			<list style="symbols">
+				<t>The original ETT metric was designed for a DSR derived source-routed protocol. Typical linkstate protocols like OSLRv2 do not process each data-plane packet on its own, which makes it difficult to integrate the size of the data-plane packets into the routing metric.</t>
+				<t>The original ETT metric assumes that the airtime spend on a link is proportional to the size of the packet transmitted over the link.</t>
+				<t>Multiplying all topology edge costs 'ETX divided by link-speed' with the size of a packet would not change the result of the shortest path calculation, independently of the packet size. This means both description of ETT should result in the same next-hop decision.</t>
+			</list></t>
+			<t>In addition to this, the metric described in this document is directional, it does calculate the ETX value only based on the loss in one direction.</t>
+		</section>
+		<section anchor="functioning" title="Protocol Functioning &amp; Overview">
+			<t>Router A computes the ETX value of its link to router B by continuously estimating the loss rates for incoming traffic over this link. The ETT metric is calculated as the ETX metric, divided by a normalized link speed of the incoming unicast traffic and use this value as L_in_metric for NHDP (as defined in section 8.1. of NHDP).</t>
+		</section>
+		<section anchor="infobase" title="Data Structures">
+			<t>This specification extends the Link Set per Interface Information Base, as defined in <xref target="RFC6130"/>, with the following additional elements for each link tuple:
+			<list style="empty">
+				<t>L_METRIC_received_lifo is a LIFO queue with ETT_MEMORY_LENGTH integer elements. Each entry contains the number of successfully received <xref target="RFC5444"/> packets within an interval of ETT_METRIC_INTERVAL.</t>
+				<t>L_METRIC_total_lifo is a LIFO queue with ETT_MEMORY_LENGTH integer elements. Each entry contains the estimated number of <xref target="RFC5444"/> packets transmitted by the neighbor, based on the received packet sequence numbers within an interval of ETT_METRIC_INTERVAL.</t>
+				<t>L_METRIC_last_pkt_seqno is the last received packet sequence number received from this link.</t>
+				<t>L_METRIC_hello_time is the time when the next hello will be expected. This is used to detect missing hellos by timeout <xref target="RFC5497"/>.</t>
+				<t>L_METRIC_hello_interval is the interval between two hello messages of the links neighbor as signaled by the INTERVAL_TIME TLV.</t>
+				<t>L_METRIC_lost_hello_messages is the estimated number of lost hello messages from this neighbor, based on the value of the hello interval.</t>
+				<t>L_METRIC_rx_bitrate is the current linkspeed of incoming unicast traffic for this neighbor.</t>
+			</list></t>
+			<t>Methods to obtain the value of L_METRIC_rx_bitrate are out of scope for this specification. Such methods may be static autoconfiguration via a configuration file, or dynamic measurement through mechanisms described in a separate specification.  Any Link tuple with L_status = HEARD or L_status = SYMMETRIC MUST have a specified value of L_METRIC_rx_bitrate if it is to be used by this routing metric.</t>
+		</section>
+		<section anchor="initial" title="Initial Values">
+			<t>When generating a new tuple in the Link Set, the values of the elements specified above are set as follows:
+			<list style="empty">
+				<t>L_METRIC_received_lifo := 0, ..., 0.</t>
+				<t>L_METRIC_total_lifo := 0, ..., 0.</t>
+				<t>L_METRIC_last_pkt_seqno := UNDEFINED.</t>
+				<t>L_METRIC_hello_time := EXPIRED.</t>
+				<t>L_METRIC_hello_interval := UNDEFINED.</t>
+				<t>L_METRIC_lost_hello_messages := 0</t>
+			</list></t>
+		</section>
+		<section anchor="parameter" title="Protocol Parameters">
+			<t>This specification uses the parameters defined in <xref target="olsrv2"/>. This specification defines the following additional parameters:
+			<list style="hanging">
+				<t hangText="ETT_MEMORY_LENGTH">- ETT algorithm memory length in seconds. All received and lost packets within this time period are used to calculate the ETT cost of the link.</t>
+				<t hangText="ETT_METRIC_INTERVAL">- interval in seconds between two metric recalculations as described in <xref target="metric_recalc"/>.</t>
+				<t hangText="ETT_SEQNO_RESTART_DETECTION">- threshold in number of missing packets (based on received packet sequence numbers) at which point the router considers the neighbor has restarted.</t>
+				<t hangText="ETT_HELLO_TIMEOUT_FACTOR">- timeout factor for HELLO interval at which point a HELLO is definitely considered lost. The value must be a floating point number larger than 1.0.</t>
+				<t hangText="ETT_WORST_ETX">- Maximum ETX value used in this routing metric.</t>
+				<t hangText="ETT_BEST_LINKSPEED">- Maximum link speed in bits/s of used in routing metric.</t>
+				<t hangText="ETT_WORST_LINKSPEED">- Minimum link speed in bits/s used in this metric.</t>
+				<t hangText="ETT_NO_LOSS_METRIC_VALUE">- metric value for ETX 1.0 and ETT_WORST_LINKSPEED linkspeed.</t>
+			</list></t>
+		</section>
+		<section anchor="packets_messages" title="Packets and Messages">
+			<t>Generated packets and messages use the format defined in <xref target="RFC5444"/>. The present specification adds the following constraints:
+			<list style="symbols">
+				<t>A packet MUST contain a packet sequence number as defined in <xref target="RFC5444"/>. This sequence number MUST be interface specific and must be incremented by 1 for each packet.</t>
+			</list></t>
+			<section anchor="packet_processing" title="Packet Processing">
+				<t>Each incoming packet is processed as defined in OLSRv2 <xref target="olsrv2"/>. Furthermore, the following additional processing MUST be carried out after the packet has been processed on the link set tuple corresponding to the source of the packet:
+				<list style="numbers">
+					<t>If L_METRIC_last_pkt_seqno = UNDEFINED, then:
+					<list style="numbers">
+						<t>L_METRIC_received_lifo[current] := 1.</t>
+						<t>L_METRIC_total_lifo[current] := 1.</t>
+					</list></t>
+					<t>Otherwise:
+					<list style="numbers">
+						<t>L_METRIC_received_lifo[current] := L_METRIC_received_lifo[current] + 1.</t>
+						<t>diff := seq_diff(seqno, L_METRIC_last_pkt_seqno).</t>
+						<t>If diff &gt; ETT_SEQNO_RESTART_DETECTION, then:
+						<list style="numbers">
+							<t>diff := 1.</t>
+						</list></t>
+						<t>L_METRIC_total_lifo[current] := L_METRIC_total_lifo[current]	+ diff.</t>
+					</list></t>
+					<t>L_METRIC_last_pkt_seqno := seqno.</t>
+				</list></t>
+			</section>
+		</section>
+		<section anchor="hello_timeout" title="HELLO Timeout">
+			<t>When L_METRIC_hello_time has timed out, the following step MUST be done:
+			<list style="numbers">
+				<t>L_METRIC_lost_hellos := L_METRIC_lost_hellos + 1.</t>
+				<t>L_METRIC_hello_time := L_METRIC_hello_time + L_METRIC_hello_interval.</t>
+			</list></t>
+		</section>
+		<section anchor="metric_recalc" title="Periodic Metric Computation">
+			<t>This metric stores the number of received packets per link from a neighbor and use the packet sequence number to calculate the total number of sent packets from the neighbor. The total number of packets divided by the number of received packets is used as an ETX value for the link.</t>
+			<t>If connectivity of link with a node is lost, no packets are received anymore and neither the received nor total value of packets will change. To prevent a constant result in this case, the metric stores the number of HELLO message interval timeouts since the last received packet from a neighbor and uses this value to reduce the received packet count proportionally to the length of the metric memory ETT_MEMORY_LENGTH.</t>
+			<t>Once every ETT_METRIC_INTERVAL, this protocol MUST recalculate all L_in_metric values in all Link Set entries:
+			<list style="numbers">
+				<t>sum_received := sum(L_METRIC_total_lifo).</t>
+				<t>sum_total := sum(L_METRIC_received_lifo).</t>
+				<t>If L_METRIC_hello_interval != UNDEFINED and L_METRIC_lost_hellos &gt; 0, then:
+				<list style="numbers">
+					<t>penalty := L_METRIC_hello_interval * L_METRIC_lost_hellos / ETT_MEMORY_LENGTH.</t>
+					<t>sum_received := sum_received * ( 1 - penalty );</t>
+				</list></t>
+				<t>If sum_received &lt; 1, then:
+				<list style="numbers">
+					<t>L_METRIC_r_etx := UNDEFINED.</t>
+					<t>L_in_metric := MAXIMUM_METRIC.</t>
+				</list></t>
+				<t>Otherwise:
+				<list style="numbers">
+					<t>etx := sum_total / sum_received.</t>
+
+					<t>If etx &gt; ETT_WORST_ETX, then:
+					<list style="numbers">
+						<t>etx := ETT_WORST_ETX.</t>
+					</list></t>
+					
+					<t>speed := L_METRIC_rx_bitrate.</t>
+					
+					<t>If speed &gt; ETT_BEST_LINKSPEED, then:
+					<list style="numbers">
+						<t>speed := ETT_BEST_LINKSPEED.</t>
+					</list></t>
+
+					<t>If speed &lt; ETT_WORST_LINKSPEED, then:
+					<list style="numbers">
+						<t>speed := ETT_WORST_LINKSPEED.</t>
+					</list></t>
+					
+					<t>L_in_metric := ETT_NO_LOSS_METRIC_VALUE * etx / (speed / ETT_WORST_LINKSPEED).</t>
+				</list></t>
+					
+				<t>push(L_METRIC_total_lifo, 0)</t>
+				<t>push(L_METRIC_received_lifo, 0)</t>
+			</list></t>
+		</section>
+		<section anchor="proposed_parameters" title="Proposed Values for Parameters and Constants">
+			<t>This section proposes values for various parameters used in this specification.
+			<list style="symbols">
+				<t>ETT_MEMORY_LENGTH := 64 seconds</t>
+				<t>ETT_METRIC_INTERVAL := 1 second</t>
+				<t>ETT_SEQNO_RESTART_DETECTION := 256</t>
+				<t>ETT_HELLO_TIMEOUT_FACTOR := 1.5</t>
+				<t>ETT_WORST_ETX := 16</t>
+				<t>ETT_BEST_LINKSPEED := 256 MBit/s</t>
+				<t>ETT_WORST_LINKSPEED := 1 MBit/s</t>
+				<t>ETT_NO_LOSS_METRIC_VALUE := 4096</t>
+			</list></t>
+			
+			<t>With this values this ETT metric will go from 16 (256+ MBit/s, ETX 1.0) over 4096 (1 MBit/s, ETX 1.0) to a maximum of 65536 (1 MBit/s, ETX 16.0).</t>
+		</section>
+		<section anchor="security" title="Security Considerations">
+			<t>Artificial manipulation of metrics values can drastically alter network performance. In particular, advertising a higher L_in_metric value may decrease the amount of incoming traffic, while advertising lower L_in_metric may increase the amount of incoming traffic. By artificially increasing or decreasing the L_in_metric values it advertises, a rogue router may thus attract or repulse data traffic. A rogue router may then potentially degrade data throughput by not forwarding data as it should or redirecting traffic into routing loops or bad links.</t>
+		</section>
+		<section anchor="acknowledgements" title="Acknowledgements">
+			<t>The authors would like to acknowledge the network administrators from <xref target="FREIFUNK">Freifunk Berlin</xref> and <xref target="FUNKFEUER">Funkfeuer Vienna</xref> for endless hours of testing and suggestions to improve the quality of the original ETX metric for the olsr.org routing daemon.</t>
+			<t>This effort/activity is supported by the European Community Framework Programme 7 within the Future Internet Research and Experimentation Initiative (FIRE), Community Networks Testbed for the Future Internet (<xref target="CONFINE"/>), contract FP7-288535.</t>
+			<t>The authors would like to gratefully acknowledge the following people for intense technical discussions, early reviews and comments on the specification and its components (listed alphabetically):
+			Teco Boot (Infinity Networks),
+			Thomas Clausen (LIX, Ecole Polytechnique),
+			Christopher Dearlove (BAE Systems Advanced Technology Centre),
+			Ulrich Herberg (Fujitsu Laboratories of America),
+			Markus Kittenberger (Funkfeuer Vienna).</t>
+		</section>
+	</middle>
+	<back>
+		<references title="Normative References">
+			<reference anchor="RFC2119">
+				<front>
+					<title abbrev="RFC2119">Key words for use in RFCs to Indicate Requirement Levels</title>
+					<author initials="S." surname="Bradner" fullname="Scott Bradner">
+						<organization abbrev="HU">Harvard University</organization>
+					</author>
+					<date month="March" year="1997"/>
+				</front>
+				<seriesInfo name="RFC" value="2119"/>
+				<seriesInfo name="BCP" value="14"/>
+			</reference>
+			<reference anchor="RFC3626">
+				<front>
+					<title abbrev="RFC3626">Optimized Link State Routing Protocol</title>
+					<author initials="T.H." surname="Clausen" fullname="Thomas Heide Clausen">
+						<organization abbrev="INRIA">Project Hipercom, INRIA Rocquencourt, France</organization>
+					</author>
+					<author initials="P." surname="Jacquet" fullname="P. Jacquet">
+						<organization abbrev="INRIA">Project Hipercom, INRIA Rocquencourt, France</organization>
+					</author>
+					<date month="October" year="2003"/>
+				</front>
+				<seriesInfo name="RFC" value="3626"/>
+			</reference>
+			<reference anchor="RFC5444">
+				<front>
+					<title>Generalized Mobile Ad Hoc Network (MANET) Packet/Message Format</title>
+					<author initials="T.H." surname="Clausen" fullname="Thomas Heide Clausen">
+						<organization abbrev="X">Ecole Polytechnique, France</organization>
+					</author>
+					<author initials="C." surname="Dearlove" fullname="C. Dearlove">
+						<organization>BAE Systems</organization>
+					</author>
+					<author initials="J." surname="Dean" fullname="J. Dean">
+						<organization abbrev="NRL">Naval Research Laboratory</organization>
+					</author>
+					<author initials="C." surname="Adjih" fullname="C. Adjih">
+						<organization abbrev="INRIA">INRIA Rocquencourt</organization>
+					</author>
+					<date month="February" year="2009"/>
+				</front>
+				<seriesInfo name="RFC" value="5444"/>
+			</reference>
+			<reference anchor="RFC5497">
+				<front>
+					<title>Representing Multi-Value Time in Mobile Ad Hoc Networks (MANETs)</title>
+					<author initials="T.H." surname="Clausen" fullname="Thomas Heide Clausen">
+						<organization abbrev="X">Ecole Polytechnique, France</organization>
+					</author>
+					<author initials="C." surname="Dearlove" fullname="C. Dearlove">
+						<organization>BAE Systems</organization>
+					</author>
+					<date month="March" year="2009"/>
+				</front>
+				<seriesInfo name="RFC" value="5497"/>
+			</reference>
+			<reference anchor="RFC6130">
+				<front>
+					<title>Mobile Ad Hoc Network (MANET) Neighborhood Discovery Protocol (NHDP)</title>
+					<author initials="T.H." surname="Clausen" fullname="Thomas Heide Clausen">
+						<organization abbrev="X">Ecole Polytechnique, France</organization>
+					</author>
+					<author initials="C." surname="Dearlove" fullname="C. Dearlove">
+						<organization abbrev="INRIA">BAE Systems</organization>
+					</author>
+					<author initials="J." surname="Dean" fullname="J. Dean">
+						<organization abbrev="NRL">Naval Research Laboratory</organization>
+					</author>
+					<date month="April" year="2011"/>
+				</front>
+				<seriesInfo name="RFC" value="6130"/>
+			</reference>
+		</references>
+		<references title="Informative References">
+			<reference anchor="CONFINE" target="http://www.confine-project.eu">
+				<front>
+					<title>Community Networks Testbed for the Future Internet (CONFINE)</title>
+					<author/>
+					<date year="2013"/>
+				</front>
+			</reference>
+			<reference anchor="olsrv2">
+				<front>
+					<title>The Optimized Link State Routing Protocol version 2</title>
+					<author initials="T.H." surname="Clausen" fullname="Thomas Heide Clausen">
+						<organization abbrev="X">Ecole Polytechnique, France</organization>
+					</author>
+					<author initials="P." surname="Jacquet" fullname="P. Jacquet">
+						<organization abbrev="INRIA">Project Hipercom, INRIA Rocquencourt, France</organization>
+					</author>
+					<author initials="C." surname="Dearlove" fullname="C. Dearlove">
+						<organization abbrev="INRIA">BAE Systems</organization>
+					</author>
+					<date month="March" year="2013"/>
+				</front>
+				<seriesInfo name="draft-ietf-manet-olsrv2-19" value=""/>
+			</reference>
+			<reference anchor="MOBICOM03">
+				<front>
+					<title>A High-Throughput Path Metric for Multi-Hop Wireless Routing</title>
+					<author initials="D." surname="De Couto" fullname="D. De Couto">
+						<organization abbrev=""/>
+					</author>
+					<author initials="D." surname="Aguayo" fullname="D. Aguayo">
+						<organization abbrev=""/>
+					</author>
+					<author initials="J." surname="Bicket" fullname="J. Bicket">
+						<organization abbrev=""/>
+					</author>
+					<author initials="R." surname="Morris" fullname="R. Morris">
+						<organization abbrev=""/>
+					</author>
+					<date year="2003"/>
+				</front>
+				<seriesInfo name="Proceedings of the MOBICOM Conference" value=""/>
+			</reference>
+			<reference anchor="MOBICOM04">
+				<front>
+					<title>Routing in Multi-Radio, Multi-Hop Wireless Mesh Networks</title>
+					  
+					<author initials="D." surname="Richard" fullname="Richard Draves">
+						<organization abbrev=""/>
+					</author>
+					<author initials="P." surname="Jitendra" fullname="Jitendra Padhye">
+						<organization abbrev=""/>
+					</author>
+					<author initials="Z." surname="Brian" fullname="Brian Zill">
+						<organization abbrev=""/>
+					</author>
+					<date year="2004"/>
+				</front>
+				<seriesInfo name="Proceedings of the MOBICOM Conference" value=""/>
+			</reference>
+			<reference anchor="OLSR.org" target="http://www.olsr.org/">
+				<front>
+					<title>The olsr.org OLSR routing daemon</title>
+					<author/>
+					<date year="2013"/>
+				</front>
+			</reference>
+			<reference anchor="FREIFUNK" target="http://www.freifunk.net">
+				<front>
+					<title>Freifunk Wireless Community Networks</title>
+					<author/>
+					<date year="2013"/>
+				</front>
+			</reference>
+			<reference anchor="FUNKFEUER" target="http://www.funkfeuer.at">
+				<front>
+					<title>Austria Wireless Community Network</title>
+					<author/>
+					<date year="2013"/>
+				</front>
+			</reference>
+			<reference anchor="AWMN" target="http://awmn.net">
+				<front>
+					<title>Athens Wireless Community Network</title>
+					<author/>
+					<date year="2013"/>
+				</front>
+			</reference>
+			<reference anchor="GUIFI" target="http://www.guifi.net">
+				<front>
+					<title>Barcelona Wireless Community Network</title>
+					<author/>
+					<date year="2013"/>
+				</front>
+			</reference>
+			<reference anchor="NINUX" target="http://www.ninux.org">
+				<front>
+					<title>Roma Wireless Community Network</title>
+					<author/>
+					<date year="2013"/>
+				</front>
+			</reference>
+			<reference anchor="OPENAIR" target="http://openairboston.net">
+				<front>
+					<title>Boston Wireless Community Network</title>
+					<author/>
+					<date year="2013"/>
+				</front>
+			</reference>
+		</references>
+	</back>
+</rfc>
