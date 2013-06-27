@@ -1,0 +1,859 @@
+<?xml version='1.0' ?>
+<!--
+Created:       Mon Jun 17 04:55:57 2013 mstenber
+Last modified: Wed Jun 26 11:55:44 2013 mstenber
+Edit time:     423 min
+-->
+
+<!--
+
+- Is tying this whole draft with particular routing protocol good?
+ - another option: General idea + practical transport drafts?
+
+- Terminology
+
+ - is sloppy in general; for example, domain<>zone
+
+ - no good term for 'base' DNS-SD domain which is used to look up domain search
+ lists etc?
+
+-->
+
+
+<!DOCTYPE rfc SYSTEM 'rfc2629.dtd'>
+
+<?rfc autobreaks="yes"?>
+<?rfc compact="yes"?>
+<?rfc strict='yes'?>
+<?rfc subcompact="no"?>
+<?rfc symrefs="yes"?>
+<?rfc toc="yes"?>
+<?rfc tocindent="yes"?>
+
+<rfc
+    ipr='trust200902'
+    docName='draft-stenberg-homenet-dnssdext-hybrid-proxy-ospf-00'
+    category='std'
+    >
+  <front>
+    <title abbrev="Hybrid Proxy OSPFv3 Zeroconf">
+      Hybrid Unicast/Multicast DNS-Based Service Discovery
+      Auto-Configuration Using OSPFv3
+    </title>
+    <author initials="M" surname="Stenberg" fullname="Markus Stenberg">
+      <address>
+        <postal>
+          <street/>
+          <city>Helsinki</city>
+          <code>00930</code>
+          <country>Finland</country>
+        </postal>
+        <email>markus.stenberg@iki.fi</email>
+      </address>
+    </author>
+    <date month="June" year="2013" />
+<!--    <workgroup></workgroup> -->
+    <keyword>IPv6</keyword>
+    <keyword>Homenet</keyword>
+    <keyword>OSPFv3</keyword>
+    <keyword>DNS-SD</keyword>
+    <keyword>mDNS</keyword>
+    <abstract>
+
+      <t>This document describes how a proxy functioning between Unicast
+      DNS-Based Service Discovery and Multicast DNS can be automatically
+      configured using automatically configured routing protocol or some
+      other network-level state sharing mechanism. Zero-configuration
+      OSPFv3 is used to describe one concrete way to implement this
+      scheme. </t>
+    </abstract>
+  </front>
+  <middle>
+    <section title="Introduction">
+
+      <t>Section 3 ("Hybrid Proxy Operation") of <xref
+      target="I-D.cheshire-mdnsext-hybrid"/> describes how to translate
+      queries from Unicast DNS-Based Service Discovery described in <xref
+      target="RFC6763"/> to Multicast DNS described in <xref
+      target="RFC6762"/>, and how to filter the responses and translate
+      them back to unicast DNS.</t>
+
+      <t>This document describes what sort of configuration the
+      participating DNS servers require, as well as how it can be provided
+      using auto-configured OSPFv3 described in <xref
+      target="I-D.ietf-ospf-ospfv3-autoconfig"/> and a naming scheme which
+      does not even need to be same across the whole covered network. The
+      scheme can be used to provision both forward and reverse DNS zones
+      which employ hybrid proxy for heavy lifting. 
+      </t>
+
+      <t>While this document describes the data to be transferred in
+      auto-configured OSPFv3 TLVs, in principle same scheme could work
+      across other routing protocols, or even some non-routing protocol, as
+      long as the consistent state for it is available across the whole
+      covered network (by for example site-scoped multicast, or some other
+      flooding scheme).</t>
+
+      <t>We go through the mandatory specification of the language used in
+      <xref target="kwd"/>, then describe what needs to be configured in
+      hybrid proxies and participating DNS servers across the network in
+      <xref target="what"/>. How the data is exchanged in OSPFv3 is
+      described in <xref target="how"/>. Finally, some overall notes on
+      desired behavior of different router components is mentioned in <xref
+      target="howto"/>. </t>
+
+    </section>
+
+
+    <section anchor="kwd" title='Requirements language'>
+
+      <t>In this document, the key words "MAY", "MUST, "MUST NOT",
+      "OPTIONAL", "RECOMMENDED", "SHOULD", and "SHOULD NOT", are to be
+      interpreted as described in <xref target='RFC2119' />.</t>
+
+    </section>
+
+    <section anchor="what" title="Hybrid proxy - what to configure">
+
+      <t>Beyond the low-level translation mechanism between unicast and
+      multicast service discovery, the hybrid proxy draft <xref
+      target="I-D.cheshire-mdnsext-hybrid"/> describes just that there have
+      to be NS records pointing to hybrid proxy responsible for each link
+      within the covered network.</t>
+
+      <t>The links to be covered is also non-trivial choice; we can use the
+      border discovery functionality (if available) to determine internal
+      and external links. Or we can use OSPFv3 presence (or lack of it) on
+      a link to determine internal links within the covered network, and
+      some other signs (depending on the deployment) such as DHCPv6 Prefix
+      Delegation (as described in <xref target="RFC3633"/> to determine
+      external links that should not be covered.</t>
+
+      <t>For each covered link we want forward DNS zone delegation to an
+      appropriate router which is connected to a link, and running hybrid
+      proxy. We also want to populate reverse DNS zone similarly per each
+      prefix in use. Links' forward DNS zone names should be unique.</t>
+
+      <t>There should be DNS-SD domain search list provided for the
+      network's domain which contains domain for each physical link only
+      once, regardless of how many routers and hybrid proxy implementations
+      are connected to it. </t>
+
+      <t>Yet another case to consider is the list of DNS-SD domains that we
+      want hosts to enumerate for domain lists. Typically, it contains
+      only that the network's domain, but there may be also other networks
+      we may want to pretend to be local but are in different scope, or
+      controlled by different organization. For example, a home user might
+      see both home domain's services (TBD-TLD), as well as ISP's services
+      under isp.example.com.</t>
+
+      <section anchor="conflict" title="Conflict resolution with OSPFv3">
+
+        <t>Any naming-related choice on a router may have conflicts in the
+        network. </t>
+
+        <t>We use similar conflict resolution scheme as described in the
+        prefix assignment draft<xref
+        target="I-D.arkko-homenet-prefix-assignment"/>. That is, if a
+        conflict is encountered, the router with highest router ID MUST
+        keep the name they have chosen. The one(s) with lower router ID
+        MUST either try different one (that is not in use at all according
+        to the current link state information), or choose not to publish
+        the name altogether.</t>
+
+        <t>If router needs to pick a different name, any algorithm works,
+        although simple algorithm choice is just like the one described in
+        Multicast DNS<xref target="RFC6762"/>: append -2, -3, and so forth,
+        until there are no conflicts in the network for the given name.</t>
+
+      </section>
+
+      <section title="Per-link DNS-SD forward zone names">
+
+        <t>How to name the links of a whole network in automated fashion? Two
+        different approaches seem obvious:
+
+        <list style="numbers">
+          <t>
+            Unique link name based - (unique-link).(domain).
+          </t>
+          <t>
+            Router and link name - (link).(router).(domain).
+          </t>
+        </list>
+
+        The first choice is appealing as it can be much more friendly
+        (especially given manual configuration). For example, it could mean
+        just lan.example.com and wlan.example.com for a simple home
+        network. The second choice, on the other hand, has a nice property
+        of being local choice as long as router name can be made
+        unique.</t>
+
+        <t>The type of naming scheme to use can be left as implementation
+        option. And the actual names themselves SHOULD be also overridable,
+        if the end-user wants to customize them in some way. </t>
+
+      </section>
+
+      <section title="Reasonable defaults">
+
+        <t>Note that any manual configuration, which SHOULD be possible,
+        MUST override the defaults provided here or chosen by the creator
+        of the implementation.</t>
+
+        <section title="Network-wide unique link name (scheme 1)">
+
+          <t>It is not obvious how to produce network-wide unique link
+          names for the (unique-link).(domain) scheme. One option would be
+          to base it on type of physical network layer, and then hope that
+          the number of the networks won't be significant enough to confuse
+          (e.g. "lan", or "wlan"). </t>
+
+          <t>In general network-wide unique link names should be only used
+          in small networks. Given larger network, after conflict
+          resolution, finding which network is 'lan-42.example.com'
+          may be challenging.</t>
+        </section>
+
+        <section anchor="rname" title="Router name (scheme 2)">
+
+          <t>Recommendation is to use some short form which indicates the
+          type of router it is, for example, "openwrt.example.com". As the
+          name is visible to users, it should be kept as short as
+          possible. If theory even more exact model could be helpful, for
+          example, "openwrt-buffalo-wzr-600-dhr.example.com".  In practise,
+          though, providing some other records indicating exact router
+          information (and access to management UI) might be more sensible.
+          </t>
+
+          <t>If scheme 2 is used, and there is no desire to implement
+          conflict resolution related TLV described in <xref
+          target="router-name-tlv"/>, a safe default might be to default to
+          router ID; that is, use as router name value such as r-(router ID
+          as single 32-bit number). It is guaranteed to be unique across
+          the network, but not as user-friendly as the descriptive router
+          name promoted here.</t>
+
+        </section>
+
+        <section anchor="lname" title="Link name (scheme 2)">
+
+          <t>Recommendation for (link) portion of (link).(router).(domain)
+          is to use either physical network layer type as base, possibly
+          even just interface name on the router, if it's descriptive
+          enough, for example, eth0.router1.example.com and
+          wlan0.router1.example.com may be good enough. </t>
+
+        </section>
+      </section>
+
+    </section>
+    <section anchor="how" title="OSPFv3 auto-configuration TLVs">
+
+      <t>To implement this specification fully, support for following three
+      different new OSPFv3 auto-configuration TLVs is needed. However, only
+      the DNS Delegated Zone TLVs MUST be supported, and the other two
+      SHOULD be supported. </t>
+
+      <section anchor="delegated-zone-tlv" title="DNS Delegated Zone TLV">
+
+        <t>This TLV is effectively a combined NS and A/AAAA record for a
+        zone. It MUST be supported by implementations conforming to this
+        specification. Implementations SHOULD provide forward zone per link
+        (or optimizing a bit, zone per link with Multicast DNS
+        traffic). Implementations MAY provide reverse zone per prefix using
+        this same mechanism. If multiple routers advertise same reverse
+        zone, it should be assumed that they all have access to the
+        link with that prefix. However, as noted in <xref
+        target="ospf-req"/>, mainly only the router with highest router ID
+        on the link should publish this TLV.</t>
+
+
+        <figure>
+          <artwork>
+0                   1                   2                   3
+0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|      TBD-BY-IANA-1            |           Length              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+|                           Address                             |
+|                          (16 bytes)                           |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|Reserved   |S|B| Zone (DNS label sequence - variable length)   |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                      DNS Delegated Zone TLV
+          </artwork>
+        </figure>
+        <t>
+          <list style="hanging">
+
+            <t hangText="Address"> field is IPv6 address (e.g. 2001:db8::3)
+            or IPv4 address mapped to IPv6 address (e.g. ::FFFF:192.0.2.1)
+            where the authoritative DNS server for Zone can be found. If
+            the address field is all zeros, the Zone is under global DNS
+            hierarchy and can be found using normal recursive name lookup
+            starting at the authoritative root servers (This is mostly
+            relevant with the S bit below).
+            </t>
+
+            <t hangText="S"> indicates that this delegated zone consists of
+            a full DNS-SD domain, which should be used as base for DNS-SD
+            domain enumeration (that is, (field)._dns-sd._udp.(zone)
+            exists). Forward zones MAY have this set. Reverse zones MUST
+            NOT have this set. This can be used to provision DNS search
+            path to hosts for non-local services (such as those provided
+            by ISP, or other manually configured service providers).
+            </t>
+
+            <t hangText="B"> indicates that this delegated zone should be
+            included in network's DNS-SD list of domains recommended for
+            browsing at b._dns-sd._udp.(domain). Local forward zones SHOULD
+            have this set. Reverse zones SHOULD NOT have this set.</t>
+
+            <t hangText="Zone"> is the label sequence of the zone, encoded
+            according to section 3.1. ("Name space definitions") of <xref
+            target="RFC1035"/>. Note that name compression is not required
+            here (and would not have any point in any case), as we encode
+            the zones one by one. The zone MUST end with empty label. </t>
+
+          </list>
+        </t>
+
+      </section>
+
+      <section anchor="domain-name-tlv" title="Domain Name TLV">
+
+        <t>This TLV is used to indicate the base (domain) to be used for
+        the network.  If multiple routers advertise different ones, the
+        conflict resolution rules in <xref target="conflict"/> should
+        result in only the one with highest router ID advertising one,
+        eventually. In case of such conflict, user SHOULD be notified
+        somehow about this, if possible, using the configuration interface
+        or some other notification mechanism for the routers. </t>
+
+        <t>This TLV SHOULD be supported if at all possible. It may be
+        derived using some future DHCPv6 option, or be set by manual
+        configuration. Even on routers without manual configuration
+        options, being able to read the domain name provided by a different
+        router could make the user experience better due to consistent
+        naming of zones across the network.</t>
+
+        <figure>
+          <artwork>
+0                   1                   2                   3
+0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|      TBD-BY-IANA-2            |           Length              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|Domain (DNS label sequence - variable length)                  |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                         Domain Name TLV
+          </artwork>
+        </figure>
+
+        <t>Like the Zone field in <xref target="delegated-zone-tlv"/>, the
+        Domain Name TLV's contents are encoded as label sequence. </t>
+
+        <t>By default, if no router advertises domain name TLV, hard-coded
+        default (TBD) should be used.</t>
+
+      </section>
+      <section anchor="router-name-tlv" title="Router Name TLV">
+        <t>This TLV is used to advertise a router's name. After the
+        conflict resolution procedure described in <xref target="conflict"/>
+        finishes, there should be exactly zero to one routers publishing
+        each router name.</t>
+
+        <t>This TLV SHOULD be supported if at all possible. If not
+        supported, and another router chooses to use the (link).(router)
+        naming scheme with this router's name, the contents of the
+        network's domain may look misleading (but due to conflict
+        resolution of per-link zones, still functional).</t>
+
+        <figure>
+          <artwork>
+0                   1                   2                   3
+0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|      TBD-BY-IANA-3            |           Length              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|Name (not even null terminated - variable length)              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                         Router Name TLV
+          </artwork>
+        </figure>
+
+        <t>If the router name has been configured manually, and there is a
+        conflict, user SHOULD be notified somehow about this, if possible,
+        using the configuration interface or some other notification
+        mechanism for the routers.</t>
+      </section>
+
+
+      <section anchor="dns-server-tlv" title="DNS Server TLV">
+
+        <t>This TLV is used to announce address of a fallback recursive DNS
+        server (provided by e.g. ISP). If the DNS server
+        implementations used in the network are not full recursive resolver
+        implementations, they may respond to network-specific queries
+        within network, and forward the rest to the provided DNS
+        servers. Even recursive resolver implementations may want to use
+        these servers, if available, for better caching and therefore more
+        responsive user experience.</t>
+
+        <t>Typically, these addresses are gleaned from (for example) a
+        DHCPv4/DHCPv6 exchange, or from Router Advertisements. </t>
+
+        <t>Any router on the home network can publish 0-N of these TLVs,
+        and the order in which they are used is not defined (we assume that
+        the DNS view of the world is consistent; this may not be true in
+        all cases).</t>
+
+        <t>This TLV SHOULD be supported by routers, but the routers (and
+        DNS servers in the network) MUST be able to cope even in the
+        absence of the TLV. This can be handled by (for example) DNS
+        servers providing recursive resolving fallback functionality, or
+        defaulting to some known global recursive resolver.</t>
+
+        <figure>
+          <artwork>
+0                   1                   2                   3
+0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|      TBD-BY-IANA-4            |           Length              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+|                           Address                             |
+|                          (16 bytes)                           |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                         DNS Server TLV
+          </artwork>
+        </figure>
+
+        <t>The address may be again either IPv4 or IPv6 address, with the
+        IPv4 address encoded under the ::FFFF:/96 prefix.</t>
+        
+        <t>It is important to note that if the network's domain forward or
+        reverse resolution will not work globally, using network-external
+        DNS server directly is not good. Therefore the network's local DNS
+        servers should be announced to hosts in e.g. DHCPv4/DHCPv6/RA,
+        and then only those DNS servers can use the contents of this TLV as
+        fall-back for non-local resolution if so desired. How these local
+        DNS server addresses are propagated within home network is outside
+        the scope of this document</t>
+
+      </section>
+    </section>
+
+    <section anchor="howto" title="Desirable router behavior">
+
+      <section title="DNS search path">
+        <t>The routers following this specification SHOULD provide the used
+        (domain) as one item in the search path to it's hosts, so that
+        DNS-SD browsing will work correctly. They also SHOULD include any
+        DNS Delegated Zone TLVs' zones, that have S bit set. </t>
+      </section>
+
+      <section title="Hybrid proxy">
+
+        <t>The hybrid proxy implementation SHOULD support both forward
+        zones, and IPv4 and IPv6 reverse zones. It SHOULD also detect
+        whether or not there are any Multicast DNS entities on a link, and
+        make that information available to OSPFv3 daemon. This can be done by
+        (for example) passively monitoring traffic on all covered links,
+        and doing infrequent service enumerations on links that seem to be
+        up, but without any Multicast DNS traffic (if so desired). </t>
+
+        <t>Hybrid proxy SHOULD also publish it's own name via Multicast DNS
+        (both forward A/AAAA records, as well as reverse PTR records) to
+        facilitate applications that trace network topology. 
+        </t>
+
+
+      </section>
+      <section anchor="ospf-req" title="OSPFv3 daemon">
+
+        <t>OSPFv3 daemon should avoid publishing TLVs about links that have
+        no Multicast DNS traffic to keep the DNS-SD browse domain list as
+        concise as possible. It also SHOULD NOT publish delegated zones for
+        links that it does not have highest router ID that supports this
+        specification. (Support for this specification can be deduced by
+        e.g. presence of any TLVs from this draft advertised by a router.)
+        </t>
+
+        <t>OSPFv3 daemon (or other entity with access to the TLVs) SHOULD
+        generate zone information for DNS implementation that will be used
+        to serve the (domain) zone to hosts. Domain Name TLV described in
+        <xref target="domain-name-tlv"/> should be used as base for the
+        zone, and then all DNS Delegated Zones described in <xref
+        target="delegated-zone-tlv"/> should be used to produce the rest of
+        the entries in zone (see <xref target="example-dns-zone"/> for example
+        interpretation of the TLVs in <xref target="example-ospf"/>.</t>
+
+      </section>
+      
+    </section>
+
+    <section title="Security Considerations">
+
+      <t>There is a trade-off between security and zero-configuration in
+      general; if used routing protocol is not authenticated (and in
+      zero-configuration case, it most likely is not), it is vulnerable to
+      local spoofing attacks. We assume that this scheme is used either
+      within (lower layer) secured networks, or with
+      not-quite-zero-configuration routing protocol set-up which has
+      authentication.</t>
+
+      <t>If some sort of dynamic inclusion of links to be covered using
+      border discovery or such is used, then effectively service discovery
+      will share fate with border discovery (and also security issues if
+      any).</t>
+
+    </section>
+
+
+    <section anchor="iana" title="IANA Considerations">
+
+      <t>This document makes two allocations out of the OSPFv3 Auto-
+      Configuration (AC) LSA TLV namespace <xref
+      target="I-D.ietf-ospf-ospfv3-autoconfig"/>:
+
+      <list style="symbols">
+
+        <t>The DNS Delegated Zone TLV in <xref
+        target="delegated-zone-tlv"/> takes the value TBD-BY-IANA-1
+        (suggested value is 4).</t>
+
+        <t>The Domain Name TLV in <xref target="domain-name-tlv"/> takes
+        the value TBD-BY-IANA-2 (suggested value is 5).</t>
+
+        <t>The Router Name TLV in <xref target="router-name-tlv"/> takes
+        the value TBD-BY-IANA-3 (suggested value is 6).</t>
+
+        <t>The DNS Server TLV in <xref target="dns-server-tlv"/> takes
+        the value TBD-BY-IANA-4 (suggested value is 7).</t>
+
+      </list>
+      </t>
+    </section>
+
+  </middle>
+  <back>
+    <references title="Normative references">
+      <?rfc include="reference.I-D.draft-cheshire-mdnsext-hybrid-01.xml"?>
+      <?rfc include="reference.I-D.ietf-ospf-ospfv3-autoconfig.xml"?>
+      <?rfc include="reference.RFC.1035.xml"?>
+      <?rfc include="reference.RFC.2119.xml"?>
+      <?rfc include="reference.RFC.6762.xml"?>
+      <?rfc include="reference.RFC.6763.xml"?>
+    </references>
+    <references title="Informative references">
+      <?rfc include="reference.I-D.draft-arkko-homenet-prefix-assignment-01.xml"?>
+      <?rfc include="reference.RFC.3633.xml"?>
+      <?rfc include="reference.RFC.3646.xml"?>
+    </references>
+
+    <section title="Example configuration">
+
+<section title="Topology">
+      <t>Let's assume home network that looks like this:</t>
+
+      <figure>
+        <artwork>
+       |[0]
+    +-----+
+    | CER |
+    +-----+
+ [1]/    \[2]
+   /      \
++-----+ +-----+
+| IR1 |-| IR2 |
++-----+ +-----+
+ |[3]|   |[4]|
+        </artwork>
+      </figure>
+
+      <t>We're not really interested about links [0], [1] and [2], or the
+      links between IRs. Given the optimization described in <xref
+      target="delegated-zone-tlv"/>, they should not produce anything to
+      OSPF state (and therefore to DNS either) as there isn't any Multicast
+      DNS traffic there.
+      </t>
+
+      <t>The user-visible set of links are [3] and [4];
+      each consisting of a LAN and WLAN link. 
+
+      We assume that ISP provides 2001:db8::/48 prefix to be delegated in
+      the home via [0].
+      </t>
+      
+</section>
+
+
+<section title="OSPFv3-DNS interaction">
+
+      <t>Given implementation that chooses to use the second naming scheme
+      (link).(router).(domain), and no configuration whatsoever, here's
+      what happens (the steps are interleaved in practise but illustrated
+      here in order):</t>
+      <t>
+      <list style="numbers">
+          
+        <t>OSPFv3 auto-configuration takes place, routers get their
+        router IDs. For ease of illustration, CER winds up with 2, IR1
+        with 3, and IR2 with 1. </t>
+        
+        <t>Prefix delegation takes place. IR1 winds up with
+        2001:db8:1:1::/64 for LAN and 
+        2001:db8:1:2::/64 for WLAN. IR2 winds up with
+        2001:db8:2:1::/64 for LAN and 
+        2001:db8:2:2::/64 for WLAN. </t>
+
+        <t>IR1 is assumed to be reachable at 2001:db8:1:1::1 and IR2 at
+      2001:db8:2:1::1. </t>
+      
+
+        <t>Each router wants to be called 'router' due to lack of
+        branding in drafts. They announce that using the router name TLV
+        defined in <xref target="router-name-tlv" />. They also
+        advertise their local zones, but as that information may change,
+        it's omitted here.</t>
+        
+        <t>Conflict resolution ensues. As IR1 has highest router ID, it
+        becomes "router". CER and IR2 have to rename, and (depending on
+        timing) one of them becomes "router-2" and other one
+        "router-3". Let us assume IR2 is "router-2". During conflict
+        resolution, each router publishes TLVs for it's own set of
+        delegated zones. </t>
+
+        <t>CER learns ISP-provided domain "isp.example.com" using DHCPv6
+        domain list option defined in <xref target="RFC3646"/>. The
+        information is passed along as S-bit enabled delegated zone
+        TLV.</t>
+      </list>
+      </t>
+    </section>
+
+    <section anchor="example-ospf" title="OSPFv3 state">
+
+      <t>Once there is no longer any conflict in the system, we wind up
+      with following TLVs within OSPFv3 (RN is used as abbreviation for
+      Router Name, and DZ for Delegated Zone TLVs):
+      </t>
+
+      <figure>
+        <artwork>
+(from CER)
+DZ {s=1,zone="isp.example.com"}
+
+(from IR1)
+RN {name="router"}
+
+DZ {address=2001:db8:1:1::1, b=1, 
+    zone="lan.router.example.com."}
+DZ {address=2001:db8:1:1::1, 
+    zone="1.0.0.0.1.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."}
+
+DZ {address=2001:db8:1:1::1, b=1, 
+    zone="wlan.router.example.com."}
+DZ {address=2001:db8:1:1::1, 
+    zone="2.0.0.0.1.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."}
+
+(from IR2)
+RN {name="router-2"}
+
+DZ {address=2001:db8:2:1::1, b=1, 
+    zone="lan.router-2.example.com."}
+DZ {address=2001:db8:2:1::1, 
+    zone="1.0.0.0.2.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."}
+
+DZ {address=2001:db8:2:1::1, b=1, 
+    zone="wlan.router-2.example.com."}
+DZ {address=2001:db8:2:1::1, 
+    zone="2.0.0.0.2.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."}
+
+        </artwork>
+      </figure>
+
+    </section>
+    <section anchor="example-dns-zone" title="DNS zone">
+      <t>In the end, we should wind up with following zone for
+      (domain) which is example.com in this case, available at all routers,
+      just based on dumping the delegated zone TLVs as NS+AAAA records, and
+      optionally domain list browse entry for DNS-SD:</t>
+      <figure>
+        <artwork>
+b._dns_sd._udp PTR lan.router
+b._dns_sd._udp PTR wlan.router
+
+b._dns_sd._udp PTR lan.router-2
+b._dns_sd._udp PTR wlan.router-2
+
+router AAAA 2001:db8:1:1::1
+router-2 AAAA 2001:db8:2:1::1
+
+router NS router
+router-2 NS router-2
+
+1.0.0.0.1.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa. NS router.example.com.
+2.0.0.0.1.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa. NS router.example.com.
+1.0.0.0.2.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa. NS router-2.example.com.
+2.0.0.0.2.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa. NS router-2.example.com.
+        </artwork>
+      </figure>
+      <t>Internally, the router may interpret the TLVs as it chooses to, as
+      long as externally defined behavior follows semantics of what's given
+      in the above.</t>
+    </section>
+
+    <section anchor="interaction" title="Interaction with hosts">
+
+      <t>So, what do the hosts receive from the routers? Using
+      e.g. DHCPv6 DNS options defined in <xref target="RFC3646"/>, DNS
+      server address should be one (or multiple) that point at DNS server
+      that has the zone information described in <xref
+      target="example-dns-zone"/>. Domain list provided to hosts should
+      contain both "example.com" (the hybrid-enabled domain), as well as the
+      externally learned domain "isp.example.com".</t>
+
+      <t>When hosts start using DNS-SD, they should check both
+      b._dns-sd._udp.example.com, as well as b._dns-sd._udp.isp.example.com
+      for list of concrete domains to browse, and as a result services from
+      two different domains will seem to be available.</t>
+
+    </section>
+  </section>
+
+    <section title="Implementation">
+
+      <t>There is an prototype implementation of this draft (and
+      transitively also of <xref target="I-D.cheshire-mdnsext-hybrid"/>) at
+      <eref target="https://github.com/fingon/hnet-core/">hnet-core github
+      repository</eref> which contains variety of other homenet WG-related
+      things' implementation too.</t>
+      
+      <t>hp.lua binary can be used to start hybrid proxy either as
+      one-router stand-alone implementation (that can be used to e.g. use
+      statically configured DNS zones), or as part of zeroconf OSPFv3
+      configured set of proxies.</t>
+
+      <t>Sample usage case:</t>
+      <figure>
+        <artwork>
+# sudo lua hp.lua eth0 eth1
+.. no output ..
+        </artwork>
+      </figure>
+
+      <t>Given the command, hybrid proxy is started for interfaces eth0 and
+      eth1, and it will publish DNS zones l-eth0.r-router.home,
+      l-eth1.r-router.home (and home zone with relevant DNS-SD sub-zone,
+      and default forward behavior) in DNS port. It has -h option for
+      seeing various options that can be set, notable one being --ospf (use
+      OSPFv3 autoconfigured hnet infrastructure). </t>
+
+      <t>
+        Disclaimer: The set-up of third-party libraries etc to get the
+        implementation running may be painful and is omitted here. Use of
+        ready UML NetKit-based test environment or building image for a
+        real router using <eref
+        target="https://github.com/fingon/hnet/">hnet github
+        repository</eref> is recommended.
+      </t>
+    </section>
+    
+    <section title="Why not just proxy Multicast DNS?">
+
+      <t>Over the time number of people have asked me about how, why, and
+      if we should proxy (originally) link-local Multicast DNS over
+      multiple links.</t>
+
+      <t>At some point I meant to write a draft about this, but I think I'm
+      too lazy; so some notes left here for general amusement of people
+      (and to be removed if this ever moves beyond discussion piece).</t>
+
+      <section title="General problems">
+
+        <t>There are two main reasons why Multicast DNS is not proxyable in
+        the general case.</t>
+
+        <t>First reason is the conflict resolution depends on ordering
+        which depends on the RRsets staying constant. That is not possible
+        across multiple links (due to e.g. link-local addresses having to
+        be filtered). Therefore, conflict resolution breaks, or at least
+        requires ugly hacks to work around.</t>
+        
+        <t>A workaround for this is to make sure that in conflict
+        resolution, propagated resources always loses. Due to conflict
+        handling ordering logic, and the arbitrary order in which the
+        original records may be in, this is non-trivial. </t>
+        
+        <t>Second reason is timing, which is relatively tight in the
+        conflict resolution phase, especially given lossy and/or high
+        latency networks.</t>
+
+      </section>
+      <section title="Stateless proxying problems">
+
+        <t>In general, typical stateless proxy has to involve flooding, as
+        Multicast DNS assumes that most messages are received by every
+        host. And it won't scale very well, as a result.
+        </t>
+
+        <t>The conflict resolution is also harder without state. It may
+        result in Multicast DNS responder being in constant probe-announce
+        loop, when it receives altered records, notes that it's the one
+        that should own the record. Given stateful proxying, this would be
+        just a transient problem but designing stateless proxy that won't
+        cause this is non-trivial exercise.</t>
+
+      </section>
+
+      <section title="Stateful proxying problems">
+
+
+        <t>One option is to write proxy that learns state from one link,
+        and propagates it in some way to other links in the network. </t>
+
+        <t>A big problem with this case lies in the fact that due to
+        conflict resolution concerns above, it is easy to accidentally send
+        packets that will (possibly due to host mobility) wind up at the
+        originator of the service, who will then perform renaming. That can
+        be alleviated, though, given clever hacks with conflict resolution
+        order. </t>
+
+        <t>The stateful proxying may be also too slow to occur within the
+        timeframe allocated for announcing, leading to excessive later
+        renamings based on delayed finding of duplicate services with same
+        name</t>
+
+        <t>A work-around exists for this though; if the game doesn't work
+        for you, don't play it. One option would be simply not to propagate
+        ANY records for which conflict has seen even once. This would work,
+        but result in rather fragile, lossy service discovery
+        infrastructure.</t>
+
+        <t>There are some other small nits too; for example, Passive
+        Observation Of Failure (POOF) will not work given stateful
+        proxying. Therefore, it leads to requiring somewhat shorter TTLs,
+        perhaps. </t>
+
+      </section>
+    </section>
+
+    <section title="Acknowledgements">
+
+      <t>Thanks to Stuart Cheshire for the original hybrid proxy draft and
+      interesting discussion in Orlando, where I was finally convinced that
+      stateful Multicast DNS proxying is a bad idea.</t>
+
+      <t>Also thanks to Mark Baugher, Ole Troan and Shwetha Bhandari for
+      review comments.</t>
+
+    </section>
+    
+  </back>
+</rfc>
