@@ -1,0 +1,896 @@
+
+
+
+
+LWIG Working Group                                           M. Kovatsch
+Internet-Draft                                                ETH Zurich
+Intended status: Informational                               O. Bergmann
+Expires: January 02, 2014                        Universitaet Bremen TZI
+                                                           A. Castellani
+                                                    University of Padova
+                                                                 E. Dijk
+                                                        Philips Research
+                                                         C. Bormann, Ed.
+                                                 Universitaet Bremen TZI
+                                                           July 01, 2013
+
+
+                      CoAP Implementation Guidance
+                      draft-kovatsch-lwig-coap-00
+
+Abstract
+
+   The Constrained Application Protocol (CoAP) is designed for resource-
+   constrained nodes and networks, e.g., sensor nodes in low-power lossy
+   networks (LLNs).  Still, to implement this Internet protocol on Class
+   1 devices, i.e., ~ 10 KiB of RAM and ~ 100 KiB of ROM, lightweight
+   implementation techniques are necessary.  This document provides
+   lessons learned from implementing CoAP for tiny, battery-operated
+   networked embedded systems.  The guidelines for transmission state
+   management and developer APIs can also help with the implementation
+   of CoAP for less constrained nodes.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on January 02, 2014.
+
+Copyright Notice
+
+
+
+
+
+Kovatsch, et al.        Expires January 02, 2014                [Page 1]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   Copyright (c) 2013 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   2
+   2.  Message Processing  . . . . . . . . . . . . . . . . . . . . .   3
+     2.1.  Message Buffer Usage  . . . . . . . . . . . . . . . . . .   4
+     2.2.  Header Option Parsing and Management  . . . . . . . . . .   5
+       2.2.1.  On-the-fly Processing . . . . . . . . . . . . . . . .   5
+       2.2.2.  Internal Data Structure . . . . . . . . . . . . . . .   6
+     2.3.  Retransmissions . . . . . . . . . . . . . . . . . . . . .   6
+     2.4.  Deduplication . . . . . . . . . . . . . . . . . . . . . .   7
+       2.4.1.  Managing Peer MIDs  . . . . . . . . . . . . . . . . .   7
+       2.4.2.  Resource-specific Deduplication . . . . . . . . . . .  10
+   3.  Transmission State Management . . . . . . . . . . . . . . . .  10
+     3.1.  Request/Response Layer  . . . . . . . . . . . . . . . . .  11
+     3.2.  Message Layer . . . . . . . . . . . . . . . . . . . . . .  12
+   4.  Observing . . . . . . . . . . . . . . . . . . . . . . . . . .  13
+   5.  Block-wise Transfers  . . . . . . . . . . . . . . . . . . . .  13
+   6.  Application Developer API . . . . . . . . . . . . . . . . . .  14
+   7.  References  . . . . . . . . . . . . . . . . . . . . . . . . .  14
+     7.1.  Normative References  . . . . . . . . . . . . . . . . . .  14
+     7.2.  Informative References  . . . . . . . . . . . . . . . . .  15
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  15
+
+1.  Introduction
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kovatsch, et al.        Expires January 02, 2014                [Page 2]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   The Constrained Application Protocol [I-D.ietf-core-coap] has been
+   designed specifically for machine-to-machine communication in
+   networks with very constrained nodes.  Typical application scenarios
+   therefore include building automation and the Internet of Things.
+   The major design objectives have been set on small protocol overhead,
+   robustness against packet loss, and against high latency induced by
+   small bandwidth shares or slow request processing in end nodes.  To
+   leverage integration of constrained nodes with the world-wide
+   Internet, the protocol design was led by the REST architectural style
+   that accounts for the scalability and robustness of the Hypertext
+   Transfer Protocol [RFC2616].
+
+   Lightweight implementations benefit from this design in many
+   respects: First, the use of Uniform Resource Identifiers (URIs) for
+   naming resources and the transparent forwarding of their
+   representations in a server-stateless request/response protocol make
+   protocol translation to HTTP a straightforward task.  Second, the set
+   of protocol elements that are unavoidable for the core protocol and
+   thus must be implemented on every node has been kept very small,
+   minimizing the unnecessary accumulation of "optional" features.
+   Options that - when present - are critical for message processing are
+   explicitly marked as such to force immediate rejection of messages
+   with unknown critical options.  Third, the syntax of protocol data
+   units is easy to parse and is carefully defined to avoid creation of
+   state in servers where possible.
+
+   Although these features enable lightweight implementations of the
+   Constrained Application Protocol, there is still a tradeoff between
+   robustness and latency of constrained nodes on one hand and resource
+   demands (such as battery consumption, dynamic memory needs, and
+   static code size) on the other.  The present document gives some
+   guidance on possible strategies to solve this tradeoff for very
+   constrained nodes (Class 1 in [I-D.ietf-lwig-terminology]).  The main
+   focus is on servers as this is deemed the predominant case where CoAP
+   applications are faced with tight resource constraints.
+
+   Additional considerations for the implementation of CoAP on tiny
+   sensors are given in [I-D.arkko-core-sleepy-sensors].
+
+2.  Message Processing
+
+   For constrained nodes of Class 1 or even Class 2, the most limiting
+   factors for (wireless) network communication usually are RAM size and
+   battery lifetime.  Most applications therefore try to minimize
+   internal buffer space for both transmit and receive operations, and
+   to maximize sleeping cycles.
+
+
+
+
+
+Kovatsch, et al.        Expires January 02, 2014                [Page 3]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   In the programming styles supported by very simple operating systems,
+   preemptive multi-threading is not an option.  Instead, all operations
+   are triggered by an event loop system, e.g., in a send-receive-
+   dispatch cycle.  It is also common practice to allocate memory
+   statically to ensure stable behavior, as no memory management unit
+   (MMU) or other abstractions are available.  For a CoAP node, the two
+   key parameters for memory usage are the number of (re)transmission
+   buffers and the maximum message size that must be supported by each
+   buffer.  Often the maximum message size is set far below the
+   1280-byte MTU of 6LoWPAN to allow more than one open confirmable
+   transmission at a time (in particular for observe notifications).
+   Note that implementations on constrained platforms often not even
+   support the full MTU.  Larger messages must then use block-wise
+   transfers [I-D.ietf-core-block], while a good tradeoff between
+   6LoWPAN fragmentation and CoAP header overhead must be found.
+   Usually the amount of available free RAM dominates this decision.
+   For Class 1 devices, the maximum message size is typically 128 or 256
+   bytes plus an estimate of the maximum header size with a worst case
+   option setting.
+
+2.1.  Message Buffer Usage
+
+   The cooperative multi-threading of an event loop system allows to
+   optimize memory usage through in-place processing and reuse of
+   buffers, in particular the IP buffer provided by the OS.
+
+   CoAP servers can significantly benefit from in-place processing, as
+   they can create responses directly in the incoming IP buffer.  Note
+   that an embedded OS usually only has a single buffer for incoming and
+   outgoing IP packets.  Empty ACKs and RST messages can promptly be
+   assembled and sent using the IP buffer.  The first few bytes of the
+   basic header are usually parsed into an internal data structure and
+   can be overwritten without harm.  Also when a CoAP server only sends
+   piggy-backed or non-confirmable responses, no additional buffer is
+   required at the application layer.  This, however, requires careful
+   timing so that no incoming data is overwritten before it was
+   processed.  Because of cooperative multi-threading, this requirement
+   is relaxed, though.
+
+   For clients, this is only an option for non-confirmable requests that
+   do not need to be kept for retransmission.  Using the IP also for
+   retransmissions would require to forbid any packet reception during
+   an open request.  This is can only be applied in special cases.
+
+   Depending on the number of requests that can be handled in parallel,
+   an implementation might create a stub response filled with any option
+   that has to be copied from the original request to the separate
+   response, especially the Token option.  The drawback of this
+
+
+
+Kovatsch, et al.        Expires January 02, 2014                [Page 4]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   technique is that the server must be prepared to receive
+   retransmissions of the previous (confirmable) request to which a new
+   acknowledgement must be generated.  If memory is an issue, a single
+   buffer can be used for both tasks: Only the message type and code
+   must be updated, changing the message id is optional.  Once the
+   resource representation is known, it is added as new payload at the
+   end of the stub response.  Acknowledgements still can be sent as
+   described before as long as no additional options are required to
+   describe the payload.
+
+2.2.  Header Option Parsing and Management
+
+   There are two alternatives to handle the header: Either process the
+   header on the fly when an option is accessed or initially parse all
+   values into an internal data structure.
+
+2.2.1.  On-the-fly Processing
+
+   The advantage of on-the-fly processing is that the compact encoding
+   saves memory and fully reuses the buffer for incoming messages.  The
+   basic message header information should be copied into an internal
+   data structure, as Message ID and/or Token are required for request/
+   response matching or generating the response.  Once the message is
+   accepted for further processing, the set of options contained in the
+   received message must be decoded to check for unknown critical
+   options.  To avoid multiple passes through the option list, the
+   option parser might maintain a bit-vector where each bit represents
+   an option number that is present in the received request.  With the
+   wide range of options, the option number itself cannot be used to
+   indicate the number of left-shift operations to mask the
+   corresponding bit.  Hence, an internal enum should be used to mask
+   the supported set options of an implementation in the bitmask.
+
+   In addition, the byte index of every option is added to a sparse list
+   (e.g., a one-dimensional array) for fast retrieval.  This
+   particularly enables efficient reduced-function handling of options
+   that might occur more than once such as Uri-Path.  In this
+   implementation strategy, the delta is zero for any subsequent path
+   segment, hence the stored byte index for option 9 (Uri-Path) will be
+   overwritten to hold a pointer to the last occurrence of that option,
+   i.e., only the last path component actually matters.  (Of course,
+   this requires choosing resource names where the combination of (final
+   Uri-Path component, final Uri-Query component) is server-wide unique.
+
+   Note:  Where skipping all but the last path segment is not feasible
+      for some reason, resource identification could be ensured by some
+      hash value calculated over the path segments.  For each segment
+      encountered, the stored hash value is updated by the current
+
+
+
+Kovatsch, et al.        Expires January 02, 2014                [Page 5]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+      option value.  This works if a cheap _perfect hashing_ scheme can
+      be found for the resource names.
+
+   Once the option list has been processed at least up to the highest
+   option number that is supported by the application, any known
+   critical option and all elective options can be masked out to
+   determine if any unknown critical option was present.  If this is the
+   case, this information can be used to create a 4.02 response
+   accordingly.  (Note that the remaining options also must be processed
+   to add further critical options included in the original request.)
+
+2.2.2.  Internal Data Structure
+
+   Using an internal data structure for all parsed options has
+   advantages when processing the values, as they are already in a
+   variable of corresponding type and integers in host byte order.  The
+   incoming payload and byte strings of the header can be accessed
+   directly in its IP buffer using pointers.  This approach also
+   benefits from a bitmap.  Otherwise special values must be reserved to
+   encode an unset option, which might require a larger type than
+   required for the actual value range (e.g., a 32-bit integer instead
+   of 16-bit).
+
+   The byte strings (e.g., the URI) are usually not required when
+   generating the response.  Thus, this alternative also facilitates the
+   usage of the IP buffer for message assembly - all important values
+   are copied from the shared incoming/outgoing buffer.
+
+   Setting options for outgoing messages is also easier with an internal
+   data structure.  Application developers can set options independent
+   from the option number order required for the delta encoding.  The
+   CoAP encoding is then applied in a serialization step before sending.
+   On-the-fly processing might require extensive memmove operations to
+   insert new header options or needs to restrict developers to set
+   options in order.
+
+2.3.  Retransmissions
+
+   CoAP's reliable transmissions require the before-mentioned
+   retransmission buffers.  Messages, such as the requests of a client,
+   should be stored in serialized form.  For servers, retransmissions
+   apply for confirmable separate responses and confirmable
+   notifications [I-D.ietf-core-observe].  As separate responses stem
+   from long-lasting resource handlers, the response should be stored
+   for retransmission instead of re-dispatching a stored request (which
+   would allow for updating the representation).  For confirmable
+   notifications, please see Section 2.6, as simply storing the response
+   can break the concept of eventual consistency.
+
+
+
+Kovatsch, et al.        Expires January 02, 2014                [Page 6]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   String payloads such as JSON require a buffer to print to.  By
+   splitting the retransmission buffer into header and payload part, it
+   can be reused.  First to generate the payload and then storing the
+   CoAP message by serializing into the same memory.  Thus, providing a
+   retransmission for any message type can save the need for a separate
+   application buffer.  This, however, requires an estimation about the
+   maximum expected header size to split the buffer and a memmove to
+   concatenate the two parts.
+
+   For platforms that disable clock tick interrupts in sleep states, the
+   application must take into consideration the clock deviation that
+   occurs during sleep (or ensure to remain in idle state until the
+   message has been acknowledged or the maximum number of
+   retransmissions is reached).  Since CoAP allows up to four
+   retransmissions with a binary exponential back-off it could take up
+   to 45 seconds until the send operation is complete.  Even in idle
+   state, this means substantial energy consumption for low-power nodes.
+   Implementers therefore might choose a two-step strategy: First, do
+   one or two retransmissions and then, in the later phases of back-off,
+   go to sleep until the next retransmission is due.  In the meantime,
+   the node could check for new messages including the acknowledgement
+   for any confirmable message to send.
+
+2.4.  Deduplication
+
+   If CoAP is used directly on top of UDP (i.e., in NoSec mode), it
+   needs to cope with the fact that the UDP datagram transport can
+   reorder and duplicate messages.  (In contrast to UDP, DTLS has its
+   own duplicate detection.)  CoAP has been designed with protocol
+   functionality such that rejection of duplicate messages is always
+   possible.  It is at the discretion of the receiver if it actually
+   wants to make use of this functionality.  Processing of duplicate
+   messages comes at a cost, but so does the management of the state
+   associated with duplicate rejection.  Hence, a receiver may have good
+   reasons to decide not to do the duplicate rejection.  If duplicate
+   rejection is indeed necessary, e.g., for non-idempotent requests, it
+   is important to control the amount of state that needs to be stored.
+
+2.4.1.  Managing Peer MIDs
+
+   CoAP's duplicate rejection functionality can be straightforwardly
+   implemented in a CoAP end-point by storing, for each remote CoAP end-
+   point ("peer") that it communicates with, a list of recently received
+   CoAP Message IDs (MIDs) along with some timing information.  A CoAP
+   message from a peer with a MID that is in the list for that peer can
+   simply be discarded.
+
+
+
+
+
+Kovatsch, et al.        Expires January 02, 2014                [Page 7]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   The timing information in the list can then be used to time out
+   entries that are older than the _expected extent of the re-ordering_,
+   an upper bound for which can be estimated by adding the _potential
+   retransmission window_ ([I-D.ietf-core-coap] section "Reliable
+   Messages") and the time packets can stay alive in the network.
+
+   Such a straightforward implementation is suitable in case other CoAP
+   end-points generate random MIDs.  However, this storage method may
+   consume substantial RAM in specific cases, such as:
+
+   o  many clients are making periodic, non-idempotent requests to a
+      single CoAP server;
+
+   o  one client makes periodic requests to a large number of CoAP
+      servers and/or requests a large number of resources; where servers
+      happen to mostly generate separate CoAP responses (not piggy-
+      backed);
+
+   For example, consider the first case where the expected extent of re-
+   ordering is 50 seconds, and N clients are sending periodic POST
+   requests to a single CoAP server during a period of high system
+   activity, each on average sending one client request per second.  The
+   server would need 100 * N bytes of RAM to store the MIDs only.  This
+   amount of RAM may be significant on a RAM-constrained platform.  On a
+   number of platforms, it may be easier to allocate some extra program
+   memory (e.g. Flash or ROM) to the CoAP protocol handler process than
+   to allocate extra RAM.  Therefore, one may try to reduce RAM usage of
+   a CoAP implementation at the cost of some additional program memory
+   usage and implementation complexity.
+
+   Some CoAP clients generate MID values by a using a Message ID
+   variable [I-D.ietf-core-coap] that is incremented by one each time a
+   new MID needs to be generated.  (After the maximum value 65535 it
+   wraps back to 0.)  We call this behavior "sequential" MIDs.  One
+   approach to reduce RAM use exploits the redundancy in sequential MIDs
+   for a more efficient MID storage in CoAP servers.
+
+   Naturally such an approach requires, in order to actually reduce RAM
+   usage in an implementation, that a large part of the peers follow the
+   sequential MID behavior.  To realize this optimization, the authors
+   therefore RECOMMEND that CoAP end-point implementers employ the
+   "sequential MID" scheme if there are no reasons to prefer another
+   scheme, such as randomly generated MID values.
+
+   Security considerations might call for a choice for
+   (pseudo)randomized MIDs.  Note however that with truly randomly
+   generated MIDs the probability of MID collision is rather high in use
+   cases as mentioned before, following from the Birthday Paradox.  For
+
+
+
+Kovatsch, et al.        Expires January 02, 2014                [Page 8]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   example, in a sequence of 52 randomly drawn 16-bit values the
+   probability of finding at least two identical values is about 2
+   percent.
+
+   From here on we consider efficient storage implementations for MIDs
+   in CoAP end-points, that are optimized to store "sequential" MIDs.
+   Because CoAP messages may be lost or arrive out-of-order, a solution
+   has to take into account that received MIDs of CoAP messages are not
+   actually arriving in a sequential fashion, due to lost or reordered
+   messages.  Also a peer might reset and lose its MID counter(s) state.
+   In addition, a peer may have a single Message ID variable used in
+   messages to many CoAP end-points it communicates with, which partly
+   breaks sequentiality from the receiving CoAP end-point's perspective.
+   Finally, some peers might use a randomly generated MID values
+   approach.  Due to these specific conditions, existing sliding window
+   bitfield implementations for storing received sequence numbers are
+   typically not directly suitable for efficiently storing MIDs.
+
+   Table 1 shows one example for a per-peer MID storage design: a table
+   with a bitfield of a defined length _K_ per entry to store received
+   MIDs (one per bit) that have a value in the range [MID_i + 1 , MID_i
+   + K].
+
+              +----------+----------------+-----------------+
+              | MID base | K-bit bitfield | base time value |
+              +----------+----------------+-----------------+
+              | MID_0    | 010010101001   | t_0             |
+              |          |                |                 |
+              | MID_1    | 111101110111   | t_1             |
+              |          |                |                 |
+              | ... etc. |                |                 |
+              +----------+----------------+-----------------+
+
+         Table 1: A per-peer table for storing MIDs based on MID_i
+
+   The presence of a table row with base MID_i (regardless of the
+   bitfield values) indicates that a value MID_i has been received at a
+   time t_i.  Subsequently, each bitfield bit k (0...K-1) in a row i
+   corresponds to a received MID value of MID_i + k + 1.  If a bit k is
+   0, it means a message with corresponding MID has not yet been
+   received.  A bit 1 indicates such a message has been received already
+   at approximately time t_i. This storage structure allows e.g. with
+   k=64 to store in best case up to 130 MID values using 20 bytes, as
+   opposed to 260 bytes that would be needed for a non-sequential
+   storage scheme.
+
+   The time values t_i are used for removing rows from the table after a
+   preset timeout period, to keep the MID store small in size and enable
+
+
+
+Kovatsch, et al.        Expires January 02, 2014                [Page 9]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   these MIDs to be safely re-used in future communications.  (Note that
+   the table only stores one time value per row, which therefore needs
+   to be updated on receipt of another MID that is stored as a single
+   bit in this row.  As a consequence of only storing one time value per
+   row, older MID entries typically time out later than with a simple
+   per-MID time value storage scheme.  The end-point therefore needs to
+   ensure that this additional delay before MID entries are removed from
+   the table is much smaller than the time period after which a peer
+   starts to re-use MID values due to wrap-around of a peer's MID
+   variable.  One solution is to check that a value t_i in a table row
+   is still recent enough, before using the row and updating the value
+   t_i to current time.  If not recent enough, e.g. older than N
+   seconds, a new row with an empty bitfield is created.)  [Clearly,
+   these optimizations would benefit if the peer were much more
+   conservative about re-using MIDs than currently required in the
+   protocol specification.]
+
+   The optimization described is less efficient for storing randomized
+   MIDs that a CoAP end-point may encounter from certain peers.  To
+   solve this, a storage algorithm may start in a simple MID storage
+   mode, first assuming that the peer produces non-sequential MIDs.
+   While storing MIDs, a heuristic is then applied based on monitoring
+   some "hit rate", for example, the number of MIDs received that have a
+   Most Significant Byte equal to that of the previous MID divided by
+   the total number of MIDs received.  If the hit rate tends towards 1
+   over a period of time, the MID store may decide that this particular
+   CoAP end-point uses sequential MIDs and in response improve
+   efficiency by switching its mode to the bitfield based storage.
+
+2.4.2.  Resource-specific Deduplication
+
+   Deduplication is heavy for Class 1 devices, as the number of peer
+   addresses can be vast.  Servers should be kept stateless, i.e., the
+   REST API should be designed idempotent whenever possible.  When this
+   is not the case, the resource handler could perform an optimized
+   deduplication by exploiting knowledge about the application.
+   Another, server-wide strategy is to only keep track of non-idempotent
+   requests.
+
+3.  Transmission State Management
+
+   CoAP endpoints must keep transmission state to manage open requests,
+   to handle the different response modes, and to implement reliable
+   delivery at the message layer.  The following finite state machines
+   (FSMs) model the transmissions of a CoAP exchange at the request/
+   response layer and the message layer.  These layers are linked
+   through actions.  The M_CMD() action triggers a corresponding
+   transition at the message layer and the FF_EVT() action triggers a
+
+
+
+Kovatsch, et al.        Expires January 02, 2014               [Page 10]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   transition at the request/response layer.  The FSMs also use guard
+   conditions to distinguish between information that is only available
+   through the other layer (e.g., whether a request was sent using a CON
+   or NON message).
+
+3.1.  Request/Response Layer
+
+   Figure 1 depicts the two states at the request/response layer of a
+   CoAP client.  When a request is issued, a "reliable_send" or
+   "unreliable_send" is triggered at the message layer.  The WAITING
+   state can be left through three transitions: Either the client
+   cancels the request and triggers cancellation of a CON transission at
+   the message layer, the client receives a failure event from the
+   message layer, or a receive event containing a response.
+
+       +------------CANCEL-------------------------------+
+       |        / M_CMD(cancel)                          V
+       |                                              +------+
+       |                                              |      |
+   +-------+ -------RR_EVT(fail)--------------------> | IDLE |
+   |WAITING|                                          |      |
+   +-------+ -------RR_EVT(rx)[is Response]---------> +------+
+       ^                / M_CMD(accept)                  |
+       |                                                 |
+       +--------------------REQUEST----------------------+
+                  / M_CMD((un)reliable_send)
+
+             Figure 1: CoAP Client Request/Response Layer FSM
+
+   A server resource can decide at the request/response layer whether to
+   respond with a piggy-backed or a separate response.  Thus, there are
+   two busy states in Figure 2, SERVING and SEPARATE.  An incoming
+   receive event with a NON request directly triggers the transition to
+   the SEPARATE state.
+
+   +--------+ <----------RR_EVT(rx)[is NON]---------- +------+
+   |SEPARATE|                                         |      |
+   +--------+ ----------------RESPONSE--------------> | IDLE |
+       ^            / M_CMD((un)reliable_send)        |      |
+       |                                        +---> +------+
+       |EMPTY_ACK                               |         |
+       |/M_CMD(accept)                          |         |
+       |                                        |         |
+       |                                        |         |
+   +--------+                                   |         |
+   |SERVING | --------------RESPONSE------------+         |
+   +--------+          / M_CMD(accept)                    |
+       ^                                                  |
+
+
+
+Kovatsch, et al.        Expires January 02, 2014               [Page 11]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+       +------------------------RR_EVT(rx)[is CON]--------+
+
+             Figure 2: CoAP Server Request/Response Layer FSM
+
+3.2.  Message Layer
+
+   Figure 3 shows the different states of a CoAP endpoint per message
+   exchange.  Besides the linking action RR_EVT(), the message layer has
+   a TX action to send a message.  For sending and receiving NONs, the
+   endpoint remains in its CLOSED state.  When sending a CON, the
+   endpoint remains in RELIABLE_TX and keeps retransmitting until the
+   transmission times out, it receives a matching RST, the request/
+   response layer cancels the transmission, or the endpoint receives an
+   implicit acknowledgement through a matching NON or CON.  Whenever the
+   endpoint receives a CON, it transitions into the ACK_PENDING state,
+   which can be left by sending the corresponding ACK.
+
+   +-----------+ <-------M_CMD(reliable_send)-----+
+   |           |            / TX(con)              \
+   |           |                                +--------------+
+   |           | ---TIMEOUT(RETX_WINDOW)------> |              |
+   |RELIABLE_TX|     / RR_EVT(fail)             |              |
+   |           | ---------------------RX_RST--> |              | <----+
+   |           |               / RR_EVT(fail)   |              |      |
+   +-----------+ ----M_CMD(cancel)------------> |    CLOSED    |      |
+    ^  |  |  \  \                               |              | --+  |
+    |  |  |   \  +-------------------RX_ACK---> |              |   |  |
+    +*1+  |    \                / RR_EVT(rx)    |              |   |  |
+          |     +----RX_NON-------------------> +--------------+   |  |
+          |       / RR_EVT(rx)                  ^ ^ ^ ^  | | | |   |  |
+          |                                     | | | |  | | | |   |  |
+          |                                     | | | +*2+ | | |   |  |
+          |                                     | | +--*3--+ | |   |  |
+          |                                     | +----*4----+ |   |  |
+          |                                     +------*5------+   |  |
+          |                +---------------+                       |  |
+          |                |  ACK_PENDING  | <--RX_CON-------------+  |
+          +----RX_CON----> |               |  / RR_EVT(rx)            |
+            / RR_EVT(rx)   +---------------+ ---------M_CMD(accept)---+
+                                                        / TX(ack)
+
+   *1: TIMEOUT(RETX_TIMEOUT) / TX(con)
+   *2: M_CMD(unreliable_send) / TX(non)
+   *3: RX_NON / RR_EVT(rx)
+   *4: RX_RST / REMOVE_OBSERVER
+   *5: RX_ACK
+
+                     Figure 3: CoAP Message Layer FSM
+
+
+
+Kovatsch, et al.        Expires January 02, 2014               [Page 12]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   T.B.D.: (i) Rejecting messages (can be triggered at message and
+   request/response layer). (ii) ACKs can also be triggered at both
+   layers.
+
+4.  Observing
+
+   At the server, the list of observers should be stored per resource to
+   only have a handle per observable resource in a superordinate list
+   instead of one resource handle per observer entry.  Then for each
+   observer, at least address, port, token, and the last outgoing
+   message ID has to be stored.  The latter is needed to match incoming
+   RST messages and cancel the observe relationship.
+
+   Besides the list of observers, it is best to have one retransmission
+   buffer per observable resource.  Each notification is serialized once
+   into this buffer and only address, port, and token are changed when
+   iterating over the observer list (note that different token lengths
+   might require realignment).  The advantage becomes clear for
+   confirmable notifications: Instead of one retransmission buffer per
+   observer, only one buffer and only individual retransmission counters
+   and timers in the list entry need to be stored.  When the
+   notifications can be sent fast enough, even a single timer would
+   suffice.  Furthermore, per-resource buffers simplify the update with
+   a new resource state during open deliveries.
+
+5.  Block-wise Transfers
+
+   Block-wise transfers have the main purpose of providing fragmentation
+   at the application layer, where partial information can be processed.
+   This is not possible at lower layers such as 6LoWPAN, as only
+   assembled packets can be passed up the stack.  While
+   [I-D.ietf-core-block] also anticipates atomic handling of blocks,
+   i.e., only fully received CoAP messages, this is not possible on
+   Class 1 devices.
+
+   When receiving a block-wise transfer, each blocks is usually passed
+   to a handler function that for instance performs stream processing or
+   writes the blocks to external memory such as flash.  Although there
+   are no restrictions in [I-D.ietf-core-block], it is beneficial for
+   Class 1 devices to only allow ordered transmission of blocks.
+   Otherwise on-the-fly processing would not be possible.
+
+
+
+
+
+
+
+
+
+
+Kovatsch, et al.        Expires January 02, 2014               [Page 13]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   When sending a block-wise transfer, Class 1 devices usually do not
+   have sufficient memory to print the full message into a buffer, and
+   slice and send it in a second step.  When transferring the CoRE Link
+   Format from /.well-known/core for instance, a generator function is
+   required that generates slices of a large string with a specific
+   offset length (a 'sonprintf()').  This functionality is required
+   recurrently and should be included in a library.
+
+6.  Application Developer API
+
+   Bringing a Web transfer protocol to constrained environments does not
+   only change the networking of the corresponding systems, but also the
+   way they should be programmed.  A CoAP implementation should provide
+   a developer API similar to REST frameworks in traditional computing.
+   A server should not be created around an event loop with several
+   function calls, but rather by implementing handlers following the
+   resource abstraction.
+
+   So far, the following types of RESTful resources were identified:
+
+   NORMAL  A normal resource defined by a static Uri-Path that is
+      associated with a resource handler function.  Allowed methods
+      could already be filtered by the implementation based on flags.
+      This is the basis for all other resource types.
+
+   PARENT  A parent resource manages several sub-resources by
+      programmatically evaluating the Uri-Path, which may be longer than
+      that of the parent resource.  Defining a URI templates (see
+      [RFC6570]) would be a convenient way to pre-parse arguments given
+      in the Uri-Path.
+
+   PERIODIC  A resource that has an additional handler function that is
+      triggered periodically by the CoAP implementation with a resource-
+      defined interval.  It can be used to sample a sensor or perform
+      similar periodic updates.  Usually, a periodic resource is
+      observable and sends the notifications in the periodic handler
+      function.  These periodic tasks are quite common for sensor nodes,
+      thus it makes sense to provide this functionality in the CoAP
+      implementation and avoid redundant code in every resource.
+
+   EVENT  An event resource is similar to an periodic resource, only
+      that the second handler is called by an irregular event such as a
+      button.
+
+7.  References
+
+7.1.  Normative References
+
+
+
+
+Kovatsch, et al.        Expires January 02, 2014               [Page 14]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   [I-D.ietf-core-coap]
+              Shelby, Z., Hartke, K., and C. Bormann, "Constrained
+              Application Protocol (CoAP)", draft-ietf-core-coap-18
+              (work in progress), June 2013.
+
+   [RFC2616]  Fielding, R., Gettys, J., Mogul, J., Frystyk, H.,
+              Masinter, L., Leach, P., and T. Berners-Lee, "Hypertext
+              Transfer Protocol -- HTTP/1.1", RFC 2616, June 1999.
+
+   [RFC6570]  Gregorio, J., Fielding, R., Hadley, M., Nottingham, M.,
+              and D. Orchard, "URI Template", RFC 6570, March 2012.
+
+7.2.  Informative References
+
+   [I-D.arkko-core-sleepy-sensors]
+              Arkko, J., Rissanen, H., Loreto, S., Turanyi, Z., and O.
+              Novo, "Implementing Tiny COAP Sensors", draft-arkko-core-
+              sleepy-sensors-01 (work in progress), July 2011.
+
+   [I-D.ietf-core-block]
+              Bormann, C. and Z. Shelby, "Blockwise transfers in CoAP",
+              draft-ietf-core-block-12 (work in progress), June 2013.
+
+   [I-D.ietf-core-observe]
+              Hartke, K., "Observing Resources in CoAP", draft-ietf-
+              core-observe-08 (work in progress), February 2013.
+
+   [I-D.ietf-lwig-terminology]
+              Bormann, C., Ersue, M., and A. Keranen, "Terminology for
+              Constrained Node Networks", draft-ietf-lwig-terminology-04
+              (work in progress), April 2013.
+
+Authors' Addresses
+
+   Matthias Kovatsch
+   ETH Zurich
+   Universitaetstrasse 6
+   CH-8092 Zurich
+   Switzerland
+
+   Email: kovatsch@inf.ethz.ch
+
+
+
+
+
+
+
+
+
+
+Kovatsch, et al.        Expires January 02, 2014               [Page 15]
+
+Internet-Draft        CoAP Implementation Guidance             July 2013
+
+
+   Olaf Bergmann
+   Universitaet Bremen TZI
+   Postfach 330440
+   D-28359 Bremen
+   Germany
+
+   Email: bergmann@tzi.org
+
+
+   Angelo Castellani
+   University of Padova
+   Via Gradenigo 6/B
+   I-35131 Padova
+   Italy
+
+   Email: castellani@dei.unipd.it
+
+
+   Esko Dijk
+   Philips Research
+
+   Email: esko.dijk@philips.com
+
+
+   Carsten Bormann (editor)
+   Universitaet Bremen TZI
+   Postfach 330440
+   D-28359 Bremen
+   Germany
+
+   Phone: +49-421-218-63921
+   Email: cabo@tzi.org
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kovatsch, et al.        Expires January 02, 2014               [Page 16]
