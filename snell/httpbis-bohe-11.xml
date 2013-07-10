@@ -1,0 +1,855 @@
+<?xml version="1.0"?> 
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" [ 
+  <!ENTITY rfc2119 PUBLIC '' 'http://xml.resource.org/public/rfc/bibxml/reference.RFC.2119.xml'>
+  <!ENTITY rfc6265 PUBLIC '' 'http://xml.resource.org/public/rfc/bibxml/reference.RFC.6265.xml'>
+  <!ENTITY comp PUBLIC '' 'http://xml.resource.org/public/rfc/bibxml3/reference.I-D.draft-ietf-httpbis-header-compression-01.xml'>
+]>
+<?rfc toc="yes"?> 
+<?rfc strict="yes"?> 
+<?rfc symrefs="yes" ?> 
+<?rfc sortrefs="yes"?> 
+<?rfc compact="yes"?> 
+<rfc category="info" ipr="trust200902" docName="draft-snell-httpbis-bohe-11"> 
+  <front> 
+    <title abbrev="Stored Header Encoding"> 
+      HTTP/2.0 Discussion: Stored Header Encoding
+    </title> 
+ 
+    <author initials="J.M." surname="Snell" fullname="James M Snell"> 
+      <address> 
+        <email>jasnell@gmail.com</email> 
+      </address> 
+    </author> 
+    
+    <date month="July" year="2013" /> 
+ 
+    <keyword>I-D</keyword> 
+    <keyword>http</keyword>
+    <keyword>spdy</keyword>
+ 
+    <abstract> 
+      <t>This memo describes a proposed alternative encoding for
+      headers that combines the best concepts from the proposed
+      Delta and HeaderDiff options with the typed value codecs
+      introduced by previous versions of this draft.</t> 
+    </abstract> 
+ 
+  </front> 
+  
+  <middle> 
+
+    <section title="Stored Header Encoding">
+      
+      <t>The Stored Header Encoding is an alternative "binary header encoding" for 
+      HTTP/2.0 that combines the best elements from three other proposed encodings,
+      including:</t>
+
+      <t><list style="symbols">
+        <t>The "Header Delta Compression" scheme proposed by Roberto Peon in
+          http://tools.ietf.org/html/draft-rpeon-httpbis-header-compression-03</t>
+
+        <t>The "Header Diff" encoding proposed by Herve Reullan, Jun Fujisawa,
+          Romain Bellessort, and Youenn Fablet in 
+          http://tools.ietf.org/html/draft-ruellan-headerdiff-00</t>
+
+        <t>The "Binary Optimized Header Encoding" proposed by James Snell (me) in 
+          http://tools.ietf.org/html/draft-snell-httpbis-bohe-03</t>
+      </list></t>
+      
+      <t>The Stored Header Encoding seeks to find an elegant, efficient and simple
+      marriage of the best concepts from each of these separate proposals.</t>
+
+    </section>
+    
+    <section title="Model">
+      
+      <t>
+        A "header" is a (name,value) pair. The name is a sequence of 
+        lower-case ASCII characters. The value is either a UTF-8 string, 
+        an integer, a Date-Time, or an arbitrary sequence of binary octets.
+      </t>
+      
+      <t>
+        The compressor and decompressor each maintain a synchronized cache 
+        of up to 256 headers. Every header in the cache is referenced by an 
+        8-bit identifier. Note that the Nil byte (0x00) is a valid identifier.
+      </t>
+
+      <t>
+        The cache is managed in a "least recently written" 
+        style, that is, as the cache fills to capacity in both number of 
+        entries and maximum stored byte size, the least recently written items 
+        are cleared and their index positions are reused.
+      </t>
+
+      <t>
+        Index positions from the cache are assigned in "encounter order", 
+        beginning from 0x00 and increasing monotonically to 0xFF. That is to 
+        say, the positions are assigned in precisely the same order that they 
+        are serialized, and thereby encountered by the decompressor upon 
+        reading and processing the block.
+      </t>
+
+      <t>
+        The available size of the stored compression state can be capped by the 
+        decompressor using the SETTINGS_MAX_BUFFER_SIZE setting. Each stored 
+        header contributes to the accumulated size of the storage state. 
+        As new haeder pairs are assigned positions in the cache, the 
+        least-recently assigned items must be cleared, if necessary, to free 
+        up the required space. Clearing existing items does not change the 
+        index positions of the other items in the cache.
+      </t>
+
+      <t>
+        The size of a header is calculated as: The number of ASCII
+        octets required for the name plus the number of octets required for
+        the value plus 32-bytes to account for any internal storage overhead.
+        The number of octets required for the value depends on the value 
+        type:
+        <list style="symbols">
+          <t>
+            String values are measured by the number of UTF-8 encoded
+            octets required to represent the character sequence.
+          </t>
+          <t>
+            Number and Date-Time values are measured by the number of 
+            unsigned variable length integer (uvarint) encoded bytes 
+            required to represent the value using a 5-bit prefix.
+          </t>
+          <t>
+            Binary values are measured by the number of octets contained
+            by the sequence.
+          </t>
+        </list>
+      </t>
+      
+    </section>
+    
+    <section title="Header Encoding and Decoding">
+
+      <t>
+        The set of headers is encoded for transmission using the following
+        process:
+        <list style="numbers">
+          <t><!-- #1 -->
+            For each header, determine if the (name,value) pair
+            already exists in the table.
+            <list style="symbols">
+              <t>
+                If an exact match is found in the header table, 
+                encode the indexed position of the header as an
+                Indexed Reference and advance to the next header
+                (name,value) pair.
+              </t>
+              <t>
+                Otherwise, move to the step #2.
+              </t>
+            </list>
+          </t>
+          <t><!-- #2 -->
+            Determine if a header (name,value) pair with the 
+            same name already exists in the table. If a matching
+            name is found, make note of the indexed position of 
+            the matching name and continue to step #3.
+          </t>
+          <t><!-- #3 -->
+            Determine whether the new header (name,value) pair 
+            ought to be added to the header table or not.
+            <list style="symbols">
+              <t>
+                If the header is not to be added to the header table, 
+                encode the header as a Non-Indexed Literal Representation
+                and continue to the next header (name,value) pair.
+              </t>
+              <t>
+                Otherwise, continue to step #4. 
+              </t>
+            </list>
+          </t>
+          <t><!-- #4 -->
+            If an existing indexed header using the same name was 
+            found in the header table in step #2, determine if the
+            new header (name,value) pair ought to replace that 
+            existing entry or if it ought to be added as a new 
+            entry.
+            <list style="symbols">
+              <t>
+                If the header is to replace the existing entry,
+                encode the header as an Indexed Literal Replacement 
+                Representation.
+              </t>
+              <t>
+                Otherwise encode the header as an Indexed Literal 
+                Representation.
+              </t>
+            </list>
+          </t>
+        </list>
+      </t>
+
+      <t>
+        Following these steps, headers are serialized into one of four
+        representation types, each represented by a two-bit prefix 
+        code. The types and their codes are:
+        <list style="symbols">
+          <t>Indexed - 10</t>
+          <t>Non-Indexed Literal - 00</t>
+          <t>Indexed Literal Replacement - 01</t>
+          <t>Indexed Literal - 10</t>
+        </list>
+      </t>
+     
+      <t>
+        Each representation type is encoded into groups of up to 64
+        instances. Each group is prefixed by a single octet prefix.
+        The two most significant bits identify the representation type,
+        the six least significant bits specify the number of instances
+        in the group, with 000000 indicating a single instance and 111111 
+        indicating 64. 
+      </t>
+      
+      <t>
+        If a particular serialization block requires more than 64 intances of 
+        a given type, then multiple instances of the group type can be  
+        encoded. For instance, if a given message contains 65 Indexed 
+        Representations, the encoded block would contain two separate 
+        Indexed Representation groups.
+      </t>
+      
+      <t>
+        Decoding simply reverses the encoding steps:
+        <list style="numbers">
+          <t>
+            First initialize an empty working set of headers.
+          </t>
+          <t>
+            Begin iterating through each representation group:
+            <list style="symbols">
+              <t>
+                If it is an Indexed group, iterate through
+                each index included in the group, look up the corresponding
+                (name,value) pair in the header table and add that 
+                to the working set. If no matching (name,value) is 
+                found, terminate and report an error.
+              </t>
+              <t>
+                If it's a Non-Indexed Literal group, iterate through
+                each (name,value) pair included in the group and 
+                add that to the working set.
+              </t>
+              <t>
+                If it's an Indexed Literal group, iterate through each
+                (name,value) pair included in the group and 
+                add that to both the header table and the working set.
+              </t>
+              <t>
+                If it's an Indexed Literal Replacement group, iterate 
+                through each (name,value) pair included in the group,
+                replace the existing entry in the header table at the
+                identified index, and add the new (name,value) to 
+                the working set. If no matching (name,value) is found,
+                terminate and report an error.
+              </t>
+            </list>
+          </t>
+          <t>
+            Continue with each representation group until the complete
+            block has been decoded.
+          </t>
+        </list>
+      </t>
+        
+    <section title="Literal (name,value) Representation" anchor="literal-name-value">
+      
+      <t>
+        The structure of an encoded (name,value) pair consists of:
+        <list style="symbols">
+          <t>
+            A 3-bit value type identifier,
+          </t>
+          <t>
+            The name, encoded either as a literal string or as the header
+            table index position of another existing header sharing the 
+            same name, and
+          </t>
+          <t>
+            The encoded value.
+          </t>
+        </list>
+      </t>
+      
+      <t>
+        The three most-sigificant bits of the first octet identify the 
+        value type.
+      </t>
+      
+      <t>
+        This design allows for a maximum of 7 value types, only 
+        four of which are defined by this specification. The three
+        remaining value types are reserved for future use. The 
+        currently defined value types are:
+        <list>
+          <t>UTF-8 Text (000)</t>
+          <t>Integer (001)</t>
+          <t>Timestamp (010)</t>
+          <t>Raw Binary (111)</t>
+        </list>
+      </t>
+      
+      <t>
+        If the name is encoded using an index reference to another 
+        existing (name,value) pair in the header table, the remaining
+        five least significant bits of the first octet are set to 
+        zero and the next byte identifies the referenced header table
+        index position.
+      </t>
+      
+      <t>
+        If the name is encoded as a literal string, the number of 
+        ASCII bytes required to represent the name is encoded as a 
+        unsigned variable length integer with a five-bit prefix,
+        filling the 5-remaining least significant bits of the 
+        first octet.
+      </t>
+      
+      <t>
+        The encoding of the value depends on the value type.
+        <list style="hanging">
+          <t hangText="UTF-8 Text:">
+            <vspace />
+            First, the number of UTF-8 encoded bytes required to 
+            represent the value is encoded as an unsigned variable
+            length integer with a 0-bit prefix, followed by the
+            full sequence of UTF-8 bytes.
+          </t>
+          <t hangText="Integer">
+            <vspace />
+            The integer's value is encoded as an unsigned variable
+            length integer with a 0-bit prefix. Negative or fractional
+            numbers cannot be represented.
+          </t>
+          <t hangText="Timestamp">
+            <vspace />
+            The timestamp is represented as the number of milliseconds 
+            ellapsed since the standard Epoch (1970-01-01T00:00:00 GMT), 
+            encoded as an unsigned variable length integer with a 0-bit
+            prefix. Timestamps that predate the Epoch cannot be 
+            represented.
+          </t>
+          <t hangText="Raw Binary">
+            <vspace />
+            The number of octets in the sequence is encoded as an
+            unsigned variable length integer with a 0-bit prefix, 
+            followed by the full sequence of octets.
+          </t>
+        </list>
+      </t>
+      
+    </section>
+    
+    <section title="Indexed Representation" anchor="indexed-representation">
+      
+      <t>
+        The serialization of an Indexed Representation group consists of the 
+        one-octet header group prefix followed by up to 64 single-octet 
+        header table index references.
+      </t>
+      
+      <figure><artwork><![CDATA[
+  +--------+--------+--------+--------+---+
+  |10xxxxxx| Index positions (1...64)  ...|
+  +--------+--------------------------+---+
+      ]]></artwork></figure>
+
+      <t>
+        For instance:
+        <list style="hanging">
+          <t hangText="0x80 0x00">
+            <vspace />
+            References item #0 from the header table.
+          </t>
+          <t hangText="0x81 0x00 0x01">
+            <vspace />
+            References items #0 and #1 from the header table.
+          </t>
+        </list>
+      </t>
+                              
+      <t>
+        Indexed Representations do not modify the header table state in any 
+        way. If an Indexed References specifies a header index that has not 
+        yet been allocated or whose value has been cleared, decoding MUST 
+        terminate with an error.
+      </t>
+      
+    </section>
+    
+    <section title="Non-Indexed Literal Representation" anchor="non-indexed-literal">
+      
+      <t>
+        The serialization of a group of Non-Indexed Literal representations
+        consists of the one-octet header prefix followed by up to 64 
+        Literal (name,value) Representations.
+      </t>
+      
+      <figure><artwork><![CDATA[
+  +--------+--------+--------+--------+---+
+  |00xxxxxx| (name,value)'s (1...64)    ...
+  +--------+--------------------------+---+
+      ]]></artwork></figure>
+      
+      <t>
+        For instance:
+        <list style="hanging">
+          <t hangText="0x00 0x01 0x61 0x01 0x62">
+            <vspace />
+            Specifies a single header with name "a" and a UTF-8 String
+            value of "b" is to be handled as a Non-Indexed header (it
+            is not added to the header table).
+          </t>
+        </list>
+      </t>
+      
+    </section>
+    
+    <section title="Indexed Literal Representation" anchor="indexed-literal">
+      
+      <t>
+        The serialization of a group of Indexed Literal representations
+        consists of the one-octet header prefix followed by up to 64 
+        Literal (name,value) Representations.
+      </t>
+      
+      <figure><artwork><![CDATA[
+  +--------+--------+--------+--------+---+
+  |01xxxxxx| (name,value)'s (1...64)    ...
+  +--------+--------------------------+---+
+      ]]></artwork></figure>
+      
+      <t>
+        For instance:
+        <list style="hanging">
+          <t hangText="0x40 0x01 0x61 0x01 0x62">
+            <vspace />
+            Specifies a single header with name "a" and a UTF-8 String
+            value of "b" is to be handled as an Indexed header (it
+            will be added to the header table).
+          </t>
+          <t hangText="0x40 0x21 0x61 0x03">
+            <vspace />
+            Specifies a single header with name "a" and Integer
+            value of 3 is to be handled as an Indexed header (it
+            will be added to the header table).
+          </t>
+        </list>
+      </t>
+      
+    </section>
+    
+    <section title="Indexed Literal Replacement Representation" anchor="indexed-literal-replacement">
+      
+      <t>
+        The serialization of a group of Indexed Literal representations
+        consists of the one-octet header prefix followed by up to 64 
+        single octet index references identifying an existing header table
+        entry followed by the new Literal (name,value) representation meant
+        to replace it.
+      </t>
+      
+      <figure><artwork><![CDATA[
+  +--------+--------+--------+--------+--------+
+  |11xxxxxx| (INDEX | (name,value)(1...64))  ...
+  +--------+--------------------------+--------+
+      ]]></artwork></figure>
+      
+      <t>
+        For instance:
+        <list style="hanging">
+          <t hangText="0xC0 0x03 0x01 0x61 0x01 0x62">
+            <vspace />
+            Specifies that a single header with name "a" and a UTF-8 String
+            value of "b" is to replace the existing (name,value) entry
+            in the header table located at index position #3.
+          </t>
+          <t hangText="0xC0 0x03 0x21 0x61 0x03">
+            <vspace />
+            Specifies that a single header with name "a" and Integer
+            value of 3 is to replace the existing (name,value) entry
+            in the header table located at index position #3.
+          </t>
+        </list>
+      </t>
+      
+    </section>
+      
+    </section>
+          
+      <section title="Unsigned Variable Length Integer Syntax" anchor="uvarint">
+        
+        <t>
+          Unsigned integers are encoded as defined in 
+          <xref target="I-D.ietf-httpbis-header-compression" />.
+        </t>
+
+      </section>
+    
+    <section title="Security Considerations">
+      <t>TBD</t>
+    </section>
+        
+  </middle> 
+
+  <back>
+    <references title="Normative References"> 
+      &rfc2119;
+      &comp;
+    </references>    
+    
+    <references title="Informational References">
+      &rfc6265;
+    </references>
+    
+    <section title="Initial Header Table Entries" anchor="prefilled">
+      
+      <texttable>
+        <ttcol>Index</ttcol>
+        <ttcol>Name</ttcol>
+        <ttcol>Value</ttcol>
+        <ttcol>Type</ttcol>
+      <c>0</c><c>:scheme</c><c>http</c><c>Text</c>
+      <c>1</c><c>:scheme</c><c>https</c><c>Text</c>
+      <c>2</c><c>:host</c><c></c><c></c>
+      <c>3</c><c>:path</c><c>/</c><c></c>
+      <c>4</c><c>:method</c><c>GET</c><c>Text</c>
+      <c>5</c><c>accept</c><c></c><c></c>
+      <c>6</c><c>accept-charset</c><c></c><c></c>
+      <c>7</c><c>accept-encoding</c><c></c><c></c>
+      <c>8</c><c>accept-language</c><c></c><c></c>
+      <c>9</c><c>cookie</c><c></c><c></c>
+      <c>10</c><c>if-modified-since</c><c></c><c></c>
+      <c>11</c><c>keep-alive</c><c></c><c></c>
+      <c>12</c><c>user-agent</c><c></c><c></c>
+      <c>13</c><c>proxy-connection</c><c></c><c></c>
+      <c>14</c><c>referer</c><c></c><c></c>
+      <c>15</c><c>accept-datetime</c><c></c><c></c>
+      <c>16</c><c>authorization</c><c></c><c></c>
+      <c>17</c><c>allow</c><c></c><c></c>
+      <c>18</c><c>cache-control</c><c></c><c></c>
+      <c>19</c><c>connection</c><c></c><c></c>
+      <c>20</c><c>content-length</c><c></c><c></c>
+      <c>21</c><c>content-md5</c><c></c><c></c>
+      <c>22</c><c>content-type</c><c></c><c></c>
+      <c>23</c><c>date</c><c></c><c></c>
+      <c>24</c><c>expect</c><c></c><c></c>
+      <c>25</c><c>from</c><c></c><c></c>
+      <c>26</c><c>if-match</c><c></c><c></c>
+      <c>27</c><c>if-none-match</c><c></c><c></c>
+      <c>28</c><c>if-range</c><c></c><c></c>
+      <c>29</c><c>if-unmodified-since</c><c></c><c></c>
+      <c>30</c><c>max-forwards</c><c></c><c></c>
+      <c>31</c><c>pragma</c><c></c><c></c>
+      <c>32</c><c>proxy-authorization</c><c></c><c></c>
+      <c>33</c><c>range</c><c></c><c></c>
+      <c>34</c><c>te</c><c></c><c></c>
+      <c>35</c><c>upgrade</c><c></c><c></c>
+      <c>36</c><c>via</c><c></c><c></c>
+      <c>37</c><c>warning</c><c></c><c></c>
+      <c>38</c><c>:status</c><c>200</c><c>Integer</c>
+      <c>39</c><c>age</c><c></c><c></c>
+      <c>40</c><c>cache-control</c><c></c><c></c>
+      <c>41</c><c>content-length</c><c></c><c></c>
+      <c>42</c><c>content-type</c><c></c><c></c>
+      <c>43</c><c>date</c><c></c><c></c>
+      <c>44</c><c>etag</c><c></c><c></c>
+      <c>45</c><c>expires</c><c></c><c></c>
+      <c>46</c><c>last-modified</c><c></c><c></c>
+      <c>47</c><c>server</c><c></c><c></c>
+      <c>48</c><c>set-cookie</c><c></c><c></c>
+      <c>49</c><c>vary</c><c></c><c></c>
+      <c>50</c><c>via</c><c></c><c></c>
+      <c>51</c><c>access-control-allow-origin</c><c></c><c></c>
+      <c>52</c><c>accept-ranges</c><c></c><c></c>
+      <c>53</c><c>allow</c><c></c><c></c>
+      <c>54</c><c>connection</c><c></c><c></c>
+      <c>55</c><c>content-disposition</c><c></c><c></c>
+      <c>56</c><c>content-encoding</c><c></c><c></c>
+      <c>57</c><c>content-language</c><c></c><c></c>
+      <c>58</c><c>content-location</c><c></c><c></c>
+      <c>59</c><c>content-md5</c><c></c><c></c>
+      <c>60</c><c>content-range</c><c></c><c></c>
+      <c>61</c><c>link</c><c></c><c></c>
+      <c>62</c><c>location</c><c></c><c></c>
+      <c>63</c><c>p3p</c><c></c><c></c>
+      <c>64</c><c>pragma</c><c></c><c></c>
+      <c>65</c><c>proxy-authenticate</c><c></c><c></c>
+      <c>66</c><c>refresh</c><c></c><c></c>
+      <c>67</c><c>retry-after</c><c></c><c></c>
+      <c>68</c><c>strict-transport-security</c><c></c><c></c>
+      <c>69</c><c>trailer</c><c></c><c></c>
+      <c>70</c><c>transfer-encoding</c><c></c><c></c>
+      <c>71</c><c>warning</c><c></c><c></c>
+      <c>72</c><c>www-authenticate</c><c></c><c></c>
+      <c>73</c><c>user-agent</c><c></c><c></c>
+      </texttable>
+      
+    </section>
+            
+    <section title="Updated Standard Header Definitions">
+      
+      <t>In order to properly deal with the backwards compatibility concerns
+      for HTTP/1, there are several important rules for use of Typed Codecs
+      in HTTP headers:
+      <list style="symbols">
+        <t>All header fields MUST be explicitly defined to use the new header 
+          types. All existing HTTP/1 header fields, then, will continue to be
+          represented as ISO-8859-1 Text unless their standard definitions are
+          updated. The HTTP/2 specification would update the definition of
+          specific known header fields (e.g. content-length, date, if-modified-since,
+          etc).</t>
+        <t>Extension header fields that use the typed codecs will have specific
+          normative transformations to ISO-8859-1 defined.
+          <list style="symbols">
+            <t>UTF-8 Text will be converted to ISO-8859-1 with extended
+               characters pct-encoded</t>
+            <t>Numbers will be converted to their ASCII equivalent values.</t>
+            <t>Date Times will be converted to their HTTP-Date equivalent values.</t>
+            <t>Binary fields will be Base64-encoded.</t>
+          </list>
+        </t>
+        <t>There will be no normative transformation from ISO-8859-1 values
+        into the typed codecs. Implementations are free to apply
+        transformation where those impls determine it is appropriate, but it
+        will be perfectly legal for an implementation to pass a text value
+        through even if it is known that a given header type has a typed codec
+        equivalent (for instance, Content-Length may come through as a number
+        or a text value, either will be valid). This means that when
+        translating from HTTP/1 -> HTTP/2, receiving implementations need to
+        be prepared to handle either value form.</t>
+      </list>
+      </t>
+      
+      <t>A Note of warning: Individual header fields MAY be defined such 
+        that they can be represented using multiple types. Numeric fields, 
+        for instance, can be represented using either the uvarint encoding 
+        or using the equivalent sequence of ASCII numbers. Implementers will 
+        need to be capable of supporting each of the possible variations. 
+        Designers of header field definitions need to be aware of the 
+        additional complexity and possible issues that allowing for 
+        such alternatives can introduce for implementers.</t>
+      
+      <t>Based on an initial survey of header fields currently defined by
+        the HTTPbis specification documents, the following header field 
+        definitions can be updated to make use of the new types</t>
+        
+      <texttable>
+        <ttcol>Field</ttcol>
+        <ttcol>Type</ttcol>
+        <ttcol>Description</ttcol>
+        
+        <c>content-length</c>
+        <c>Numeric or Text</c>
+        <c>
+          Can be represented as either an unsigned, variable-length
+          integer or a sequence of ASCII numbers.
+        </c>
+          
+        <c>date</c>
+        <c>Timestamp or Text</c>
+        <c>
+          Can be represented as either a uvarint encoded timestamp
+          or as text (HTTP-date).
+        </c>
+          
+        <c>max-forwards</c>
+        <c>Numeric or Text</c>
+        <c>
+          Can be represented as either an unsigned, variable-length
+          integer or a sequence of ASCII numbers.
+        </c>
+        
+        <c>retry-after</c>
+        <c>Timestamp, Numeric or Text</c>
+        <c>
+          Can be represented as either a uvarint encoded timestamp,
+          an unsigned, variable-length integer, or the text equivalents
+          of either (HTTP-date or sequence of ASCII numbers)
+        </c>
+          
+        <c>if-modified-since</c>
+        <c>Timestamp or Text</c>
+        <c>
+          Can be represented as either a uvarint encoded timestamp
+          or as text (HTTP-date).
+        </c>
+        
+        <c>if-unmodified-since</c>
+        <c>Timestamp or Text</c>
+        <c>
+          Can be represented as either a uvarint encoded timestamp
+          or as text (HTTP-date).
+        </c>
+        
+        <c>last-modified</c>
+        <c>Timestamp or Text</c>
+        <c>
+          Can be represented as either a uvarint encoded timestamp
+          or as text (HTTP-date).
+        </c>
+        
+        <c>age</c>
+        <c>Numeric or Text</c>
+        <c>
+          Can be represented as either an unsigned, variable-length
+          integer or a sequence of ASCII numbers.
+        </c>
+
+        <c>expires</c>
+        <c>Timestamp or Text</c>
+        <c>
+          Can be represented as either a uvarint encoded timestamp
+          or as text (HTTP-date).
+        </c>
+          
+        <c>etag</c>
+        <c>Binary or Text</c>
+        <c>
+          Can be represented as either a sequence of binary octets 
+          or using the currently defined text format. When represented
+          as binary octets, the Entity Tag MUST be considered to be a
+          Strong Entity tag. Weak Entity Tags cannot be represented 
+          using the binary octet option.
+        </c>
+        
+      </texttable>
+      
+    </section>
+      
+    <section title="Example">
+      
+      <section title="First Header Set:">
+        
+        <t>
+          The first header set to represent is the following:
+        </t>
+        
+        <figure><artwork>
+  :path: /my-example/index.html
+  user-agent: my-user-agent
+  x-my-header: first
+        </artwork></figure>
+  
+        <t>
+          The header table is prefilled as defined in 
+          <xref target="prefilled" />, however, none of 
+          the values represented in the initial set 
+          can be found in the header table. All headers, 
+          then, are encoding using the Indexed Literal
+          Representation:
+        </t>
+        
+        <figure><artwork>
+  43 00 03 16 2f 6d 79 2d 65 78 
+  61 6d 70 6c 65 2f 69 6e 64 65 
+  78 2e 68 74 6d 6c 00 49 6d 79 
+  2d 75 73 65 72 2d 61 67 65 6e 
+  74 0b 78 2d 6d 79 2d 68 65 61 
+  64 65 72 05 66 69 72 73 74 
+        </artwork></figure>
+        
+        <t>
+          Three new entries are added to the header table:
+        </t>
+        
+        <texttable>
+          <ttcol>Index</ttcol>
+          <ttcol>Name</ttcol>
+          <ttcol>Value</ttcol>
+          
+          <c>74</c>
+          <c>:path</c>
+          <c>/my-example/index.html</c>
+          
+          <c>75</c>
+          <c>user-agent</c>
+          <c>my-user-agent</c>
+          
+          <c>76</c>
+          <c>x-my-header</c>
+          <c>first</c>
+          
+        </texttable>
+        
+      </section>
+      
+      <section title="Second Header Set:">
+        
+        <t>
+          The second header set to represent is the following:
+        </t>
+        
+        <figure><artwork>
+  :path: /my-example/resources/script.js
+  user-agent: my-user-agent
+  x-my-header: second
+        </artwork></figure>
+        
+        <t>
+          Comparing this second header set to the first, we see that the 
+          :path and x-my-header headers have new values, while the user-agent
+          value remains unchanged. For the sake of the example let's encode the 
+          :path and x-my-header headers using Indexed Literal Replacement
+          representations. The user-agent header will be encoded as an
+          Indexed Representation.
+        </t>
+        
+        <figure><artwork>
+  80 4b a3 4a 00 4a 1f 2f 6d 79 
+  2d 65 78 61 6d 70 6c 65 2f 72 
+  65 73 6f 75 72 63 65 73 2f 73 
+  63 72 69 70 74 2e 6a 73 00 4c
+  06 73 65 63 6f 6e 64
+        </artwork></figure>
+        
+        <t>
+          Items #74 and #76 added by the previous header set are replaced:
+        </t>
+        
+        <texttable>
+          <ttcol>Index</ttcol>
+          <ttcol>Name</ttcol>
+          <ttcol>Value</ttcol>
+          
+          <c>74</c>
+          <c>:path</c>
+          <c>/my-example/resources/script.js</c>
+          
+          <c>75</c>
+          <c>user-agent</c>
+          <c>my-user-agent</c>
+          
+          <c>76</c>
+          <c>x-my-header</c>
+          <c>second</c>
+          
+        </texttable>
+        
+      </section>
+      
+      <section title="Third Header Set:">
+        
+        <t>
+          Let's suppose a third header set that is identical to the
+          second is sent:
+        </t>
+        
+        <figure><artwork>
+  82 4b 4c 4d
+        </artwork></figure>
+        
+      </section>
+      
+    </section>
+                
+  </back>
+</rfc> 
+ 
