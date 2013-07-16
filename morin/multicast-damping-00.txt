@@ -1,0 +1,784 @@
+
+
+
+Network Working Group                                      T. Morin, Ed.
+Internet-Draft                                              S. Litkowski
+Expires: January 16, 2014                                         Orange
+                                                                K. Patel
+                                                           Cisco Systems
+                                                                J. Zhang
+                                                               R. Kebler
+                                                        Juniper Networks
+                                                           July 15, 2013
+
+
+                        Multicast state damping
+                    draft-morin-multicast-damping-00
+
+Abstract
+
+   This document describes procedures to damp multicast routing state
+   changes and prevent the churn due to the multicast dynamicity at the
+   edge of a network.  The procedures described in this document help
+   avoid uncontrolled control plane load increase on the core routing
+   infrastructure.  New procedures are proposed inspired from BGP
+   unicast route damping principles, but adapted to multicast.  They
+   cover multicast and multicast in VPNs contexts.
+
+Requirements Language
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC 2119 [RFC2119].
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on January 16, 2014.
+
+Copyright Notice
+
+
+
+Morin, et al.           Expires January 16, 2014                [Page 1]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   Copyright (c) 2013 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Terminology  . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   3.  Overview . . . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   4.  Existing mechanisms  . . . . . . . . . . . . . . . . . . . . .  4
+     4.1.  Rate-limiting of multicast control traffic . . . . . . . .  4
+     4.2.  Existing PIM, IGMP and MLD timers  . . . . . . . . . . . .  4
+     4.3.  BGP Route Damping  . . . . . . . . . . . . . . . . . . . .  5
+   5.  Procedures for multicast state damping . . . . . . . . . . . .  6
+   6.  Procedures for multicast in IP VPNs  . . . . . . . . . . . . .  8
+     6.1.  Damping P-tunnel change events . . . . . . . . . . . . . .  9
+   7.  Procedures for Ethernet VPNs . . . . . . . . . . . . . . . . . 10
+   8.  Operational considerations . . . . . . . . . . . . . . . . . . 10
+     8.1.  Enabling and configuring multicast damping . . . . . . . . 10
+     8.2.  Troubleshooting and monitoring . . . . . . . . . . . . . . 11
+     8.3.  Maximum values for exponential decay and thresholds
+           parameters . . . . . . . . . . . . . . . . . . . . . . . . 11
+     8.4.  Default values . . . . . . . . . . . . . . . . . . . . . . 11
+   9.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 11
+   10. Security Considerations  . . . . . . . . . . . . . . . . . . . 11
+   11. Acknowledgements . . . . . . . . . . . . . . . . . . . . . . . 12
+   12. References . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+     12.1. Normative References . . . . . . . . . . . . . . . . . . . 12
+     12.2. Informative References . . . . . . . . . . . . . . . . . . 13
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 13
+
+
+
+
+
+
+
+
+
+
+
+Morin, et al.           Expires January 16, 2014                [Page 2]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+1.  Introduction
+
+   When multicast receivers join and leave a said multicast group or
+   channel at the edge of a network through multicast membership control
+   protocols (IGMP, MLD), multicast routing protocols (e.g.  PIM-SM, or
+   mVPN) adjust multicast routing states accordingly to forward or prune
+   multicast traffic to these receivers.
+
+   Mechanisms need to be put in place to ensure that the load put on the
+   control plane of core routers remains under control regardless of the
+   frequency at which multicast memberships changes are made by end
+   hosts.  By nature multicast memberships change based on the behavior
+   of multicast applications running on end hosts, hence the frequency
+   of membership changes can legitimately be much higher than the
+   typical churn of unicast routing states.
+
+   This document describes procedures aimed at protecting the control
+   plane of the core network infrastructure (more specifically edge
+   routers, core routers and in the case of multicast in VPN contexts
+   BGP Route Reflectors) while at the same time avoiding negative
+   effects on the service provided, although at the expense of a minimal
+   increase in average of bandwidth use in the network.
+
+   The base principle is described in Section 3.  Existing mechanisms
+   that could be relied upon are discussed in Section 4.  Section 5
+   details the proposed procedures.
+
+   Sections 6 and 7 provide more specific details related to multicast
+   in VPNs contexts.
+
+   Finally, Section 8 discusses operational considerations related to
+   the proposed mechanism.
+
+
+2.  Terminology
+
+   TBC
+
+
+3.  Overview
+
+   The procedures described in this document allows the network operator
+   to configure multicast routers so that they can delay the propagation
+   of multicast state prune messages, when faced with a rate of
+   multicast state dynamicity exceeding a certain configurable
+   threshold.  Assuming that the number of multicast states that can be
+   created by a receiver is bounded, delaying the propagation of
+   multicast state pruning results in setting up an upper bound to the
+
+
+
+Morin, et al.           Expires January 16, 2014                [Page 3]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   average frequency at which the router will send state updates to an
+   upstream router.
+
+   From the point of view of a downstream router, this approach has no
+   impact: the multicast routing states changes that it solicits to its
+   upstream router will be honored without any additional delay.  Indeed
+   the propagation of joins is not impacted by the proposed defined
+   procedures, and having the upstream router delay state prune
+   propagation to its own upstream does not affect what traffic is sent
+   to the downstream router.  In particular, the amount of bandwidth
+   used on the link downstream to a router applying this damping
+   technique is not increased.
+
+   This approach increases the average bandwidth utilization on a link
+   upstream to a router applying this technique: indeed, the bandwidth
+   of a said multicast flow will be used for a longer time than if no
+   damping was applied.  That said, it is expected that this technique
+   will allow to meet the goals of protecting the multicast routing
+   infrastructure control plane without a significant average increase
+   of bandwidth; for instance, damping events happening at a frequency
+   higher than one event per X second, can be done without increasing
+   the time during which a multicast flow is present on a link of more
+   than X second.
+
+   To be practical, such a mechanism requires configurability, in
+   particular, needs to offer means to control when damping is triggered
+   and allow delaying Pruning for a longer period of time the more
+   activity there is on a multicast state.
+
+   Note that the issues related to control plane load due to the
+   dynamicity of multicast sources coming and going in the context of
+   ASM multicast, are out of the scope of this document.
+
+
+4.  Existing mechanisms
+
+4.1.  Rate-limiting of multicast control traffic
+
+   [RFC4609] examines multicast security threats and among other things
+   the risk described in Section 1.  A mechanism relying on rate-
+   limiting PIM messages is proposed in section 5.3.3 [RFC4609], but has
+   the identified drawbacks of impacting the service delivered and
+   having side-effects on legitimate users.
+
+4.2.  Existing PIM, IGMP and MLD timers
+
+   In the context of PIM multicast routing protocols (), a mechanism
+   exists that in some context may offer a form of de facto damping
+
+
+
+Morin, et al.           Expires January 16, 2014                [Page 4]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   mechanism for multicast states.  Indeed, when active, the prune
+   override mechanism consist in having a PIM upstream router delay for
+   a certain time [prune override interval] before taking into account a
+   PIM Prune message sent by a downstream neighbor.  This mechanism has
+   not been designed specifically for the purpose of damping multicast
+   state, but as a means to allow PIM to operate on multi-access
+   networks.  See [RFC4601] section 4.3.3.
+
+   However, when active, this mechanism will prevent a downstream router
+   to produce multicast routing protocol messages for a said multicast
+   state that would result in the upstream router to send, to its own
+   upstream, multicast routing protocol messages at a rate higher than
+   1/[prune override interval].
+
+   Similarly, the IGMP and MLD multicast membership control protocols
+   can provide under the right conditions a similar behavior.
+
+   These mechanisms are not considered suitable to meet the goals
+   spelled out in Section 1, the main reasons being that:
+
+   o  when enabled these mechanisms require additional bandwidth on the
+      local link on which the effect of a Prune is delayed
+
+   o  to be active, they may require disabling features that may
+      otherwise be required or useful; one typical example is explicit
+      tracking for IGMP/MLD or PIM
+
+   o  on certain implementation, would require disabling behavior that
+      cannot be turned off
+
+   o  do not provide a suitable level of configurability
+
+   o  do not provide a way to discriminate between multicast flows based
+      on an averaged estimation of their recent past dynamicity
+
+4.3.  BGP Route Damping
+
+   The procedures defined in [RFC2439] for BGP route flap damping are
+   useful for operators who want to control the impact of unicast route
+   churn on the routing infrastructure, and offer a standardized set of
+   parameters to control damping.
+
+   These procedures are not directly relevant in a multicast context,
+   for the following reasons:
+
+   o  they are not specified for multicast routing protocol in general
+
+
+
+
+
+Morin, et al.           Expires January 16, 2014                [Page 5]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   o  even in contexts where BGP routes are used to carry multicast
+      routing states (e.g.  [RFC6514]), these procedures do not allow to
+      implement the principle described in this document, the main
+      reason being that a damped route becomes suppressed, while the
+      target behavior would be to keep advertising when damping is
+      triggered on a multicast route
+
+   However, the set of parameters standardized to control the thresholds
+   of the exponential decay mechanism can be relevantly reused.  This is
+   the approach proposed for the procedures described in this document
+   (Section 5).  Motivations for doing so is to help the network
+   operator deploy this feature based on consistent configuration
+   parameter, and obtain predictable results, without the drawbacks of
+   exposed in Section 4.1 and Section 4.2.
+
+
+5.  Procedures for multicast state damping
+
+   This section describes procedures for multicast state damping
+   satisfying the goals spelled out in Section 1.  This section spells
+   out procedures for (S,G) states in the PIM-SM protocol ([RFC4601] ;
+   they apply unchanged for such states created based on multicast group
+   management protocols (IGMP [RFC3376], MLD [RFC3810]) on downstream
+   interfaces.  How these procedures apply for any-source multicast
+   (ASM) routing state will be covered in a further revision.
+
+   The following notions introduced in [RFC2439] are reused in these
+   procedures:
+
+   figure-of-merit  **a number reflecting the current estimation of past
+      recent activity of an (S,G) multicast routing state, which evolves
+      based on routing events related to this state and based an
+      exponential decay algorithm ; the activation or inactivation of
+      damping on the state is based on this number
+
+   cutoff-threshold parameter  value of the *figure-of-merit* over which
+      damping is applied (configurable value)
+
+   reuse-threshold parameter  value of the *figure-of-merit* under which
+      damping stops being applied (configurable value)
+
+   decay-half-life parameter  period of time used to control how fast is
+      the exponential decay of the *figure-of-merit* (configurable
+      value)
+
+   Additionally to these values a configurable "*increment-factor*"
+   parameter is introduced, that controls by how much the figure-of-
+   merit is incremented on multicast state update events.
+
+
+
+Morin, et al.           Expires January 16, 2014                [Page 6]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   Section Section 8.4 will propose default values for all these
+   parameters.
+
+   On reception of updated multicast membership or routing information
+   on a downstream interface I for a said (S,G) state, that results in a
+   change of the state of the PIM downstream state machine (see section
+   4.5.3 of [RFC4601]), a router implementing these procedures MUST:
+
+   o  apply unchanged procedures for everything relating to what
+      multicast traffic ends up traffic being sent on downstream
+      interfaces, including interface I
+
+   o  increasing the *figure-of-merit* for the (S,G) by the *increment-
+      factor* (updating the *figure-of-merit* based on the decay
+      algorithm must be done prior to this increment)
+
+   o  update the damping state for the (S,G) state: damping becomes
+      active on the state if the recomputed *figure-of-merit* is above
+      the configured *cutoff-threshold*
+
+   o  update the upstream state machine for (S,G) as per section 4.5.7
+      of [RFC4601], with the following change : if the state machine
+      transitions to NotJoined state because of the reception of a PIM
+      or IGMP/MLD message on a downstream interface (i.e. in the
+      terminology of [RFC4601] inherited_olist(S,G) becomes NULL ), and
+      if damping is active on the state, the router SHOULD NOT send the
+      resulting Prune(S,G) message to its upstream neighbor ; this
+      message MUST be sent when the damping state becomes, i.e. inactive
+      when *figure-of-merit* decays to a value below the configured
+      *reuse-threshold*
+
+   Same techniques as the ones described in [RFC2439] can be applied to
+   determine when the figure-of-merit value is recomputed based on the
+   exponential decay algorithm and the configured *decay-half-life*.
+   Given the specificity of multicast applications, it is REQUIRED for
+   the implementation to let the operator configure the *decay-half-
+   life* in seconds, rather than in minutes.  When the recomputation is
+   done periodically, the period should be low enough to not
+   significantly delay the inactivation of damping on a multicast state
+   beyond what the operator wanted to configure (i.e. for a half-life of
+   10s, recomputing the *figure-of-merit* each minute would result in a
+   multicast state to remained damped for a time longer than what the
+   parameters are supposed to command).
+
+   When a (S,G) state expires, its associated *figure-of-merit* and
+   damping state are removed as well.
+
+   These procedures do interact with PIM procedures related to refreshes
+
+
+
+Morin, et al.           Expires January 16, 2014                [Page 7]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   or expiration of multicast routing states.  Indeed, PIM Prune
+   messages triggered by the expiration of the (S,G) keep-alive timer,
+   are not suppressed or delayed (see Section 8.3 for a discussion on
+   why this specific aspect is not expected to impede the efficiency of
+   damping procedures), and the reception of Join messages not causing
+   transition of state on the downstream interface does not lead to
+   incrementing the *figure-of-merit*.
+
+   Note that these procedures do not impact the PIM assert mechanism, in
+   particular PIM Prune messages triggered by a change of the PIM assert
+   winner on the upstream interface, are not suppressed or delayed.
+
+   Note also that no action is triggered based on the reception of PIM
+   Prune messages (or corresponding IGMP/MLD messages) that relate to
+   non-existing (S,G) state, in particular, no *figure-of-merit* or
+   damping state is created in this case.
+
+
+6.  Procedures for multicast in IP VPNs
+
+   In VPN contexts, providing isolation between customers of a shared
+   infrastructure is a core requirement resulting in even stringent
+   expectations with regards to risks of denial of service attacks.
+   Procedures for multicast support in IP VPNs are described in
+   [RFC6513] and [RFC6514] and section 16 of [RFC6514] specifically
+   spells out the need for damping the activity of C-multicast and Leaf
+   Auto-discovery route.
+
+   The procedures described in Section 5 can be applied in the VRF
+   PIM-SM implementation (in the "C-PIM instance"), with the
+   corresponding action to suppressing the emission of a Prune(S,G)
+   message being to not withdraw the C-multicast Source Tree Join
+   (C-S,C-G) BGP route.  Implementation of [RFC6513] relying on the use
+   of PIM to carry C-multicast routing information MUST support this
+   technique.
+
+   In the context of [RFC6514] where BGP is used to distribute
+   C-multicast routing information, an additional option consists in
+   applying damping at the level of the BGP implementation based on
+   existing BGP damping mechanism, applied to C-multicast Source Tree
+   Join routes and Shared Tree Join routes (and also Leaf A-D routes -
+   see Section 6.1), and modified to provide the same effect of
+   procedures described in Section 5 along the following guidelines:
+
+   o  not withdrawing (instead of not advertising) damped routes
+
+   o  providing means to configure the half-life in seconds if that
+      option is not already available
+
+
+
+Morin, et al.           Expires January 16, 2014                [Page 8]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   o  using parameters for the exponential decay that are specific to
+      multicast, based on default values and multicast specific
+      configuration
+
+   Note that in a context where BGP Route Reflectors are used, it can be
+   considered useful to also be able to apply damping on RRs.
+   Additionally, for mVPN Inter-AS deployments, it can be needed to
+   protect one AS from the dynamicity of multicast VPN routing events
+   from other ASes.  In that perspective, it is RECOMMENDED for
+   implementations to support damping mVPN C-multicast routes directly
+   into BGP, without relying on the PIM-SM state machine.
+
+   The choice to implement damping based on BGP routes or the procedures
+   described in Section 5, is up to the implementor, but at least one of
+   the two MUST be implemented; keeping in mind that in contexts where
+   damping on RRs and ASBRs the BGP approach is RECOMMENDED.
+
+   Note well that damping SHOULD NOT be applied to BGP routes of the
+   following sub-types: "Intra-AS I-PMSI A-D Route", "Inter-AS I-PMSI
+   A-D Route", "S-PMSI A-D Route", and "Source Active A-D Route".
+
+   The following sub-sections describe additional procedures providing
+   coverage against harmful effects of high multicast membership state
+   dynamicity specific to mVPNs, and preserving the goals spelled out in
+   Section 1.
+
+6.1.  Damping P-tunnel change events
+
+   When selective P-tunnels are used (see section 7 of [RFC6513]), the
+   effect of updating the upstream state machine for a said (C-S,C-G)
+   state on a PE connected to multicast receivers, is not only to
+   generate activity to propagate C-multicast routing information to the
+   source connected PE, but also to possibly trigger changes related to
+   the P-tunnels carrying (C-S,C-G) traffic.  Protecting the provider
+   network for an excessive amount of change in the state of P-tunnels
+   is required, and this section details how it can be done.
+
+   A PE implementing these procedures for mVPN MUST damp Leaf A-D
+   routes, in the same manner as it would for C-multicast routes (see
+   Section 6).
+
+   A PE implementing these procedures for mVPN MUST damp the activity
+   related to removing itself from a P-tunnel.  Possible ways to do so
+   depend on the type of P-tunnel, and local implementation details are
+   left up to the implementor.
+
+   The following is proposed as example of how the above can be
+   achieved.
+
+
+
+Morin, et al.           Expires January 16, 2014                [Page 9]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   o  For P-tunnels implemented with the PIM protocol, this consists in
+      applying multicast state damping techniques describe in
+      Section 5to the P-PIM instance, at least for (S,G) states
+      corresponding to P-tunnels.
+
+   o  For P-tunnels implemented with the mLDP protocol, this consists in
+      applying damping techniques completely similar as the one
+      described in Section 5, but generalized to apply to mLDP states
+
+   o  For root-initiated P-tunnel (P-tunnels implemented with the P2MP
+      RSVP-TE, or relying on ingress replication), no particular action
+      needs to be implemented to damp P-tunnels membership as soon as
+      the activity of Leaf A-D route is damped
+
+   o  Another possibility is to base the decision to join or not join
+      the P-tunnel to which a said (C-S,C-G) is bound, and to advertise
+      or not advertise a Leaf A-D route related to (C-S,C-G), based on
+      whether or not a C-multicast Source Tree Join route is being
+      advertised for (C-S,C-G), rather than by relying on the state of
+      the C-PIM Upstream state machine for (C-S,C-G)
+
+
+7.  Procedures for Ethernet VPNs
+
+   Specifications exists to support or optimize multicast and broadcast
+   in the context of Ethernet VPNs ([I-D.ietf-l2vpn-vpls-mcast],
+   [I-D.ietf-l2vpn-evpn]).  The said specifications make use of S-PMSI
+   and P-tunnels and for this reason, an implementation of these
+   procedures MUST follow the procedures described in Section 6.1.
+
+
+8.  Operational considerations
+
+8.1.  Enabling and configuring multicast damping
+
+   In the context of flat multicast routing, it is proposed that
+   enabling this multicast damping mechanism at the edge of a network
+   providing a multicast service, for instance at receiver-facing
+   routers or in ASBRs, will be sufficient to address the targeted
+   issue.  Additionally, these procedures can be enabled on core routers
+   as well.
+
+   In the context of multicast VPNs, these procedures would be enabled
+   on PE routers.  Additionally in the case of C-multicast routing based
+   on BGP extensions ([RFC6514]) these procedures can be enabled on
+   ASBRs, and possibly Route Reflectors as well.
+
+
+
+
+
+Morin, et al.           Expires January 16, 2014               [Page 10]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+8.2.  Troubleshooting and monitoring
+
+   Implementing the damping mechanisms described in this document should
+   be complemented by appropriate tools to observe and troubleshoot
+   damping activity.
+
+   More specifically it is RECOMMENDED to complement the existing
+   interface providing information on multicast states with information
+   on eventual damping of corresponding states (e.g.  MRIB states).  In
+   the case of mVPN this applies also to information on P-tunnels
+   damping, and when BGP is used for C-multicast routing propagation, to
+   BGP C-multicast routes.
+
+8.3.  Maximum values for exponential decay and thresholds parameters
+
+   [TBC]
+
+8.4.  Default values
+
+   [TBC]
+
+
+9.  IANA Considerations
+
+   This document makes no request of IANA.
+
+   Note to RFC Editor: this section may be removed on publication as an
+   RFC.
+
+
+10.  Security Considerations
+
+   The procedures defined in this document do not introduce additional
+   security issues not already present in the contexts addressed, and
+   actually aim at addressing some of the identified risks without
+   introducing as much denial of service risk as some of the mechanisms
+   already defined.
+
+   The protection provided relates to the control plane of the multicast
+   routing protocols, including the components implementing the routing
+   protocols and the components responsible for updating the multicast
+   forwarding plane.
+
+   The procedures describe are meant to provide some level of protection
+   for the router on which they are enabled by reducing the amount of
+   routing state updates that it needs to send to its upstream neighbor
+   or peers, but do not provide any reduction of the control plane load
+   related to processing routing information from downstream neighbors.
+
+
+
+Morin, et al.           Expires January 16, 2014               [Page 11]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   Protecting routers from an increase in control plane load due to
+   activity on downstream interfaces toward core routers (or in the
+   context of BGP-based mVPN C-multicast routing, BGP peers) shall rely
+   upon the activation of damping on corresponding downstream neighbors
+   (or BGP peers) and/or at the edge of the network.  Protecting routers
+   from an increase in control plane load due to activity on customer-
+   facing downstream interfaces or downstream interfaces to routers in
+   another administrative domain, is out of the scope of this document
+   and should rely upon already defined mechanisms (see [RFC4609]).
+
+   To be effective the procedures described here must be complemented by
+   configuration limiting the number of multicast states that can be
+   created on a multicast router through protocol interactions with
+   multicast receivers, neighbor routers in adjacent ASes, or in
+   multicast VPN contexts with multicast CEs.  Note well that the two
+   mechanism may interact: state for which Prune has been requested may
+   still remain taken into account for some time if damping has been
+   triggered and hence result in otherwise acceptable new state from
+   being successfully created.
+
+   Additionally, it is worth noting that these procedures are not meant
+   to protect against peaks of control plane load, but only address
+   averaged load.  For instance, assuming a set of multicast states
+   submitted to the same Join/Prune events, damping can prevent more
+   than a certain number of Join/Prune messages to be sent upstream in
+   the period of time that elapses between the reception of Join/Prune
+   messages triggering the activation of damping on these states and
+   when damping becomes inactive after decay.
+
+
+11.  Acknowledgements
+
+   We would like to thank Bruno Decreane, Jeff Haas and Lenny Giuliano
+   for discussions that helped shape this proposal.  We would also like
+   to thank Yakov Rekhter and Eric Rosen for their reviews and helpful
+   comments.  Thanks to Wim Henderickx for his comments and support of
+   this proposal.
+
+
+12.  References
+
+12.1.  Normative References
+
+   [I-D.ietf-l2vpn-evpn]
+              Sajassi, A., Aggarwal, R., Henderickx, W., Balus, F.,
+              Isaac, A., and J. Uttaro, "BGP MPLS Based Ethernet VPN",
+              draft-ietf-l2vpn-evpn-04 (work in progress), July 2013.
+
+
+
+
+Morin, et al.           Expires January 16, 2014               [Page 12]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   [I-D.ietf-l2vpn-vpls-mcast]
+              Aggarwal, R., Rekhter, Y., Kamite, Y., and L. Fang,
+              "Multicast in VPLS", draft-ietf-l2vpn-vpls-mcast-14 (work
+              in progress), July 2013.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC2439]  Villamizar, C., Chandra, R., and R. Govindan, "BGP Route
+              Flap Damping", RFC 2439, November 1998.
+
+   [RFC3376]  Cain, B., Deering, S., Kouvelas, I., Fenner, B., and A.
+              Thyagarajan, "Internet Group Management Protocol, Version
+              3", RFC 3376, October 2002.
+
+   [RFC3810]  Vida, R. and L. Costa, "Multicast Listener Discovery
+              Version 2 (MLDv2) for IPv6", RFC 3810, June 2004.
+
+   [RFC4601]  Fenner, B., Handley, M., Holbrook, H., and I. Kouvelas,
+              "Protocol Independent Multicast - Sparse Mode (PIM-SM):
+              Protocol Specification (Revised)", RFC 4601, August 2006.
+
+   [RFC6513]  Rosen, E. and R. Aggarwal, "Multicast in MPLS/BGP IP
+              VPNs", RFC 6513, February 2012.
+
+   [RFC6514]  Aggarwal, R., Rosen, E., Morin, T., and Y. Rekhter, "BGP
+              Encodings and Procedures for Multicast in MPLS/BGP IP
+              VPNs", RFC 6514, February 2012.
+
+12.2.  Informative References
+
+   [RFC4609]  Savola, P., Lehtonen, R., and D. Meyer, "Protocol
+              Independent Multicast - Sparse Mode (PIM-SM) Multicast
+              Routing Security Issues and Enhancements", RFC 4609,
+              October 2006.
+
+
+Authors' Addresses
+
+   Thomas Morin (editor)
+   Orange
+   2, avenue Pierre Marzin
+   Lannion  22307
+   France
+
+   Email: thomas.morin@orange.com
+
+
+
+
+
+Morin, et al.           Expires January 16, 2014               [Page 13]
+
+Internet-Draft           Multicast state damping               July 2013
+
+
+   Stephane Litkowski
+   Orange
+   France
+
+   Email: stephane.litkowski@orange.com
+
+
+   Keyur Patel
+   Cisco Systems
+   170 W. Tasman Drive
+   San Jose, CA  95134
+   USA
+
+   Email: keyupate@cisco.com
+
+
+   Jeffrey (Zhaohui) Zhang
+   Juniper Networks Inc.
+   10 Technology Park Drive
+   Westford, MA  01886
+   USA
+
+   Email: zzhang@juniper.net
+
+
+   Robert Kebler
+   Juniper Networks Inc.
+   10 Technology Park Drive
+   Westford, MA  01886
+   USA
+
+   Email: rkebler@juniper.net
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Morin, et al.           Expires January 16, 2014               [Page 14]
+
