@@ -1,0 +1,740 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd" [
+    <!ENTITY rfc1034 PUBLIC ''
+      'http://xml.resource.org/public/rfc/bibxml/reference.RFC.1034.xml'>
+    <!ENTITY rfc1035 PUBLIC ''
+      'http://xml.resource.org/public/rfc/bibxml/reference.RFC.1035.xml'>
+    <!ENTITY rfc2119 PUBLIC ''
+      'http://xml.resource.org/public/rfc/bibxml/reference.RFC.2119.xml'>
+    <!ENTITY rfc2671 PUBLIC ''
+      'http://xml.resource.org/public/rfc/bibxml/reference.RFC.2671.xml'>
+    <!ENTITY rfc4033 PUBLIC ''
+      'http://xml.resource.org/public/rfc/bibxml/reference.RFC.4033.xml'>
+    <!ENTITY rfc4034 PUBLIC ''
+      'http://xml.resource.org/public/rfc/bibxml/reference.RFC.4034.xml'>
+    <!ENTITY rfc4035 PUBLIC ''
+      'http://xml.resource.org/public/rfc/bibxml/reference.RFC.4035.xml'>
+    <!ENTITY rfc4786 PUBLIC ''
+    'http://xml.resource.org/public/rfc/bibxml/reference.RFC.4786.xml'>
+    <!ENTITY rfc6824 PUBLIC ''
+    'http://xml.resource.org/public/rfc/bibxml/reference.RFC.6824.xml'>
+    <!ENTITY rfc6891 PUBLIC ''
+    'http://xml.resource.org/public/rfc/bibxml/reference.RFC.6891.xml'>
+    <!ENTITY rfc6982 PUBLIC ''
+      'http://xml.resource.org/public/rfc/bibxml/reference.RFC.6982.xml'>
+
+]>
+
+<rfc category="std" ipr="trust200902" docName="draft-wouters-edns-tcp-chain-query-01">
+
+<?xml-stylesheet type='text/xsl' href='rfc2629.xslt' ?>
+
+<?rfc toc="yes" ?>
+<?rfc symrefs="yes" ?>
+<?rfc sortrefs="yes"?>
+<?rfc iprnotified="no" ?>
+<?rfc strict="yes" ?>
+
+    <front>
+        <title>TCP chain query requests in DNS</title>
+        <author initials='P.' surname="Wouters" fullname='Paul Wouters'>
+            <organization>Red Hat</organization>
+            <address>
+              <email>pwouters@redhat.com</email>
+            </address>
+        </author>
+        <date month="October" year="2013" />
+        <area>int</area>
+        <workgroup>dnsext</workgroup>
+
+        <abstract><t>
+            This document defines an EDNS0 extension that can be used
+            by a DNSSEC enabled Recursive Nameserver configured as
+            a forwarder to send a single query over TCP requesting to
+            receive a complete validation path along with the regular
+            query answer.
+        </t></abstract>
+    </front>
+
+    <middle>
+        <section title="Introduction">
+          <t>
+            Traditionally, clients operate in stub-mode for DNS. For
+            each DNS question the client needs to resolve, it sends a
+            single query to an upstream DNS resolver to obtain a single
+            DNS answer. When DNSSEC <xref target='RFC4033'/> is deployed
+            on such clients, validation requires that the client obtains
+            all the (intermediate) information from the DNS root down to
+            the queried-for hostname so it can perform DNSSEC validation
+            on the complete chain of trust.
+           </t>
+           <t>
+            For example, the validated answer for the question of the A
+            record for the zone "example.com" requires over a hundred
+            DNS queries. That many queries adds a significant number
+            of round-trip delays that is considered unusable by current
+            user expectation. It especially affects web browsers which
+            usually need to lookup dozens of hostnames to render a single
+            web page.
+          </t>
+          <t>
+            This document specifies an EDNS0 extension that allows a
+            validating recursive name server running as a forwarder
+            to open a TCP connection to another recursive name server
+            and request a DNS chain answer using one DNS query/answer
+            pair. This reduces the number of round-trip times
+            ("RTT") to two. If combined with <xref target="TCP-KEEPALIVE"/>
+            there is only 1 RTT. While the upstream DNS resolver
+            still needs to perform all these queries, it usually has
+            a much bigger cache and does not experience significant
+            slowdown from last-mile latency.
+          </t>
+
+          <t>
+            This EDNS0 extension allows the Forwarder to indicate which
+            part of the DNS hierarchy it already contains in its cache.
+            This reduces the amount of data required to be transferred
+            and reduces the work the upstream Resolving Nameserver has
+            to perform.
+           </t>
+           <t>
+            This EDNS0 extension is only intended for Forwarders.  It can
+            (and should be) ignored by Authoritative Nameservers and by
+            Recursive Nameservers that do not support this EDNS0 option.
+           </t>
+
+            <section title="Requirements Notation">
+                <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL",
+                "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY",
+                and "OPTIONAL" in this document are to be interpreted as
+                described in <xref target="RFC2119"/>.</t>
+            </section>
+          </section>
+
+        <section title="Terminology">
+            <t><list style="hanging">
+                <t hangText="Stub Resolver:">
+                A simple DNS protocol implementation on the client side
+                as described in <xref target="RFC1034"/> section 5.3.1.</t>
+                <t hangText="Authoritative Nameserver:">
+                A nameserver that has authority over one or more DNS zones.
+                These are normally not contacted by clients directly but by
+                Recursive Resolvers. Described in <xref target="RFC1035"/>
+                chapter 6.</t>
+                <t hangText="Recursive Resolver:">
+                A nameserver that is responsible for resolving domain names
+                for clients by following the domain's delegation chain,
+                starting at the root. Recursive Resolvers frequently use
+                caches to be able to respond to client queries quickly.
+                Described in <xref target="RFC1035"/> chapter 7.</t>
+                <t hangText="Validating Resolver:">
+                A recursive nameserver that also performs DNSSEC <xref
+                target='RFC4033'/> validation.
+                </t>
+                <t hangText="Forwarder:">
+                A Recursive Resolver that is using another (upstream)
+                Recursive Resolver instead of querying Authoritative
+                Nameservers directly. It still performs validation.
+                </t>
+            </list></t>
+        </section>
+
+        <section title="Overview" anchor="overview">
+         <t>
+          When DNSSEC is deployed on the client, it can no longer delegate
+          all DNS work to the upstream Resolving Nameserer. Obtaining just
+          the DNS answer itself is not enough to validate that answer
+          using DNSSEC. For DNSSEC validation, the client requires
+          a locally running validating DNS server configured as Resolving
+          Nameserver so it can confirm DNSSEC validation of all intermediary
+          DNS answers. It can configure itself as a Forwarder if the DHCP
+          server has indicated that one or more Resolving Nameservers
+          are available. Regardless, generating the required queries
+          for validation adds a significant delay in answering the DNS
+          question of the locally running applications. The application
+          has to wait while the Forwarder on the client is querying for
+          all the intermediate work. Each round-trip adds to the total
+          time waiting on DNS resolving to complete. This makes DNSSEC
+          resolving impractical on networks with a high latency.
+         </t>
+         <t>
+          The edns-tcp-chain-query option allows the client to request
+          all intermediate DNS data it requires to resolve and validate
+          a particular DNS answer in a single round-trip DNS query and
+          answer. 
+         </t>
+         <t>
+          Since this data is most likely larger than the common maximum
+          UDP packet size, the server must only return the additional
+          data when using the TCP transport.  Requiring TCP furthermore
+          avoid DNS amplification attacks.
+         </t>
+          
+         <t>
+         The format of this option is described in <xref target="format" />.
+         </t>
+         <t>
+          As described in <xref target="responding" />, a recursive
+          nameserver could use this EDNS0 option to include additional
+          data required by the client in the Authority Section of the
+          DNS answer packet when using the TCP transport. The Answer Section
+          remains unchanged from a traditional DNS answer and contains
+          the answer and related DNSSEC entries.
+         </t>
+         <t>The edns-tcp-chain-query EDNS0 option MAY be sent over UDP
+            as a discovery method. A DNS server receiving
+            edns-tcp-chain-query over UDP MAY add an empty
+            edns-tcp-chain-query option in its answer to indicate that it
+            supports edns-tcp-chain-query when the TCP transport is used.
+         </t>
+         <t>
+          The mechanisms provided by edns-tcp-chain-query raise various security
+          related concerns, related to the additional work and bandwidth as
+          well as privacy issues with the cache. These concerns are described in
+          <xref target="security" />.
+         </t>
+       </section>
+
+       <section title="Option Format" anchor="format">
+           <t>This draft uses an EDNS0 (<xref target="RFC2671"/>) option to
+           include client IP information in DNS messages. The option
+           is structured as follows:</t>
+
+           <figure><artwork align="left"><![CDATA[
+                  
+                     1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-------------------------------+-------------------------------+
+!         OPTION-CODE           !         OPTION-LENGTH         !
++-------------------------------+-------------------------------+
+~                Last Known Query Name (FQDN)                   ~
++---------------------------------------------------------------+
+
+]]></artwork></figure>
+
+            <t><list style="symbols">
+                <t>
+                 (Defined in <xref target="RFC2671"/>) OPTION-CODE,
+                 2 octets, for edns-tcp-chain-query is [TBD].
+                </t>
+                <t>
+                 (Defined in <xref target="RFC2671"/>) OPTION-LENGTH,
+                 2 octets, contains the length of the payload (everything
+                  after Option-length) in octets.
+                </t>
+                <t>
+                 Last Known Query Name, a variable length FDQN of the
+                 requested start point of the chain. This entry is the
+                 'lowest' known entry in the DNS chain known by the
+                 recursive server seeking a edns-tcp-chain-query answer.
+                 The end point of the chain is obtained from the DNS
+                 Query Section itself. No compression is allowed for this value.
+                </t>
+                <t>
+                 Assigned by IANA in 
+                 <eref target="http://www.iana.org/assignments/address-family-numbers/">IANA-AFI</eref>.
+                 </t>
+            </list>
+            </t>
+        </section>
+
+        <section title="Protocol Description">
+          <section anchor="discovery" title="Discovery of Support">
+           <t>A Forwarder may include a zero-length edns-tcp-chain-query
+           option in queries over UDP or TCP to
+              discover the DNS server capability for
+              edns-tcp-chain-query. DNS Servers that support and are
+              willing to accept chain queries over TCP SHOULD respond to
+              a zero-length edns-tcp-chain-query received over UDP or TCP
+              queries by including a zero-length edns-tcp-chain-query
+              option in the answer. A Forwarder MAY then switch to the
+              TCP transport and sent a non-zero edns-tcp-chain-query
+              value to request a chain-query response from the DNS server.
+           </t>
+          </section>
+          <section anchor="querying" title="Generating a Query">
+            <t>
+              The edns-tcp-chain-query option should generally be deployed
+              by Forwarders, as described in <xref target="send_when" />.
+            </t>
+
+            <t>
+              In this option value, the Forwarder sets the last
+              known entry point in the chain - furthest from the root - that it already
+              has a DNSSEC validated (secure or not) answer for in its cache.
+              The upstream Recursive Resolver does not need to include
+              any part of the chain from the root down to this option's FQDN. 
+              A complete example is described in <xref target="example" />.
+            </t>
+
+          </section>
+
+          <section anchor="responding" title="Generating a Response">
+            <t>
+              When a query containing a non-zero edns-tcp-chain-query
+              option is received over a TCP connection from a
+              Forwarder, the upstream Recursive Resolver supporting
+              edns-tcp-chain-query MAY respond by confirming that it is
+              returning a DNS Query Chain. To do so, it MUST set the
+              edns-tcp-chain-query option with an OPTION-LENGTH of zero to
+              indicate the DNS answer contains a Chain Query. It extends
+              the Authority Section for the DNS answer packet with the
+              required DNS RRSets resulting in an Authority Section that
+              contains a complete chain of DNS RRsets that start with the
+              first chain element below the received Last Known Query Name
+              upto and including the NS and DS RRsets that represent the
+              zone cut (authoritative servers) of the QNAME. The actual
+              DNS answer to the question in the Query Section is placed
+              in the DNS Answer Section identical to traditional DNS
+              answers. If the received query has the DNSSEC OK flag set,
+              all required DNSSEC related records must be added to their
+              appropriate sections. This includes records required for
+              proof of non-existence of regular and/or wildcard records,
+              such as NSEC or NSEC3 records.
+            </t>
+
+            <t>
+              Recursive Resolvers that have not implemented or enabled
+              support for the edns-tcp-chain-query option, or are
+              otherwise unwilling to perform the additional work for a
+              Chain Query due to work load, may safely ignore the option
+              in the incoming queries. Such a server MUST NOT include
+              an edns-tcp-chain-query option when sending DNS answer
+              replies back, thus indicating it is not able to support
+              Chain Queries at this time.
+            </t>
+
+            <t>
+              Requests with wrongly formatted options (i.e. bogus FQDN) MUST
+              be rejected and a FORMERR response must be returned to the
+              sender, as described by <xref target="RFC2671"/>, Transport
+              Considerations.
+            </t>
+
+            <t>
+              Requests resulting in chains that the receiving resolver is
+              unwilling to serve can be rejected by sending a REFUSED response 
+              to the sender, as described by <xref target="RFC2671"/>,
+              Transport Considerations. This refusal can be used for chains that
+              would be too big or chains that would reveal too much information
+              considered private.
+            </t>
+
+            <t>At any time, a DNS server that has determined that it is
+            running low on resources can refuse to acknowledge a Chain
+            Query by omitting the edns-tcp-chain-query option. It may do
+            so even if it conveyed support to a DNS client previously. If
+            <xref target="TCP-KEEPALIVE"/> is used, it may even change
+            its support for edns-tcp-chain-query within the same TCP
+            session. </t>
+
+            <t>
+             If the DNS request results in an CNAME or DNAME for the
+             Answer Section, the DNS server MUST return these records in
+             the Answer Section similar to regular DNS processing. It
+             MUST NOT follow the CNAME or DNAME. Otherwise, both the
+             CNAME or DNAME and the followed destination would end up
+             in the Answer Section. [is that actually a problem? Jelte
+             thought so, but I am not sure]
+            </t>
+
+            <t>
+              In any case, the response from the receiving resolver to
+              the client resolver MUST NOT contain the edns-tcp-chain-query
+              option if none was present in the client's resolver
+              original request.
+            </t>
+          </section>
+
+        <section anchor="send_when" title="Sending the Option">
+          <t>
+           When edns-tcp-chain-query is available, the downstream
+           Resolving Nameserver can adjust its query strategy based on
+           the desired queries and its cache contents.
+          </t>
+
+          <t>
+            A Forwarder can request the edns-tcp-chain-query option with
+            every outgoing DNS query. However, it is RECOMMENDED that
+            Forwarders remember which upstream Resolving Nameservers
+            did not return the option (and additional data) with their
+            response. The Forwarder SHOULD fallback to regular DNS for
+            subsequent queries to those Recursive Nameservers. It MAY
+            switch to another Resolving Nameserver that does support
+            the edns-tcp-chain-query option or try again later to see
+            if the server has become less loaded and is now willing to
+            answer with Query Chains.
+          </t>
+          </section>
+          </section>
+
+        <section title="Protocol  Considerations">
+        <section title="DNSSEC Considerations">
+          <t>
+            The presence or absence of an OPT resource record containing
+            an edns-tcp-chain-query option in a DNS query does not change
+            the usage of those resource records and mechanisms used to
+            provide data origin authentication and data integrity to
+            the DNS, as described in <xref target="RFC4033" />, <xref
+            target="RFC4034" /> and <xref target="RFC4035" />.
+          </t>
+        </section>
+
+        <section title="NS record Considerations">
+          <t>
+           When a DNSSEC chain is supplied via edns-tcp-chain-query, the
+           Forwarder no longer requires to use the NS RRset, as it can
+           construct the validation path via the DNSKEY and DS RRsets
+           without using the NS RRset. However, it is prefered that
+           the Forwarder can populate its cache with this information
+           regardless, to avoid requiring queries in the future just to
+           obtain the missing NS records.  Therefor, edns-tcp-chain-query
+           responses MUST include the NS RRset from the child zone,
+           which includes DNSSEC RRSIG records required for validation.
+          </t>
+        </section>
+
+      <section title="TCP Session Management">
+
+	<t>It is recommended that TCP Chain Queries are used in combination with
+           <xref target="TCP-KEEPALIVE"/>.
+        </t>
+
+	<t>Both DNS clients and servers are subject to resource
+	  constraints which will limit the extent to which TCP
+	  Chain Queries can be executed. Effective limits for the number of
+	  active sessions that can be maintained on individual
+	  clients and servers should be established, either as
+	  configuration options or by interrogation of process
+	  limits imposed by the operating system.</t>
+
+	<t>In the event that there is greater demand for TCP Chain Queries
+	  than can be accommodated, DNS servers may stop advertising
+	  the edns-tcp-query-chain option in successive DNS messages.
+	  This allows, for example, clients with other candidate servers
+	  to query to establish new TCP sessions with different servers
+	  in expectation that those servers might still allow TCP Chain
+	  Queries.
+	  </t>
+      </section>
+
+      <section title="Non-Clean Paths">
+	<t>Many paths between DNS clients and servers suffer from
+	  poor hygiene, limiting the free flow of DNS messages that
+	  include particular EDNS0 options, or messages that exceed
+	  a particular size. A fallback strategy similar to that
+	  described in <xref target="RFC6891"/> section 6.2.2 SHOULD
+	  be employed to avoid persistent interference due to
+	  non-clean paths.</t>
+      </section>
+
+      <section title="Anycast Considerations">
+	<t>DNS servers of various types are commonly deployed using
+	  anycast <xref target="RFC4786"/>.</t>
+
+	<t>Successive DNS transactions between a client and server
+	  using UDP transport may involve responses generated by different
+	  anycast nodes, and the use of anycast in the implementation
+	  of a DNS server is effectively undetectable by the client. The
+	  edns-tcp-chain-query option SHOULD NOT be included in responses
+	  using UDP transport from servers provisioned using anycast
+	  unless all anycast server nodes are capable of processing the
+	  edns-tcp-query-chain option.
+	  </t>
+
+	<t>Changes in network topology between clients and anycast
+	  servers may cause disruption to TCP sessions making use
+	  of edns-tcp-chain-query more often than with TCP sessions
+	  that omit it, since the TCP sessions are expected to be
+	  longer-lived. Anycast servers MAY make use of TCP multipath
+	  <xref target="RFC6824"/> to anchor the server side of the
+	  TCP connection to an unambiguously-unicast address in
+	  order to avoid disruption due to topology changes.</t>
+      </section>
+
+        </section>
+
+
+        <section anchor="implementation" title="Implementation Status">
+         <t>
+           This section records the status of known implementations of
+           the protocol defined by this specification at the time of
+           posting of this Internet-Draft, and is based on a proposal
+           described in <xref target="RFC6982" />.  The description of
+           implementations in this section is intended to assist the
+           IETF in its decision processes in progressing drafts to RFCs.
+           Please note that the listing of any individual implementation
+           here does not imply endorsement by the IETF.  Furthermore,
+           no effort has been spent to verify the information presented
+           here that was supplied by IETF contributors.  This is not
+           intended as, and must not be construed to be, a catalog of
+           available implementations or their features.  Readers are
+           advised to note that other implementations may exist.
+         </t>
+         <t>
+           According to <xref target="RFC6982" />, "this will allow
+           reviewers and working groups to assign due consideration to
+           documents that have the benefit of running code, which may
+           serve as evidence of valuable experimentation and feedback
+           that have made the implemented protocols more mature.  It is
+           up to the individual working groups to use this information
+           as they see fit".
+         </t>
+         <t>
+           [While there is some interest, no work has started yet]
+        </t>
+      </section>
+
+
+        <section anchor="security" title="Security Considerations">
+
+          <section title="Amplification Attacks">
+            <t>
+             Chain Queries can potentially send very large DNS answers. A
+             recursive nameserver MUST NOT return Query Chain answers
+             to clients over UDP. It is allowed to signal support in
+             response to a Query Chain request over UDP by responding
+             using a zero-length edns-tcp-chain-query option.  This is to
+             prevent a single spoofed UDP packet from causing extremely
+             large UDP response packets from being sent to a spoofed IP
+             address. Such Distributed Denial of Service attacks using
+             other DNS amplification mechanisms are fairly common.
+            </t>
+          </section>
+
+        </section>
+
+        <section anchor="example" title="Examples">
+         <section anchor="example1" title="Simple Query for example.com">
+          <t><list style="numbers">
+              <t>
+                A web browser on a client machine asks the Forwarder
+                running on localhost to resolve the A record of
+                "www.example.com." by sending a regular DNS UDP query
+                on port 53 to 127.0.0.1.
+              </t>
+              <t>
+                The Forwarder on the client machine checks its cache, and
+                notices it already has a validated entry of "com." in
+                its cache. This includes the DNSKEY RRset with its
+                RRSIG records.  In other words, according to its cache,
+                ".com" is DNSSEC validated as "secure" and can be used
+                to continue a DNSSEC validated chain on.
+              </t>
+              <t>
+               The Forwarder on the client opens a TCP connection to
+               its upstream Recursive Resolver on port 53. It adds the
+               edns-tcp-chain-query option as follows:
+                <list style="symbols">
+                  <t>Option-code, set to [TBD]</t>
+                  <t>Option-length, set to 0x00 0x04</t>
+                  <t>Last Known Query Name set to "com."</t>
+                </list>
+              </t>
+              <t>
+               The upstream Recursive Resolver receives a DNS query over
+               TCP with the edns-tcp-chain-query Last Known Query Name set to
+               "com.". After accepting the query it starts constructing
+               a DNS reply packet over TCP.
+              </t>
+              <t>
+                The upstream Recursive Resolver performs all the regular work to
+                ensure it has all the answers to the query for the A record of
+                "www.example.com.". It does so without using the edns-tcp-chain-query
+                option - unless it is also configured as a Forwarder. The answer
+                to the original DNS question could be the actual A record,
+                the DNSSEC proof of non-existence, or an insecure NXDOMAIN response.
+              </t>
+              <t>
+               The upstream Recursive Resolver adds the edns-tcp-chain-query option
+               to the DNS answer reply as follows:
+                <list style="symbols">
+                  <t>Option-code, set to [TBD]</t>
+                  <t>Option-length, set to 0x00 0x00</t>
+                  <t>The Last Known Query Name is ommited (zero length)</t>
+                </list>
+              </t>
+              <t>
+               The upstream Recursive Resolver constructs the DNS
+               Authority Section and fills it with:
+               <list style="symbols">
+                 <t>The DS RRset for "example.com." and its corresponding
+                    RRSIGs (made by the "com." DNSKEY(s))</t>
+                 <t>The DNSKEY RRset for "example.com." and its
+                    corresponding RRSIGs (made by the "example.com"
+                    DNSKEY(s))</t>
+                 <t>The authoritative NS RRset for "example.com." and
+                    its corresponding RRSIGs (from the child zone)</t>
+                </list>
+                If the answer does not exist, and the zone uses DNSSEC,
+                it also adds the proof of non-existance, such as NSEC
+                or NSEC3 records, to the Authority Section.
+              </t>
+              <t>
+               The upstream Recursive Resolver constructs the DNS Answer
+               Section and fills it with:
+               <list style="symbols">
+                 <t>The A record of "www.example.com." and its corresponding RRSIGs</t>
+               </list>
+               If the answer does not exist (no-data or NXDOMAIN),
+               the Answer Section remains empty. For the NXDOMAIN
+               case, the RCode of the DNS answer packet is set to
+               NXDOMAIN. Otherwise it remains NOERROR.
+              </t>
+              
+              <t>
+               The upstream Recursive Resolver returns the DNS answer
+               over the existing TCP connection. When all data is sent,
+               it SHOULD keep the TCP connection open to allow for additional
+               incoming DNS queries - provided it has enough resources to do so.
+              </t>
+              <t>
+               The Forwarder receives the DNS answer over TCP. It
+               processes the Authority Section and the Answer Section
+               and places the information in its local cache. If it is a
+               DNSSEC validating resolver, it ensures that no unvalidated
+               data or out of baliwick data is accepted into the cache
+               without having proper DNSSEC validation. It MAY do so
+               by looping over the entries in the Authority and Answer
+               Sections. When an entry is validated for its cache, it
+               is removed from the processing list. If an entry cannot
+               be validated it is left in the process list. When the
+               end of the list is reached, the list is processed again
+               until either all entries are placed in the cache, or the
+               remaining items cannot be placed in the cache due to lack
+               of validation. Those entries are then disgarded.
+              </t>
+              <t>
+               If the cache contains a valid answer to the application's
+               query, this answer is returned to the application via a
+               regular DNS answer packet. This packet MUST NOT contain an
+               edns-tcp-chain-query option. If no valid answer can be returned,
+               normal error processing is done. For example, an NXDOMAIN
+               or an empty Answer Section could be returned depending
+               on the error condition.
+              </t>
+          </list></t>
+         </section>
+         <section anchor="example2" title="Out-of-path query for example.com">
+         <t>A Recursive Resolver receives a query for the A record for
+         example.com. It includes the edns-tcp-chain-query option with
+         the following parameters:
+            <list style="symbols">
+              <t>Option-code, set to [TBD]</t>
+              <t>Option-length, set to 0x00 0x0D</t>
+              <t>The Last Known Query Name set to 'unrelated.ca.'</t>
+            </list>
+            As there is no chain that leads from "unrelated.ca." to
+            "example.com", the Resolving Nameserver answers with RCODE
+            "FormErr". It includes the edns-tcp-chain-query with the following
+            parameters:
+            <list style="symbols">
+              <t>Option-code, set to [TBD]</t>
+              <t>Option-length, set to 0x00 0x00</t>
+              <t>The Last Known Query Name is ommited (zero length)</t>
+            </list>
+          </t>
+         </section>
+         <section anchor="example3" title="non-existent data">
+         <t>
+          A Recursive Resolver receives a query for the A record for
+          "ipv6.toronto.redhat.ca". It includes the edns-tcp-chain-query option
+          with the following parameters:
+            <list style="symbols">
+              <t>Option-code, set to [TBD]</t>
+              <t>Option-length, set to 0x00 0x03</t>
+              <t>The Last Known Query Name set to 'ca.'</t>
+            </list>
+          Using regular UDP queries towards Authoritative Nameservers,
+          it locates the NS RRset for "toronto.redhat.ca.". When querying
+          for the A record it receives a reply with RCODE "NoError" and
+          an empty Answer Section. The Authority Section contains NSEC3
+          and RRSIG records proving there is no A RRtype for the QNAME
+          "ipv6.toronto.redhat.ca".
+          </t>
+           <t>
+            The Recursive Resolver constructs a DNS reply with the
+            following edns-tcp-chain-query option parameters:
+            <list style="symbols">
+              <t>Option-code, set to [TBD]</t>
+              <t>Option-length, set to 0x00 0x00</t>
+              <t>The Last Known Query Name is ommited (zero length)</t>
+            </list>
+           The RCODE is set to "NoError". The Authority Section is filled in with:
+            <list style="symbols">
+             <t>The DS RRset for "redhat.ca." plus RRSIGs</t>
+             <t>The DNSKEY RRset for "redhat.ca." plus RRSIGs</t>
+             <t>The NS RRset for "redhat.ca." plus RRSIGs (eg ns[01].redhat.ca)</t>
+             <t>The A RRset for "ns0.redhat.ca." and "ns1.redhat.ca." plus RRSIGs</t>
+             <t>The DS RRset for "toronto.redhat.ca." plus RRSIGs</t>
+             <t>The NS RRset for "toronto.redhat.ca." plus RRSIGs (eg ns[01].toronto.redhat.ca)</t>
+             <t>The DNSKEY RRset for "toronto.redhat.ca." plus RRSIGs</t>
+             <t>The A RRset and/or AAAA RRset for "ns0.toronto.redhat.ca." and "ns1.toronto.redhat.ca." plus RRSIGs</t>
+             <t>The NSEC record for "ipv6.toronto.redhat.ca." (proves what RRTYPEs do exist, does not include A)</t>
+             <t>The NSEC record for "toronto.redhat.ca." (proves no wildcard exists)</t>
+            </list>
+           The Answer Section is empty. The RCode is set to NOERROR.
+           </t>
+         </section>
+        </section>
+
+        <section title="IANA Considerations" anchor="iana">
+         <section title="EDNS0 option code for edns-tcp-chain-query" anchor="iana_opt">
+            <t>IANA has assigned option code [TBD] in the "DNS EDNS0 Option Codes
+              (OPT)" registry to edns-tcp-chain-query.</t>
+         </section>
+        </section>
+
+        <section title="Acknowledgements">
+          <t>
+          Andrew Sullivan pointed out that we do not need any new data
+          formats to support DNS chains. Olafur Gudmundsson ensured the
+          RRsets are returned in the proper Sections.
+          </t>
+        </section>
+
+    </middle>
+
+    <back>
+        <references title='Normative References'>
+            &rfc1034;
+            &rfc1035;
+            &rfc2119;
+            &rfc2671;
+            &rfc4033;
+            &rfc4034;
+            &rfc4035;
+            &rfc4786;
+            &rfc6824;
+            &rfc6891;
+            &rfc6982;
+
+   <reference anchor='TCP-KEEPALIVE'> 
+      <front> 
+      <title>The edns-tcp-keepalive EDNS0 Option</title>
+      <author initials='P' surname='Wouters' fullname='P. Wouters'> 
+      <organization>Red Hat</organization>
+      </author> 
+      <date month='October' day='15' year='2013' /> 
+      <abstract><t>
+   This document defines an EDNS0 option ("edns-tcp-keepalive") that
+   allows DNS clients and servers to signal their respective readiness
+   to conduct multiple DNS transactions over individual TCP sessions.
+   This signalling facilitates a better balance of UDP and TCP transport
+   between individual clients and servers, reducing the impact of
+   problems associated with UDP transport and allowing the state
+   associated with TCP transport to be managed effectively with minimal
+   impact on the DNS transaction time.
+       </t></abstract> 
+      </front> 
+      <seriesInfo name='Internet-Draft' value='draft-wouters-edns-tcp-keeaplive' /> 
+      <format type='TXT' 
+            target='http://www.ietf.org/internet-drafts/draft-wouters-edns-tcp-keeaplive-00.txt' /> 
+   </reference> 
+
+        </references>
+
+    </back>
+
+</rfc>
