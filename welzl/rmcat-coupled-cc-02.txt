@@ -1,0 +1,952 @@
+
+
+
+RTP Media Congestion Avoidance                                  M. Welzl
+Techniques (rmcat)                                              S. Islam
+Internet-Draft                                               S. Gjessing
+Intended status: Experimental                         University of Oslo
+Expires: April 20, 2014                                 October 17, 2013
+
+
+                Coupled congestion control for RTP media
+                    draft-welzl-rmcat-coupled-cc-02
+
+Abstract
+
+   When multiple congestion controlled RTP sessions traverse the same
+   network bottleneck, it can be beneficial to combine their controls
+   such that the total on-the-wire behavior is improved.  This document
+   describes such a method for flows that have the same sender, in a way
+   that is as flexible and simple as possible while minimizing the
+   amount of changes needed to existing RTP applications.
+
+Status of this Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at http://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on April 20, 2014.
+
+Copyright Notice
+
+   Copyright (c) 2013 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+
+
+
+Welzl, et al.            Expires April 20, 2014                 [Page 1]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+
+Table of Contents
+
+   1.  Introduction . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   2.  Definitions  . . . . . . . . . . . . . . . . . . . . . . . . .  3
+   3.  Limitations  . . . . . . . . . . . . . . . . . . . . . . . . .  4
+   4.  Architectural overview . . . . . . . . . . . . . . . . . . . .  5
+   5.  Roles  . . . . . . . . . . . . . . . . . . . . . . . . . . . .  6
+     5.1.  SBD  . . . . . . . . . . . . . . . . . . . . . . . . . . .  6
+     5.2.  FSE  . . . . . . . . . . . . . . . . . . . . . . . . . . .  6
+     5.3.  Flows  . . . . . . . . . . . . . . . . . . . . . . . . . .  7
+       5.3.1.  Example algorithm - Active FSE . . . . . . . . . . . .  8
+       5.3.2.  Example algorithm - Passive FSE  . . . . . . . . . . .  9
+       5.3.3.  Example operation (passive)  . . . . . . . . . . . . . 11
+   6.  Acknowledgements . . . . . . . . . . . . . . . . . . . . . . . 15
+   7.  IANA Considerations  . . . . . . . . . . . . . . . . . . . . . 15
+   8.  Security Considerations  . . . . . . . . . . . . . . . . . . . 15
+   9.  References . . . . . . . . . . . . . . . . . . . . . . . . . . 16
+     9.1.  Normative References . . . . . . . . . . . . . . . . . . . 16
+     9.2.  Informative References . . . . . . . . . . . . . . . . . . 16
+   Appendix A.  Changes from -00 to -01 . . . . . . . . . . . . . . . 16
+   Appendix B.  Changes from -01 to -02 . . . . . . . . . . . . . . . 16
+   Authors' Addresses . . . . . . . . . . . . . . . . . . . . . . . . 17
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                 [Page 2]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+1.  Introduction
+
+   When there is enough data to send, a congestion controller must
+   increase its sending rate until the path's capacity has been reached;
+   depending on the controller, sometimes the rate is increased further,
+   until packets are ECN-marked or dropped.  This process inevitably
+   creates undesirable queuing delay -- an effect that is amplified when
+   multiple congestion controlled connections traverse the same network
+   bottleneck.  When such connections originate from the same host, it
+   would therefore be ideal to use only one single sender-side
+   congestion controller which determines the overall allowed sending
+   rate, and then use a local scheduler to assign a proportion of this
+   rate to each RTP session.  This way, priorities could also be
+   implemented quite easily, as a function of the scheduler; honoring
+   user-specified priorities is, for example, required by rtcweb
+   [rtcweb-usecases].
+
+   The Congestion Manager (CM) [RFC3124] provides a single congestion
+   controller with a scheduling function just as described above.  It is
+   hard to implement because it requires an additional congestion
+   controller and removes all per-connection congestion control
+   functionality, which is quite a significant change to existing RTP
+   based applications.  This document presents a method that is easier
+   to implement than the CM and also requires less significant changes
+   to existing RTP based applications.  It attempts to roughly
+   approximate the CM behavior by sharing information between existing
+   congestion controllers, akin to "Ensemble Sharing" in [RFC2140].
+
+
+2.  Definitions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC 2119 [RFC2119].
+
+   Available Bandwidth:
+         The available bandwidth is the nominal link capacity minus the
+         amount of traffic that traversed the link during a certain time
+         interval, divided by that time interval.
+
+   Bottleneck:
+         The first link with the smallest available bandwidth along the
+         path between a sender and receiver.
+
+   Flow:
+         A flow is the entity that congestion control is operating on.
+         It could, for example, be a transport layer connection, an RTP
+         session, or a subsession that is multiplexed onto a single RTP
+
+
+
+Welzl, et al.            Expires April 20, 2014                 [Page 3]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+         session together with other subsessions.
+
+   Flow Group Identifier (FGI):
+         A unique identifier for each subset of flows that is limited by
+         a common bottleneck.
+
+   Flow State Exchange (FSE):
+         The entity that maintains information that is exchanged between
+         flows.
+
+   Flow Group (FG):
+         A group of flows having the same FGI.
+
+   Shared Bottleneck Detection (SBD):
+         The entity that determines which flows traverse the same
+         bottleneck in the network, or the process of doing so.
+
+
+3.  Limitations
+
+   Sender-side only:
+         Coupled congestion control as described here only operates
+         inside a single host on the sender side.  This is because,
+         irrespective of where the major decisions for congestion
+         control are taken, the sender of a flow needs to eventually
+         decide the transmission rate.  Additionally, the necessary
+         information about how much data an application can currently
+         send on a flow is typically only available at the sender side,
+         making the sender an obvious choice for placement of the
+         elements and mechanisms described here.  It is recognized that
+         flows that have different senders but the same receiver, or
+         different senders and different receivers can also share a
+         bottleneck; such scenarios have been omitted for simplicity,
+         and could be incorporated in future versions of this document.
+         Note that limiting the flows on which coupled congestion
+         control operates merely limits the benefits derived from the
+         mechanism.
+
+   Shared bottlenecks do not change quickly:
+         As per the definition above, a bottleneck depends on cross
+         traffic, and since such traffic can heavily fluctuate,
+         bottlenecks can change at a high frequency (e.g., there can be
+         oscillation between two or more links).  This means that, when
+         flows are partially routed along different paths, they may
+         quickly change between sharing and not sharing a bottleneck.
+         For simplicity, here it is assumed that a shared bottleneck is
+         valid for a time interval that is significantly longer than the
+         interval at which congestion controllers operate.  Note that,
+
+
+
+Welzl, et al.            Expires April 20, 2014                 [Page 4]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+         for the only SBD mechanism defined in this document
+         (multiplexing on the same five-tuple), the notion of a shared
+         bottleneck stays correct even in the presence of fast traffic
+         fluctuations: since all flows that are assumed to share a
+         bottleneck are routed in the same way, if the bottleneck
+         changes, it will still be shared.
+
+
+4.  Architectural overview
+
+   Figure 1 shows the elements of the architecture for coupled
+   congestion control: the Flow State Exchange (FSE), Shared Bottleneck
+   Detection (SBD) and Flows.  The FSE is a storage element that can be
+   implemented in two ways: active and passive.  In the active version,
+   it initiates communication with flows and SBD.  However, in the
+   passive version, it does not actively initiate communication with
+   flows and SBD; its only active role is internal state maintenance
+   (e.g., an implementation could use soft state to remove a flow's data
+   after long periods of inactivity).  Every time a flow's congestion
+   control mechanism would normally update its sending rate, the flow
+   instead updates information in the FSE and performs a query on the
+   FSE, leading to a sending rate that can be different from what the
+   congestion controller originally determined.  Using information
+   about/from the currently active flows, SBD updates the FSE with the
+   correct Flow State Identifiers (FSIs).
+
+
+
+                          -------  <---  Flow 1
+                          | FSE |  <---  Flow 2 ..
+                          -------  <---  .. Flow N
+                             ^
+                             |             |
+                          -------          |
+                          | SBD |  <-------|
+                          -------
+
+
+             Figure 1: Coupled congestion control architecture
+
+   Since everything shown in Figure 1 is assumed to operate on a single
+   host (the sender) only, this document only describes aspects that
+   have an influence on the resulting on-the-wire behavior.  It does,
+   for instance, not define how many bits must be used to represent
+   FSIs, or in which way the entities communicate.  Implementations can
+   take various forms: for instance, all the elements in the figure
+   could be implemented within a single application, thereby operating
+   on flows generated by that application only.  Another alternative
+
+
+
+Welzl, et al.            Expires April 20, 2014                 [Page 5]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+   could be to implement both the FSE and SBD together in a separate
+   process which different applications communicate with via some form
+   of Inter-Process Communication (IPC).  Such an implementation would
+   extend the scope to flows generated by multiple applications.  The
+   FSE and SBD could also be included in the Operating System kernel.
+
+
+5.  Roles
+
+   This section gives an overview of the roles of the elements of
+   coupled congestion control, and provides an example of how coupled
+   congestion control can operate.
+
+5.1.  SBD
+
+   SBD uses knowledge about the flows to determine which flows belong in
+   the same Flow Group (FG), and assigns FGIs accordingly.  This
+   knowledge can be derived from measurements, by considering
+   correlations among measured delay and loss as an indication of a
+   shared bottleneck, or it can be based on the simple assumption that
+   packets sharing the same five-tuple (IP source and destination
+   address, protocol, and transport layer port number pair) and having
+   the same Differentiated Services Code Point (DSCP) in the IP header
+   are typically treated in the same way along the path.  The latter
+   method is the only one specified in this document: SBD MAY consider
+   all flows that use the same five-tuple and DSCP to belong to the same
+   FG.  This classification applies to certain tunnels, or RTP flows
+   that are multiplexed over one transport (cf. [transport-multiplex]).
+   In one way or another, such multiplexing will probably be recommended
+   for use with rtcweb [rtcweb-rtp-usage].
+
+5.2.  FSE
+
+   The FSE contains a list of all flows that have registered with it.
+   For each flow, it stores the following for both the active and the
+   passive version:
+
+   o  a unique flow number to identify the flow
+
+   o  the FGI of the FG that it belongs to (based on the definitions in
+      this document, a flow has only one bottleneck, and can therefore
+      be in only one FG)
+
+   o  a priority P, which here is assumed to be represented as a
+      floating point number in the range from 0.1 (unimportant) to 1
+      (very important).  A negative value is used to indicate that a
+      flow has terminated.
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                 [Page 6]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+   o  The rate used by the flow, FSE_R.
+
+   In the FSE, each FG contains one static variable S_CR which is meant
+   to be the sum of the calculated rates of all flows in the same FG
+   (including the flow itself).  This value is used to calculate the
+   sending rate.  For the passive version, in the algorithm given in the
+   next section, it is limited to increase or decrease as conservatively
+   as a flow's congestion controller decides in order to prohibit sudden
+   rate jumps.
+
+   In addition, the passive version of the FSE stores the following:
+
+   o  The desired rate DR.  This can be smaller than the calculated rate
+      if the application feeding into the flow has less data to send
+      than the congestion controller would allow.  In case of a bulk
+      transfer, DR must be set to CC_R received from the flow's
+      congestion module.
+
+   The passive version of the FSE contains one static variable per FG
+   called TLO (Total Leftover Rate -- used to let a flow 'take'
+   bandwidth from application-limited or terminated flows) which is
+   initialized to 0.
+
+   The information listed here is enough to implement the sample flow
+   algorithm given below.  FSE implementations could easily be extended
+   to store, e.g., a flow's current sending rate for statistics
+   gathering or future potential optimizations.
+
+5.3.  Flows
+
+   Flows register themselves with SBD and FSE when they start,
+   deregister from the FSE when they stop, and carry out an UPDATE
+   function call every time their congestion controller calculates a new
+   sending rate.  Via UPDATE, they provide the newly calculated rate and
+   the desired rate (less than the calculated rate in case of
+   application-limited flows, the same otherwise).  In the passive
+   version, UPDATE returns a rate that should be used instead of the
+   rate that the congestion controller has determined.  In the active
+   version, however, it calculates the rates for all the flows in the FG
+   and actively distributes them.
+
+   Below, an active and a passive example algorithm are described.
+   While other algorithms could be used instead, the same algorithm must
+   be applied to all flows.
+
+
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                 [Page 7]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+5.3.1.  Example algorithm - Active FSE
+
+   (1)  When a flow f starts, it registers itself with SBD and the FSE.
+        FSE_R and DR are initialized with the congestion controller's
+        initial rate.  SBD will assign the correct FGI.  When a flow is
+        assigned an FGI, it adds its FSE_R to S_CR.
+
+   (2)  When a flow f stops, it sets P to -1.
+
+   (3)  Every time the congestion controller of the flow f determines a
+        new sending rate CC_R, the flow calls UPDATE, which carries out
+        the tasks listed below to derive the new sending rates for all
+        the flows in the FG.  A flow's UPDATE function uses a local
+        (i.e. per-flow) temporary variable: S_P, which is initialized to
+        0.
+
+        (a)  It updates S_CR and FSE_R(f) with CC_R.
+
+
+               S_CR = S_CR + CC_R - FSE_R(f)
+               FSE_R(f) = CC_R
+
+        (b)  It calculates the sum of all the priorities, S_P.
+
+
+               for all flows i in FG do
+                   S_P = S_P + P(i)
+               end for
+
+        (c)  It calculates the sending rates for all the flows in an FG
+             and distributes them.
+
+
+               for all flows i in FG do
+                   FSE_R(i) = (P(i)*S_CR)/S_P
+                   send FSE_R(i) to the flow i
+               end for
+
+   This algorithm was designed to be the simplest possible method to
+   assign rates according to the priorities of flows.  It misses some
+   features that we would like to incorporate in future versions of this
+   document (e.g. letting bulk transfers immediately use the bandwidth
+   that is not used by application-limited flows); if these features
+   make the algorithm significantly more complex, this will be included
+   as a third variant of the algorithm.
+
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                 [Page 8]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+5.3.2.  Example algorithm - Passive FSE
+
+   (1)  When a flow f starts, it registers itself with SBD and the FSE.
+        FSE_R and DR are initialized with the congestion controller's
+        initial rate.  SBD will assign the correct FGI.  When a flow is
+        assigned an FGI, it adds its FSE_R to S_CR.
+
+   (2)  When a flow f stops, it sets its DR to 0 and sets P to -1.
+
+   (3)  Every time the congestion controller of the flow f determines a
+        new sending rate CC_R, assuming the flow's new desired rate
+        new_DR to be "infinity" in case of a bulk data transfer with an
+        unknown maximum rate, the flow calls UPDATE, which carries out
+        the tasks listed below to derive the flow's new sending rate,
+        Rate.  A flow's UPDATE function uses a few local (i.e. per-flow)
+        temporary variables, which are all initialized to 0: DELTA,
+        new_S_CR and S_P.
+
+        (a)  For all the flows in its FG (including itself), it
+             calculates the sum of all the calculated rates, new_S_CR.
+             Then it calculates the difference between FSE_R(f) and
+             CC_R, DELTA.
+
+
+               for all flows i in FG do
+                   new_S_CR = new_S_CR + FSE_R(i)
+               end for
+               DELTA =  CC_R - FSE_R(f)
+
+        (b)  It updates S_CR, FSE_R(f) and DR(f).
+
+
+               FSE_R(f) = CC_R
+               if DELTA > 0 then  // the flow's rate has increased
+                   S_CR = S_CR + DELTA
+               else if DELTA < 0 then
+                   S_CR = new_S_CR + DELTA
+               end if
+               DR(f) = min(new_DR,FSE_R(f))
+
+        (c)  It calculates the leftover rate TLO, removes the terminated
+             flows from the FSE and calculates the sum of all the
+             priorities, S_P.
+
+
+
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                 [Page 9]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+               for all flows i in FG do
+                  if P(i)<0 then
+                     delete flow
+                  else
+                     S_P = S_P + P(i)
+                  end if
+               end for
+               if DR(f) < FSE_R(f) then
+                  TLO = TLO + (P(f)/S_P) * S_CR - DR(f))
+               end if
+
+        (d)  It calculates the sending rate, Rate.
+
+
+               Rate = min(new_DR, (P(f)*S_CR)/S_P + TLO)
+
+               if Rate != new_DR and TLO > 0 then
+                   TLO = 0  // f has 'taken' TLO
+               end if
+
+        (e)  It updates DR(f) and FSE_R(f) with Rate.
+
+
+               if Rate > DR(f) then
+                   DR(f) = Rate
+               end if
+               FSE_R(f)  = Rate
+
+   The goals of the flow algorithm are to achieve prioritization,
+   improve network utilization in the face of application-limited flows,
+   and impose limits on the increase behavior such that the negative
+   impact of multiple flows trying to increase their rate together is
+   minimized.  It does that by assigning a flow a sending rate that may
+   not be what the flow's congestion controller expected.  It therefore
+   builds on the assumption that no significant inefficiencies arise
+   from temporary application-limited behavior or from quickly jumping
+   to a rate that is higher than the congestion controller intended.
+   How problematic these issues really are depends on the controllers in
+   use and requires careful per-controller experimentation.  The coupled
+   congestion control mechanism described here also does not require all
+   controllers to be equal; effects of heterogeneous controllers, or
+   homogeneous controllers being in different states, are also subject
+   to experimentation.
+
+   This algorithm gives all the leftover rate of application-limited
+   flows to the first flow that updates its sending rate, provided that
+   this flow needs it all (otherwise, its own leftover rate can be taken
+   by the next flow that updates its rate).  Other policies could be
+
+
+
+Welzl, et al.            Expires April 20, 2014                [Page 10]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+   applied, e.g. to divide the leftover rate of a flow equally among all
+   other flows in the FGI.
+
+5.3.3.  Example operation (passive)
+
+   In order to illustrate the operation of the passive coupled
+   congestion control algorithm, this section presents a toy example of
+   two flows that use it.  Let us assume that both flows traverse a
+   common 10 Mbit/s bottleneck and use a simplistic congestion
+   controller that starts out with 1 Mbit/s, increases its rate by 1
+   Mbit/s in the absence of congestion and decreases it by 2 Mbit/s in
+   the presence of congestion.  For simplicity, flows are assumed to
+   always operate in a round-robin fashion.  Rate numbers below without
+   units are assumed to be in Mbit/s.  For illustration purposes, the
+   actual sending rate is also shown for every flow in FSE diagrams even
+   though it is not really stored in the FSE.
+
+   Flow #1 begins.  It is a bulk data transfer and considers itself to
+   have top priority.  This is the FSE after the flow algorithm's step
+   1:
+
+
+   ----------------------------------------
+   | # | FGI |  P  | FSE_R  |  DR  | Rate |
+   |   |     |     |        |      |      |
+   | 1 |  1  |  1  |   1    |   1  |   1  |
+   ----------------------------------------
+   S_CR = 1, TLO = 0
+
+
+
+   Its congestion controller gradually increases its rate.  Eventually,
+   at some point, the FSE should look like this:
+
+
+   --------------------------------------
+   | # | FGI |  P  |  FSE_R  |  DR  | Rate |
+   |   |     |     |         |      |      |
+   | 1 |  1  |  1  |   10    |  10  |  10  |
+   -----------------------------------------
+   S_CR = 10, TLO = 0
+
+
+
+   Now another flow joins.  It is also a bulk data transfer, and has a
+   lower priority (0.5):
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                [Page 11]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+   ----------------------------------------
+   | # | FGI |   P   | FSE_R  |  DR  | Rate |
+   |   |     |       |        |      |      |
+   | 1 |  1  |   1   |   10   |  10  |  10  |
+   | 2 |  1  |  0.5  |    1   |   1  |   1  |
+   ------------------------------------------
+   S_CR = 11, TLO = 0
+
+
+
+   Now assume that the first flow updates its rate to 8, because the
+   total sending rate of 11 exceeds the total capacity.  Let us take a
+   closer look at what happens in step 3 of the flow algorithm.
+
+
+   CC_R = 8. new_DR = infinity.
+   3 a) new_S_CR = 11; DELTA = 8 - 10 = -2.
+   3 b) FSE_Rf) = 8. DELTA is negative, hence S_CR = 9;
+        DR(f) = 8.
+   3 c) S_P = 1.5.
+   3 d) new sending rate = min(infinity, 1/1.5 * 9 + 0) = 6.
+   3 e) FSE_R(f) = 6.
+
+   The resulting FSE looks as follows:
+   ----------------------------------------
+   | # | FGI |   P   |  FSE_R  |  DR  | Rate |
+   |   |     |       |         |      |      |
+   | 1 |  1  |   1   |    6    |   8  |   6  |
+   | 2 |  1  |  0.5  |    1    |   1  |   1  |
+   -------------------------------------------
+   S_CR = 9, TLO = 0
+
+
+
+   The effect is that flow #1 is sending with 6 Mbit/s instead of the 8
+   Mbit/s that the congestion controller derived.  Let us now assume
+   that flow #2 updates its rate.  Its congestion controller detects
+   that the network is not fully saturated (the actual total sending
+   rate is 6+1=7) and increases its rate.
+
+
+
+
+
+
+
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                [Page 12]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+   CC_R=2. new_DR = infinity.
+   3 a) new_S_CR = 7; DELTA = 2 - 1 = 1.
+   3 b) FSE_R(f) = 2. DELTA is positive, hence S_CR = 9 + 1 = 10;
+        DR(f) = 2.
+   3 c) S_P = 1.5.
+   3 d) new sending rate = min(infinity, 0.5/1.5 * 10 + 0) = 3.33.
+   3 e) DR(f) = FSE_R(f) = 3.33.
+
+   The resulting FSE looks as follows:
+   -------------------------------------------
+   | # | FGI |   P   |  FSE_R  |  DR  | Rate |
+   |   |     |       |         |      |      |
+   | 1 |  1  |   1   |    6    |   8  |   6  |
+   | 2 |  1  |  0.5  |   3.33  | 3.33 | 3.33 |
+   -------------------------------------------
+   S_CR = 10, TLO = 0
+
+
+
+   The effect is that flow #2 is now sending with 3.33 Mbit/s, which is
+   close to half of the rate of flow #1 and leads to a total utilization
+   of 6(#1) + 3.33(#2) = 9.33 Mbit/s.  Flow #2's congestion controller
+   has increased its rate faster than the controller actually expected.
+   Now, flow #1 updates its rate.  Its congestion controller detects
+   that the network is not fully saturated and increases its rate.
+   Additionally, the application feeding into flow #1 limits the flow's
+   sending rate to at most 2 Mbit/s.
+
+
+   CC_R=7. new_DR=2.
+   3 a) new_S_CR = 9.33; DELTA = 1.
+   3 b) FSE_R(f) = 7, DELTA is positive, hence S_CR = 10 + 1 = 11;
+        DR = min(2, 7) = 2.
+   3 c) S_P = 1.5; DR(f) < FSE_R(f), hence TLO = 1/1.5 * 11 - 2 = 5.33.
+   3 d) new sending rate = min(2, 1/1.5 * 11 + 5.33) = 2.
+   3 e) FSE_R(f) = 2.
+
+   The resulting FSE looks as follows:
+   -------------------------------------------
+   | # | FGI |   P   |  FSE_R  |  DR  | Rate |
+   |   |     |       |         |      |      |
+   | 1 |  1  |   1   |    2    |   2  |   2  |
+   | 2 |  1  |  0.5  |   3.33  | 3.33 | 3.33 |
+   -------------------------------------------
+   S_CR = 11, TLO = 5.33
+
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                [Page 13]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+   Now, the total rate of the two flows is 2 + 3.33 = 5.33 Mbit/s, i.e.
+   the network is significantly underutilized due to the limitation of
+   flow #1.  Flow #2 updates its rate.  Its congestion controller
+   detects that the network is not fully saturated and increases its
+   rate.
+
+
+   CC_R=4.33. new_DR = infinity.
+   3 a) new_S_CR = 5.33; DELTA = 1.
+   3 b) FSE_R(f) = 4.33. DELTA is positive, hence S_CR = 12;
+        DR(f) = 4.33.
+   3 c) S_P = 1.5.
+   3 d) new sending rate: min(infinity, 0.5/1.5 * 12 + 5.33 ) = 9.33.
+   3 e) FSE_R(f) = 9.33, DR(f) = 9.33.
+
+   The resulting FSE looks as follows:
+   -------------------------------------------
+   | # | FGI |   P   |  FSE_R  |  DR  | Rate |
+   |   |     |       |         |      |      |
+   | 1 |  1  |   1   |    2    |   2  |   2  |
+   | 2 |  1  |  0.5  |   9.33  | 9.33 | 9.33 |
+   -------------------------------------------
+   S_CR = 12, TLO = 0
+
+
+
+   Now, the total rate of the two flows is 2 + 9.33 = 11.33 Mbit/s.
+   Finally, flow #1 terminates.  It sets P to -1 and DR to 0.  Let us
+   assume that it terminated late enough for flow #2 to still experience
+   the network in a congested state, i.e. flow #2 decreases its rate in
+   the next iteration.
+
+
+   CC_R = 7.33. new_DR = infinity.
+   3 a) new_S_CR = 11.33; DELTA = -2.
+   3 b) FSE_R(f) = 7.33. DELTA is negative, hence S_CR = 9.33;
+        DR(f) = 7.33.
+   3 c) Flow 1 has P = -1, hence it is deleted from the FSE.
+        S_P = 0.5.
+   3 d) new sending rate: min(infinity, 0.5/0.5*9.33 + 0) = 9.33.
+   3 e) FSE_R(f) = DR(f) = 9.33.
+
+   The resulting FSE looks as follows:
+   -------------------------------------------
+   | # | FGI |   P   |  FSE_R  |  DR  | Rate |
+   |   |     |       |         |      |      |
+   | 2 |  1  |  0.5  |   9.33  | 9.33 | 9.33 |
+   -------------------------------------------
+
+
+
+Welzl, et al.            Expires April 20, 2014                [Page 14]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+   S_CR = 9.33, TLO = 0
+
+
+
+
+6.  Acknowledgements
+
+   This document has benefitted from discussions with and feedback from
+   David Hayes, Andreas Petlund, and David Ros (who also gave the FSE
+   its name).
+
+   This work was partially funded by the European Community under its
+   Seventh Framework Programme through the Reducing Internet Transport
+   Latency (RITE) project (ICT-317700).
+
+
+7.  IANA Considerations
+
+   This memo includes no request to IANA.
+
+
+8.  Security Considerations
+
+   In scenarios where the architecture described in this document is
+   applied across applications, various cheating possibilities arise:
+   e.g., supporting wrong values for the calculated rate, the desired
+   rate, or the priority of a flow.  In the worst case, such cheating
+   could either prevent other flows from sending or make them send at a
+   rate that is unreasonably large.  The end result would be unfair
+   behavior at the network bottleneck, akin to what could be achieved
+   with any UDP based application.  Hence, since this is no worse than
+   UDP in general, there seems to be no significant harm in using this
+   in the absence of UDP rate limiters.
+
+   In the case of a single-user system, it should also be in the
+   interest of any application programmer to give the user the best
+   possible experience by using reasonable flow priorities or even
+   letting the user choose them.  In a multi-user system, this interest
+   may not be given, and one could imagine the worst case of an "arms
+   race" situation, where applications end up setting their priorities
+   to the maximum value.  If all applications do this, the end result is
+   a fair allocation in which the priority mechanism is implicitly
+   eliminated, and no major harm is done.
+
+
+9.  References
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                [Page 15]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+9.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [RFC2140]  Touch, J., "TCP Control Block Interdependence", RFC 2140,
+              April 1997.
+
+   [RFC3124]  Balakrishnan, H. and S. Seshan, "The Congestion Manager",
+              RFC 3124, June 2001.
+
+9.2.  Informative References
+
+   [rtcweb-rtp-usage]
+              Perkins, C., Westerlund, M., and J. Ott, "Web Real-Time
+              Communication (WebRTC): Media Transport and Use of RTP",
+              draft-ietf-rtcweb-rtp-usage-06.txt (work in progress),
+              February 2013.
+
+   [rtcweb-usecases]
+              Holmberg, C., Hakansson, S., and G. Eriksson, "Web Real-
+              Time Communication Use-cases and Requirements",
+              draft-ietf-rtcweb-use-cases-and-requirements-10.txt (work
+              in progress), December 2012.
+
+   [transport-multiplex]
+              Westerlund, M. and C. Perkins, "Multiple RTP Sessions on a
+              Single Lower-Layer Transport",
+              draft-westerlund-avtcore-transport-multiplexing-05.txt
+              (work in progress), February 2013.
+
+
+Appendix A.  Changes from -00 to -01
+
+   Updated the example algorithm and its operation.
+
+
+Appendix B.  Changes from -01 to -02
+
+   o  Included an active version of the algorithm which is simpler.
+
+   o  Replaced "greedy flow" with "bulk data transfer" and "non-greedy"
+      with "application-limited".
+
+   o  Updated new_CR to CC_R, and CR to FSE_R for better understanding.
+
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                [Page 16]
+
+Internet-Draft  Coupled congestion control for RTP media    October 2013
+
+
+Authors' Addresses
+
+   Michael Welzl
+   University of Oslo
+   PO Box 1080 Blindern
+   Oslo,   N-0316
+   Norway
+
+   Phone: +47 22 85 24 20
+   Email: michawe@ifi.uio.no
+
+
+   Safiqul Islam
+   University of Oslo
+   PO Box 1080 Blindern
+   Oslo,   N-0316
+   Norway
+
+   Phone: +47 22 84 08 37
+   Email: safiquli@ifi.uio.no
+
+
+   Stein Gjessing
+   University of Oslo
+   PO Box 1080 Blindern
+   Oslo,   N-0316
+   Norway
+
+   Phone: +47 22 85 24 44
+   Email: steing@ifi.uio.no
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Welzl, et al.            Expires April 20, 2014                [Page 17]
+
