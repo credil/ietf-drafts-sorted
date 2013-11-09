@@ -1,0 +1,479 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="lib/rfc2629.xslt"?>
+<?rfc toc="yes" ?>
+<?rfc symrefs="yes" ?>
+<?rfc sortrefs="yes" ?>
+<?rfc compact="yes"?>
+<?rfc subcompact="no" ?>
+<?rfc linkmailto="no" ?>
+<?rfc editing="no" ?>
+<?rfc comments="yes" ?>
+<?rfc inline="yes"?>
+<?rfc rfcedstyle="yes"?>
+<?rfc-ext allow-markup-in-artwork="yes" ?>
+<?rfc-ext include-index="no" ?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+
+<rfc ipr="trust200902" docName="draft-bishop-http2-extension-frames-00">
+  <!-- xmlns:x="http://purl.org/net/xml2rfc/ext">
+  <x:feedback template="mailto:michbish@microsoft.com?subject={docname},%20%22{section}%22&amp;body=&lt;{ref}&gt;:"/> -->
+  <front>
+    <title abbrev="Extensions">Extension Frames in HTTP/2.0</title>
+
+    <author initials="M." surname="Bishop" fullname="Mike Bishop">
+      <organization>Microsoft</organization>
+      <address>
+        <email>michbish@microsoft.com</email>
+      </address>
+    </author>
+
+    <date month="November" year="2013" />
+    <area>Applications</area>
+    <workgroup>HTTPbis Working Group</workgroup>
+    <keyword>HTTP</keyword>
+
+    <abstract>
+      <t>
+        This document describes a proposed modification to the HTTP/2.0 specification
+        to better support the creation of extensions without the need to version
+        the core protocol or invoke additional protocol identifiers.
+      </t>
+    </abstract>
+
+  </front>
+
+  <middle>
+    <section anchor="intro" title="Introduction">
+      <t>
+        HTTP/2.0 currently offers an inconsistent story about the use of extensions.  As the draft
+        currently stands, extensions have the following traits:
+        <list style="symbols">
+          <t>
+            They may define SETTINGS values, provided they do not modify identifiers within the base
+            HTTP/2.0 spec
+          </t>
+          <t>
+            They may define new frame types, provided they do not:
+            <list>
+              <t>Conflict with the base HTTP/2.0 frame types</t>
+              <t>Modify session state</t>
+              <t>Require understanding in order to communicate over the base protocol</t>
+            </list>
+          </t>
+        </list>
+      </t>
+
+      <t>
+        This poses a number of problems for such extension frames.  To begin with, there is no way
+        to know whether the peer supports a given extension before sending extension-specific information.
+        This is addressed in the current spec by saying that implementations MUST ignore frame types and
+        settings values they don’t understand, but sending information that your peer cannot parse wastes
+        bandwidth.  Further, it shackles extensions since they are prohibited from modifying session state.
+      </t>
+      <t>
+        As an additional concern, with only 256 frame types it is conceivable that the frame type space may
+        be exhausted if many extensions are defined.  It more than conceivable that different extensions
+        will collide with each other in the choice of frame type identifiers, since the space is limited.
+        Requiring IANA to register frame type identifiers is onerous, since the number and types of the
+        frames has changed often during HTTP/2.0 development and there is no reason to expect that a complex
+        extension would do otherwise.  This should be balanced against the goal of defining a simple,
+        single-frame extension and being able to quickly allocate this single frame type.
+      </t>
+
+      <t>
+        Future versions of the HTTP/2.0 specification will face exactly the same problem as extension authors,
+        since they currently share a frame type and setting value space with any extensions.  Thus, a new frame
+        introduced with HTTP/2.1+ must avoid collision with HTTP/2.0 extensions and must deal with space exhaustion.
+        Any means of resolving such adoption after the fact complicates forward-porting of existing extensions.
+      </t>
+
+      <t>
+        This document proposes an alternative method of supporting extension frames and settings, with the following goals:
+        <list style="symbols">
+          <t>Reduce the probability of collision among extensions and between extensions and future versions of HTTP</t>
+          <t>Enable peers to completely disable all extensions</t>
+          <t>Enable peers to selectively disable an extension without requiring knowledge of the extension they wish to disable</t>
+          <t>Enable peers to quickly discover support for a particular extension on the far side</t>
+        </list>
+      </t>
+
+      <section title="Conventions and Terminology">
+        <t>
+          The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD
+          NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as
+          described in <xref target="RFC2119">RFC 2119</xref>.
+        </t>
+        <t>
+          All numeric values are in network byte order.  Values are unsigned unless otherwise
+          indicated.  Literal values are provided in decimal or hexadecimal as appropriate.
+          Hexadecimal literals are prefixed with <spanx style="verb">0x</spanx> to distinguish them
+          from decimal literals.
+        </t>
+      </section>
+    </section>
+
+    <section anchor="Extensions" title="Extension Functionality">
+      <section anchor="ExtensionID" title="Extension Identification">
+        <t>
+          An extension to HTTP/2.0 is identified by an Extension ID.  An Extension ID is a 24-bit
+          identifier with two parts:  A sixteen-bit private enterprise number and an eight-bit
+          enterprise-local extension identifier.  Private enterprise numbers are issued by IANA,
+          with an <xref target="IANA-PEN">existing registry</xref>.
+        </t>
+        <t>
+          An organization is free to utilize any method to allocate and track the assignment of its
+          organization-local extensions, though expert review of proposed extensions is strongly
+          recommended.  If all 256 values have been allocated, the organization may request an
+          additional organizational identifier.  Extensions allocated by the IETF will be tracked
+          by IANA.
+        </t>
+        <t>
+          It is suggested that each organization reserve an extension ID (for instance, 0x00) for
+          low-volume single-frame extensions, and allocate these frame types with a local registry.
+          This avoids consuming an entire extension ID for a single new frame type, at the expense
+          of being unable to separately disable these single-frame extensions.  Such extensions MUST
+          NOT modify the state of the base protocol in any circumstance, since support for the
+          specific frame cannot be detected.  Extensions which require several frames or the ability
+          to have support separately detected should be allocated a separate ID.
+        </t>
+        <t>
+          The private enterprise number
+          0x000000, allocated to IANA, is reserved in this context for IETF RFCs.  Extension ID
+          0x00000000 is reserved for values defined in base HTTP specifications and single-frame
+          extensions defined by the HTTP working group.
+        </t>
+      </section>
+
+      <section anchor="Frame" title="Extension Frames">
+        <figure title="Extension Payload Format">
+          <preamble>
+            The EXTENSION frame (0xFF) carries content which is specific to an extension.  The EXTENSION
+            frame contains a sub-header of the following format:
+          </preamble>
+          <artwork type="inline">
+            <![CDATA[
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                Extension ID (24)              | Ext. Type (8) |
+    +---------------------------------------------------------------+
+    |                    Extension-specific payload               ...
+    +---------------------------------------------------------------+
+]]>
+          </artwork>
+        </figure>
+
+        <t>
+          The payload of an EXTENSION frame includes the Extension ID of the extension which should be
+          used to process the frame, as well as an extension-local frame type, permitting any extension
+          up to 256 distinct frame types which it has complete freedom to define.
+        </t>
+        <t>
+          EXTENSION frames may be sent on any stream which is half-open in the sender’s direction (that
+          is, a stream on which the sender could send a DATA frame) or on stream zero.
+        </t>
+        <t>
+          The semantics of EXTENSION frames are defined by their respective extensions, with the following
+          restrictions:
+          <list style="symbols">
+            <t>
+              An extension frame on stream zero with semantics which modify the state of the base protocol
+              MUST NOT be sent until the remote peer has indicated support for the extension.
+            </t>
+            <t>
+              An extension frame on a non-zero stream MUST NOT modify the state of the base protocol.
+            </t>
+          </list>
+        </t>
+      </section>
+
+      <section anchor="Settings" title="Extension Settings">
+        <t anchor="BASE_SPECIFICATION_ONLY">
+          An implementation which does not intend to interpret or relay any extension frames or setting values
+          SHOULD send the setting value BASE_SPECIFICATION_ONLY (0xFF) set to a non-zero value.  Upon receipt
+          of this setting value, an implementation MUST NOT send any setting value or frame not defined in the
+          specification of the negotiated protocol.
+        </t>
+        <t>
+          In order to minimize round-trips, it is advisable to exchange any necessary initial state
+          as early as possible.  This means that critical information should be included in the initial SETTINGS
+          frame, in order to benefit from the transmission of this frame in advance of any other frames.  However,
+          to avoid bloating this initial frame, extensions are encouraged to send only the minimum amount of
+          information necessary for the extension to be useful in the initial SETTINGS frame.  Information which
+          is not critical for bootstrapping SHOULD be sent in a subsequent SETTINGS frame, or in an extension-specific
+          frame type.
+        </t>
+        <figure title="Modified Setting Value Format">
+          <preamble>
+            This draft updates the definition of a setting value as follows:
+          </preamble>
+          <artwork type="inline">
+            <![CDATA[
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |             Extension Identifier (24)         | Ext. Setting  |
+    +---------------+-----------------------------------------------+
+    |                           Value (32)                          |
+    +---------------------------------------------------------------+
+]]>
+          </artwork>
+        </figure>
+        <t>
+          The Extension Setting field with a value equal to zero is reserved for extension identification.  An
+          implementation which wishes to inform a peer that it will be employing a certain extension MAY set this
+          to any non-zero value.  Interpretation of the non-zero value is extension-dependent, and may communicate
+          some initial state or preferences.  An implementation which wishes to explicitly inform a peer that it
+          does not understand, does not wish to use, or will not relay a certain extension MAY set this value to
+          zero.
+        </t>
+        <t>
+          The semantics of all other values of Extension Setting are defined by the extension.  These semantics
+          MUST NOT modify the state the base protocol.  (If this is needed, define an extension-specific frame
+          to carry settings.)  These setting values MUST NOT be sent for an extension the sender does not implement,
+          and MUST be ignored upon receipt if not understood.
+        </t>
+      </section>
+
+      <section anchor="Intermediaries" title="Intermediary Behavior">
+        <t>
+          EXTENSION frames sent on stream zero are explicitly hop-by-hop and MUST be ignored by intermediaries
+          which do not understand the specified Extension ID.  In order to ensure consistent state, an intermediary
+          which is not terminating the HTTP request MUST provide one of the following behaviors to each stream other
+          than zero:
+          <list style="symbols">
+            <t>Forward all extension frames on this stream</t>
+            <t>Discard all extension frames on this stream</t>
+          </list>
+        </t>
+        <t>
+          Because distinct streams on a given connection may be related to different backend servers or different
+          clients, these behaviors MAY vary from stream to stream without notification to the peer on either side.
+          An intermediary which intends to discard all extension frames on all streams SHOULD set the
+          <xref target="BASE_SPECIFICATION_ONLY">BASE_SPECIFICATION_ONLY</xref> setting to avoid wasted effort on a peer’s part.
+        </t>
+      </section>
+
+      <section anchor="BaseSpec" title="Base Specification Behavior">
+        <t>
+          Since extensions now have a segregated frame and settings space, the receipt of any non-EXTENSION frame
+          type not defined in the negotiated protocol is a session error of (new) type INVALID_FRAME_TYPE.
+        </t>
+      </section>
+      <section anchor="iana" title="IANA Considerations">
+        <t>
+          This draft employs the Private Enterprise Number registry, already maintained by IANA, to avoid creating
+          a nearly duplicate registry specific to HTTP/2.0.  However,
+          due to the number of bytes available, it restricts this registry from 32 bits to 16 bits.  This still
+          allows enough space for the current number of registrations to double, but it does sharply increase
+          the possibility of eventual exhaustion.
+        </t>
+        <t>
+          One possible mitigation would be to expand the Extension ID from 24 to 32 bits, expanding the space for
+          the PEN to 24 bits.  This would require removing the extension frame sub-type and setting value space
+          for extensions, constraining extensions to a single 32-bit setting value; extensions which require
+          more than 32 bits for settings would need to define an equivalent to the SETTINGS frame.  In the same
+          way, extensions which require multiple frame types would need to define a frame type field inside their
+          payload.
+        </t>
+        <t>
+          The proper resolution here remains an open issue, and discussion is one goal of this draft.
+        </t>
+      </section>
+    </section>
+
+  </middle>
+
+  <back>
+    <references title="References">
+      <reference anchor="HPACK">
+        <front>
+          <title>HPACK - Header Compression for HTTP/2.0</title>
+          <author initials="H." surname="Ruellan" fullname="Herve Ruellan"/>
+          <author initials="R." surname="Peon" fullname="Roberto Peon"/>
+          <date month="October" year="2013" />
+        </front>
+        <seriesInfo name="Internet-Draft" value="draft-ietf-httpbis-header-compression-04" />
+      </reference>
+
+      <reference anchor="IANA-PEN">
+        <front>
+          <title>Private Enterprise Numbers</title>
+          <author></author>
+          <date />
+        </front>
+        <format type="TXT" target="http://www.iana.org/assignments/enterprise-numbers/enterprise-numbers"/>
+      </reference>
+
+      <reference anchor="RFC2119">
+        <front>
+          <title>
+            Key words for use in RFCs to Indicate Requirement Levels
+          </title>
+          <author initials="S." surname="Bradner" fullname="Scott Bradner">
+            <organization>Harvard University</organization>
+            <address>
+              <email>sob@harvard.edu</email>
+            </address>
+          </author>
+          <date month="March" year="1997"/>
+        </front>
+        <seriesInfo name="BCP" value="14"/>
+        <seriesInfo name="RFC" value="2119"/>
+      </reference>
+
+      <reference anchor="URI">
+        <front>
+          <title abbrev="URI Generic Syntax">
+            Uniform Resource Identifier (URI): Generic
+            Syntax
+          </title>
+          <author initials="T." surname="Berners-Lee" fullname="Tim Berners-Lee"></author>
+          <author initials="R." surname="Fielding" fullname="Roy T. Fielding"></author>
+          <author initials="L." surname="Masinter" fullname="Larry Masinter"></author>
+          <date year="2005" month="January" />
+        </front>
+        <seriesInfo name="STD" value="66" />
+        <seriesInfo name="RFC" value="3986" />
+      </reference>
+
+      <reference anchor="SnellExtensions">
+        <front>
+          <title>HTTP Extensions</title>
+          <author initials="J." surname="Snell" fullname="James Snell"/>
+          <date year="2013" month="May"/>
+        </front>
+        <seriesInfo name="Internet-Draft" value="draft-snell-httpbis-ext-frames-00" />
+      </reference>
+    </references>
+    <section title="Example Extensions" anchor="Examples">
+      <t>
+        This section describes how certain extensions might leverage the EXTENSION frame.  It is explicitly not
+        an attempt to define the specific extension at this time, though the ideas have been discussed and should
+        be explored in the future.
+      </t>
+      <t>
+        Other sample extensions can be found in <xref target="SnellExtensions">another Internet Draft</xref>
+        submitted to this working group.
+      </t>
+
+      <section title="Server Hint">
+        <t>
+          Server Push has many attractive features, because it can eliminate both the RTT needed to send a request and the DOM processing time to realize a resource will be needed.  However, it suffers from several drawbacks as well:
+          <list style="symbols">
+            <t>The server cannot know what the client has in its cache, leading to wasted data transmission</t>
+            <t>The server cannot push resources for other origins, specifically resources which may be hosted on CDNs of which the server is aware</t>
+            <t>The server must fully specify the client request, which it will do inaccurately</t>
+          </list>
+        </t>
+        <t>
+          Server Hint defines a mechanism which sacrifices the RTT savings, but retains the ability to initiate requests before DOM parsing (or even document transfer) has completed and overcomes the stated drawbacks of server push.  While not intended as a replacement for Server Push, it may be a useful complement or replacement when a PUSH_PROMISE is not appropriate.
+        </t>
+        <section title="Format">
+          <figure title="Server Hint Extension Frame">
+            <preamble>The format of the Server Hint frame is as follows:</preamble>
+            <artwork type="inline">
+              <![CDATA[
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                Target Authority (varies)                      |
+    +---------------------------------------------------------------+
+    | ResCount (8+) |         Resource Records                    ...
+    +---------------------------------------------------------------+
+]]>
+            </artwork>
+          </figure>
+          <t>
+            Target Authority specifies the scheme and authority components of the URI, which apply all
+            resources in this frame.  (Resources which should be retrieved from a different authority or
+            using a different scheme MUST be sent in a separate frame.)  This URI fragment is formatted
+            as a length-prefixed Huffman-encoded string, as defined in <xref target="HPACK">HPACK</xref>.
+          </t>
+          <t>
+            ResCount is an 8-bit-prefix variable-length integer, also as defined in <xref target="HPACK">HPACK</xref>.
+            It defines how many Resource Records for the specified authority follow.
+          </t>
+          <figure title="Server Hint Extension Frame">
+            <preamble>
+              The format of each
+              Resource Record is as follows:
+            </preamble>
+            <artwork type="inline">
+              <![CDATA[
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    | Length (8+)   | Attributes (8)|          Path (varies)        |
+    +---------------------------------------------------------------+
+    |                    ETag (optional)                          ...
+    +---------------------------------------------------------------+
+    |               Last Modified Date (optional)                 ...
+    +---------------------------------------------------------------+
+    |                    Size (optional)                          ...
+    +---------------------------------------------------------------+
+    |                   Reserved (optional)                       ...
+    +---------------------------------------------------------------+
+]]>
+            </artwork>
+          </figure>
+
+          <t>
+            <list style="hanging">
+              <t hangText="Length:">An 8-bit prefix integer giving the number of bytes in the resource record</t>
+              <t hangText="Attributes:">
+                A bitmask specifying which optional pieces of information the server has opted to include:
+                <list style="symbols">
+                  <t>0x80:  Set if ETag is present</t>
+                  <t>0x40:  Set if Last-Modified Date is present</t>
+                  <t>0x20:  Set if Size is present</t>
+                </list>
+                The remaining bits are reserved.
+              </t>
+              <t hangText="Path:">
+                A length-prefixed Huffman-encoded string as specified in <xref target="HPACK">HPACK</xref> containing the
+                path (and optional query) component(s) of the resource <xref target="URI">URI</xref>.
+              </t>
+              <t hangText="ETag:">
+                A length-prefixed Huffman-encoded string as specified in <xref target="HPACK">HPACK</xref>,
+                containing the ETag as specified in RFC 2616.
+              </t>
+              <t hangText="Last-Modified Date:">
+                Last-Modified Date is the HTTP Date converted into the number of seconds since 1970-01-01 0:00 UTC
+                formatted as an 8-bit prefix variable-length integer.
+              </t>
+              <t hangText="Size:">
+                The content length, formatted as an 8-bit prefix variable-length integer.
+              </t>
+              <t hangText="Reserved:">
+                MUST be zero-length when sent, and unknown fields in the Reserved space MUST be ignored.
+              </t>
+            </list>
+          </t>
+        </section>
+        <section title="Behavior">
+          <t>
+            A server MAY send a Server Hint frame multiple times on a stream.  It may be sent only in a
+            circumstance where a PUSH_PROMISE frame would have been permissible, except for the value of
+            PUSH_ENABLED.  A single frame contains a list of resources accessible under a single authority,
+            but multiple instances of the frame MAY be sent to refer clients to resources available from
+            multiple authorities.
+          </t>
+          <t>
+            Upon receipt of a Server Hint frame, a client MUST check its cache for a corresponding resource.
+            If the resource is not available in the cache, it SHOULD open connections to the specified authority
+            and request the resource.
+          </t>
+          <t>
+            When processing a Server Hint frame containing no resources or in which all resources are already
+            available from cache, a client MAY prepare to make other requests in various ways, such as beginning
+            DNS resolution, connection establishment, etc.
+          </t>
+        </section>
+      </section>
+    </section>
+
+    <section title="Acknowledgements">
+      <t>
+        This document includes input from Martin Thompson and Gabriel Montenegro.
+      </t>
+    </section>
+
+  </back>
+</rfc>
