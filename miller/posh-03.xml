@@ -1,0 +1,886 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+<?rfc compact="yes"?>
+<?rfc strict="yes"?>
+<?rfc symrefs="yes"?>
+<?rfc toc="yes"?>
+<?rfc tocdepth="2"?>
+<rfc category="std" docName="draft-miller-posh-03" ipr="trust200902">
+  <front>
+    <title abbrev="POSH">PKIX over Secure HTTP (POSH)</title>
+    <author initials="M." surname="Miller" fullname="Matthew Miller">
+      <organization>Cisco Systems, Inc.</organization>
+      <address>
+        <postal>
+          <street>1899 Wynkoop Street, Suite 600</street>
+          <city>Denver</city>
+          <region>CO</region>
+          <code>80202</code>
+          <country>USA</country>
+        </postal>
+        <email>mamille2@cisco.com</email>
+      </address>
+    </author>
+    <author initials="P." surname="Saint-Andre" fullname="Peter Saint-Andre">
+      <organization>Cisco Systems, Inc.</organization>
+      <address>
+        <postal>
+          <street>1899 Wynkoop Street, Suite 600</street>
+          <city>Denver</city>
+          <region>CO</region>
+          <code>80202</code>
+          <country>USA</country>
+        </postal>
+        <email>psaintan@cisco.com</email>
+      </address>
+    </author>
+    <date/>
+    <area>SEC</area>
+    <keyword>Internet-Draft</keyword>
+    <keyword>Extensible Messaging and Presence Protocol</keyword>
+    <keyword>Jabber</keyword>
+    <keyword>federation</keyword>
+    <abstract>
+      <t>Experience has shown that it is extremely difficult to deploy proper PKIX certificates for TLS in multi-tenanted environments, since certification authorities will not issue certificates for hosted domains to hosting services, hosted domains do not want hosting services to hold their private keys, and hosting services wish to avoid liability for holding those keys.  As a result, domains hosted in multi-tenanted environments often deploy non-HTTP applications such as email and instant messaging using certificates that identify the hosting service, not the hosted domain.  Such deployments force end users and peer services to accept a certificate with an improper identifier, resulting in obvious security implications.  This document defines two methods that make it easier to deploy certificates for proper server identity checking in non-HTTP application protocols.  The first method enables the TLS client associated with a user agent or peer application server to obtain the end-entity certificate of a hosted domain over secure HTTP as an alternative to standard PKIX techniques.  The second method enables a hosted domain to securely delegate a non-HTTP application to a hosting service using redirects provided by HTTPS itself or by a pointer in a file served over HTTPS at the hosted domain.  While this approach is developed for use in the Extensible Messaging and Presence Protocol (XMPP) as a Domain Name Association prooftype, it can be applied to any non-HTTP application protocol.</t>
+    </abstract>
+  </front>
+
+  <middle>
+
+    <section title="Introduction" anchor="intro">
+      <t>We start with a thought experiment.</t>
+      <t>Imagine that you work on the operations team of a hosting company that provides the "foo" service (or email or instant messaging or social networking service) for ten thousand different customer organizations.  Each customer wants their service to be identified by the customer's domain name (e.g., foo.example.com), not the hosting company's domain name (e.g., hosting.example.net).</t>
+      <t>In order to properly secure each customer's "foo" service via Transport Layer Security (TLS) <xref target='RFC5246'/>, you need to obtain PKIX certificates <xref target='RFC5280'/> containing identifiers such as foo.example.com, as explained in the "CertID" specification <xref target='RFC6125'/>.  Unfortunately, you can't obtain such certificates because:</t>
+      <t>
+        <list style='symbols'>
+          <t>Certification authorities won't issue such certificates to you because you work for the hosting company, not the customer organization.<vspace blankLines='1'/></t>
+          <t>Customers won't obtain such certificates and then give them (plus the associated private keys) to you because their legal department is worried about liability.<vspace blankLines='1'/></t>
+          <t>You don't want to install such certificates (plus the associated private keys) on your servers anyway because your legal department is worried about liability, too.</t>
+        </list>
+      </t>
+      <t>Given your inability to deploy public keys / certificates containing the right identifiers, your back-up approach was always to use a certificate containing hosting.example.net as the identifier.  However, more and more customers and end users are complaining about warning messages in user agents and the inherent security issues involved with taking a "leap of faith" to accept the identity mismatch between the source domain (foo.example.com) and the delegated domain (hosting.example.net).</t>
+      <t>This situation is both insecure and unsustainable.  You have investigated the possibility of using DNS Security <xref target="RFC4033"/> and DNS-Based Authentication of Named Entities (DANE) <xref target="RFC6698"/> to solve the problem.  However, your customers and your operations team have told you that they will not be able to deploy DNSSEC and DANE for several years at least.  The product managers in your company are pushing you to find a method that can be deployed more quickly to overcome the lack of proper server identity checking for your hosted customers.</t>
+      <t>One possible approach is to ask each customer to provide the public key / certificate for the "foo" service at a special HTTPS URI on their website ("https://foo.example.com/.well-known/posh.foo.json" is one possibility).  This could be a public key that you generate for the customer, but because the customer hosts it via HTTPS, any user agent can find that public key and check it against the public key you provide during TLS negotiation for the "foo" service (as one added benefit, the customer never needs to hand you a private key).  Alternatively, the customer can redirect requests for that special HTTPS URI to an HTTPS URI at your own website, thus making it explicit that they have delegated the "foo" service to you.</t>
+      <t>The approach sketched out above, called POSH ("PKIX Over Secure HTTP"), is explained in the remainder of this document.  While this approach is developed for use in the Extensible Messaging and Presence Protocol (XMPP) as a prooftype for Domain Name Associations (DNA) <xref target="XMPP-DNA"/>, it can be applied to any non-HTTP application protocol.</t>
+    </section>
+
+    <section title="Discussion Venue" anchor="discuss">
+      <t>The discussion venue for this document is the posh@ietf.org mailing list; visit https://www.ietf.org/mailman/listinfo/posh for subscription information and discussion archives.</t>
+    </section>
+
+    <section title="Terminology" anchor="terms">
+      <t>This document inherits security terminology from <xref target="RFC5280"/>.  The terms "source domain", "derived domain", "reference identifier", and "presented identifier" are used as defined in the "CertID" specification <xref target="RFC6125"/>.</t>
+      <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in <xref target="RFC2119"/>.</t>
+    </section>
+
+    <section title="Obtaining Verification Materials" anchor="obtain">
+      <t>Server identity checking (see <xref target='RFC6125'/>) involves three different aspects:</t>
+      <t>
+        <list style='numbers'>
+          <t>A proof of the TLS server's identity (in PKIX, this takes the form of a PKIX certificate <xref target='RFC5280'/>).<vspace blankLines='1'/></t>
+          <t>Rules for checking the certificate (which vary by application protocol, although <xref target='RFC6125'/> attempts to harmonize those rules).<vspace blankLines='1'/></t>
+          <t>The materials that a TLS client uses to verify the TLS server's identity or check the TLS server's proof (in PKIX, this takes the form of chaining the end-entity certificate back to a trusted root and performing all validity checks as described in <xref target='RFC5280'/>, <xref target='RFC6125'/>, and the relevant application protocol specification).</t>
+        </list>
+      </t>
+      <t>When POSH is used, the first two aspects remain the same: the TLS server proves it identity by presenting a PKIX certificate <xref target="RFC5280"/> and the certificate is checked according to the rules defined in the appropriate application protocol specification (such as <xref target="RFC6120"/> for XMPP).  However, the TLS client obtains the materials it will use to verify the server's proof by retrieving a JSON Web Key (JWK) set <xref target='JOSE-JWK'/> over HTTPS (<xref target="RFC2616"/> and <xref target="RFC2818"/>) from a well-known URI <xref target="RFC5785"/>.</t>
+      <t>The process for retrieving a PKIX certificate over secure HTTP is as follows.</t>
+      <t>
+        <list style="numbers">
+          <t>The TLS client performs an HTTPS GET at the source domain to the path "/.well-known/posh.{servicedesc}.json".  The value of "{servicedesc}" is application-specific; see <xref target="iana"/> of this document for more details.  For example, if the application protocol is some hypothetical "Foo" service, then "{servicedesc}" could be "foo"; thus if a Foo client were to use POSH to verify a Foo server for the domain "foo.example.com", the HTTPS GET request would be as follows:
+          <vspace blankLines='1'/>
+          <figure>
+            <artwork><![CDATA[
+GET /.well-known/posh.foo.json HTTP/1.1
+Host: foo.example.com
+ 
+            ]]></artwork>
+          </figure>
+          </t>
+          <t>The source domain HTTPS server responds in one of three ways:<vspace blankLines="1"/>
+            <list style="symbols">
+              <t>If it possesses a PKIX certificate for the requested path, it responds as detailed in <xref target="prooftype-possess"/>.<vspace blankLines="1"/></t>
+              <t>If it has a reference to where the PKIX certificate can be obtained, it responds as detailed in <xref target="prooftype-ref"/>.<vspace blankLines='1'/></t>
+              <t>If it does not have any PKIX certificate for the requested path, it responds with a client error status code (e.g., 404).</t>
+            </list>
+          </t>
+        </list>
+        <vspace blankLines="1"/>
+      </t>
+
+      <section title="Source Domain Possesses PKIX Certificate" anchor="prooftype-possess">
+        <t>If the source domain HTTPS server possesses the certificate information, it responds to the HTTPS GET with a success status code and the message body set to a JSON Web Key (JWK) set <xref target="JOSE-JWK"/>.  The JWK set MUST contain at least one JWK object, and MUST contain an "expires" field whose value is the number of seconds after which the TLS client ought to consider the key information to be stale (further explained under <xref target='caching'/>).</t>
+        <t>Each included JWK object MUST possess the following information:</t>
+        <t>
+          <list style="symbols">
+            <t>The "kty" field set to the appropriate key type used for TLS connections (e.g., "RSA" for a certificate using an RSA key).<vspace blankLines="1"/></t>
+            <t>The required public parameters for the key type (e.g., "n" and "e" for a certificate using an RSA key).<vspace blankLines="1"/></t>
+            <t>The "x5t" field set to the certificate thumbprint, as described in section 3.6 of <xref target="JOSE-JWK"/>.</t>
+          </list>
+        </t>
+        <t>Each JWK object MUST NOT possess the private parameters for the key type (e.g., "d", "p", "q" for a certificate using an RSA key).</t>
+        <t>Each JWK object MAY possess other parameters as desired by application servers (e.g., the "x5c" field containing the entire X.509 certificate chain, as per section 3.7 of <xref target="JOSE-JWK"/>).</t>
+        <t>The following example illustrates the usage described above.</t>
+        <t>
+          <figure>
+              <preamble>Example Content Response</preamble>
+              <artwork><![CDATA[
+HTTP/1.1 200 OK
+Content-Type: application/jwk-set+json
+Content-Length: 2785
+
+{
+  "keys": [
+    {
+      "kty":"RSA",
+      "kid":"c8fb8b80-1193-11e3-b2b1-835742119fe8",
+      "n":"ANxwssdcU3LbODErec3owrwUhlzjtuskAn8rAcBMRPImn5xA
+           JRX-1T5g2D7MTozWWFk4TlpgzAR5slvM0tc35qAI9I0Cqk4Z
+           LChQrYsWuY7alTrnNXdusHUYc6Eq89DZaH2knTcp57wAXzJP
+           IG_tpBi5F7ck9LVRvRjybix0HJ7i4YrL-GeLuSgrjO4-GDcX
+           Ip8oV0FMKZH-NoMfUITlWYl_JcX1D0WUAiuAnvWtD4Kh_qMJ
+           U6FZuupZGHqPdc3vrXtp27LWgxzxjFa9qnOU6y53vCCJXLLI
+           5sy2fCwEDzLJqh2T6UItIzjrSUZMIsK8r2pXkroI0uYuNn3W
+           y-jAzK8",
+      "e":"AQAB",
+      "x5t":"UpjRI_A3afKE8_AIeTZ5o1dECTY"
+    }
+  ],
+  "expires": 604800
+}
+
+]]></artwork>
+          </figure>
+        </t>
+        <t>The "expires" value is a hint regarding the expiration of the keying materials.  If no "expires" field is included, a TLS client SHOULD consider these verification materials invalid.  See <xref target='caching'/> for how to reconcile this "expires" field with the reference's "expires" field.</t>
+      </section>
+
+      <section title="Source Domain References PKIX Certificate" anchor="prooftype-ref">
+        <t>If the source domain HTTPS server has a reference to the certificate information, it responds to the HTTPS GET with a JSON document.  The document MUST contain a "url" field whose value is the HTTPS URL where TLS clients can obtain the actual JWK set, and MUST contain an "expires" field whose value is the number of seconds after which the TLS client ought to consider the delegation to be stale (further explained under <xref target='caching'/>).</t>
+        <t>
+          <figure>
+            <preamble>Example Reference Response</preamble>
+            <artwork><![CDATA[
+HTTP/1.1 200 Ok
+Content-Type: application/json
+Content-Length: 78
+
+{
+  "url":"https://hosting.example.net/.well-known/posh.foo.json",
+  "expires":86400
+}
+              ]]></artwork>
+          </figure>
+        </t>
+        <t>The client performs an HTTPS GET for the URL specified in the "url" field value.  The HTTPS server for the URI to which the client has been redirected responds to the request with a JWK set.  The content retrieved from the "url" location MUST NOT itself be a reference (i.e., containing a "url" fields instead of a "keys" field), in order to prevent circular delegations.</t>
+        <t><list style='empty'><t>Note: The JSON document returned by the source domain HTTPS server MUST contain either a reference or a JWK-set, but MUST NOT contain both.</t></list></t>
+        <t><list style='empty'><t>Note: See <xref target='security'/> for discussion about HTTPS redirects.</t></list></t>
+        <t>The "expires" value is a hint regarding the expiration of the source domain's delegation of service to the delegated domain.  If no "expires" field is included, a TLS client SHOULD consider the delegation invalid.  See <xref target='caching'/> for guidelines about reconciling this "expires" field with the JWK-set's "expires" field.</t>
+      </section>
+      
+      <section title="Performing Verification" anchor="prooftype-verify">
+        <t>The TLS client compares the PKIX information obtained from the TLS server against each JWK object in the POSH results, until a match is found or the collection of POSH verification materials is exhausted.  If none of the JWK objects match the TLS server PKIX information, the TLS client SHOULD reject the connection (the TLS client might still accept the connection if other verification schemes are successful).</t>
+        <t>The TLS client SHOULD compare the fingerprint of the PKIX certificate from the TLS server against the "x5t" field of the JWK object (note the "x5t" field is the base64url encoding of the fingerprint).</t>
+        <t>The TLS client MAY verify the certificate chain provided in the "x5c" field of the JWK object (if present), but it MUST NOT implicitly consider the final certificate in the "x5c" field to be a trust anchor itself; the TLS client only uses the end entity certificate information for verification.</t>
+      </section>
+    </section>
+
+    <section title="Secure Delegation" anchor="delegation">
+      <t>The delegation from the source domain to the delegated domain can be considered secure if the certificate offered by the TLS server matches the POSH certificate, regardless of how the POSH certificates are obtained.</t>
+    </section>
+
+    <section title="Order of Operations" anchor="order">
+      <t>In order for the TLS client to perform verification of reference identifiers without potentially compromising data, POSH processes MUST be complete before any application-level data is exchanged for the source domain.  The TLS client SHOULD perform all POSH retrievals before opening any socket connections to the application protocol server.  For application protocols that use DNS SRV, the POSH processes ideally ought to be done in parallel with resolving the SRV records and the addresses of any targets, similar to the "happy eyeballs" approach for IPv4 and IPv6 <xref target='RFC6555'/>.</t>
+      <t>The following diagram illustrates the possession flow:<vspace blankLines="1"/></t>
+      <t>
+        <figure>
+          <artwork><![CDATA[
+Client                 Domain                 Server
+------                 ------                 ------
+  |                      |                      |
+  |    Request POSH      |                      |
+  |--------------------->|                      |
+  |                      |                      |
+  |   Return POSH keys   |                      |
+  |<---------------------|                      |
+  |                      |                      |
+  |              Service TLS Handshake          |
+  |<===========================================>|
+  |                      |                      |
+  |                 Service Data                |
+  |<===========================================>|
+  |                      |                      |
+          ]]></artwork>
+        </figure>
+      </t>
+      <t>While the following diagram illustrates the reference flow:<vspace blankLines="1"/></t>
+      <t>
+        <figure>
+          <artwork><![CDATA[
+Client                 Domain                 Server
+------                 ------                 ------
+  |                      |                      |
+  |    Request POSH      |                      |
+  |--------------------->|                      |
+  |                      |                      |
+  |   Return POSH url    |                      |
+  |<---------------------|                      |
+  |                      |                      |
+  |                  Request POSH               |
+  |-------------------------------------------->|
+  |                      |                      |
+  |                Return POSH keys             |
+  |<--------------------------------------------|
+  |                      |                      |
+  |             Service TLS Handshake           |
+  |<===========================================>|
+  |                      |                      |
+  |                 Service Data                |
+  |<===========================================>|
+  |                      |                      |
+          ]]></artwork>
+        </figure>
+      </t>
+    </section>
+
+    <section title="Caching Results" anchor="caching">
+      <t>The TLS client MUST NOT cache results (reference or JWK-set) indefinitely.  If the source domain returns a reference, the TLS client MUST use the lower of the two "expires" values when determining how long to cache results (i.e., if the reference "expires" value is lower than the JWK-set "expires" value, honor the reference "expires" value).  Once the TLS client considers the results stale, it SHOULD perform the entire POSH process again starting with the HTTPS GET to the source domain.  The TLS client MAY use a lower value than any provided in the "expires" field(s), or not cache results at all.</t>
+      <t>The TLS client SHOULD NOT rely on HTTP caching mechanisms, instead using the expiration hints provided in the POSH reference or JWK-set documents.  To that end, the HTTPS servers for source and derived domains SHOULD specify a 'Cache-Control' header indicating a very short duration (e.g., max-age=60) or "no-cache" to indicate that the response (redirect, reference, or content) is not appropriate to cache at the HTTP level.</t>
+    </section>
+
+    <section title="Alternates and Roll-over" anchor="rollover">
+      <t>To indicate alternate PKIX certificates (such as when an existing certificate will soon expire), the returned JWK set MAY contain multiple JWK objects.  The JWK set SHOULD be ordered with the most relevant certificate first as determined by the application service operator (e.g., the renewed certificate), followed by the next most relevant certificate (e.g., the certificate soonest to expire).  Here is an example:</t>
+      <figure>
+        <artwork><![CDATA[
+{
+  "keys":[
+    {
+      "kty": "RSA",
+      "kid": "cfc0ca70-1193-11e3-b2b1-835742119fe8",
+      "n":   "AM-ktWkQ8btj_HEdAA6kOpzJGgoHNZsJmxjh_PifpgAUfQeq
+              MO_YBR100IdJZRzJfULyhRwn9bikCq87WToxgPWOnd3sH3qT
+              YiAcIR5S6tBbsyp6WYmwM1yuC0vLCo6SoDzdK1SvkQKM3QWk
+              0GFNU4l4qXYAMxaSw83i6yv5DBVbST7E92vS6Gq_4pgI26l1
+              0JhybZuTEVPRUCG6pTKAXQpLxmjJ5oG9M91RP17nsuQeE7Ng
+              0Ap4BBn5hocojkfthwgbX4lqBMecpBAnky5jn6slmzS_rL-L
+              w-_8hUldaTPD9MHlHPrvcsRV5uw8wK5MB6QyfS6wF4b0Kj2T
+              vYceNlE",
+      "e":   "AQAB",
+      "x5t": "Ae0sLVtm78VT-mQXJQop-ENOM6o"
+    },
+    {
+      "kty": "RSA",
+      "kid": "dbc28570-1193-11e3-b2b1-835742119fe8",
+      "n":   "AM-ktWkQ8btj_HEdAA6kOpzJGgoHNZsJmxjh_PifpgAUfQeq
+              MO_YBR100IdJZRzJfULyhRwn9bikCq87WToxgPWOnd3sH3qT
+              YiAcIR5S6tBbsyp6WYmwM1yuC0vLCo6SoDzdK1SvkQKM3QWk
+              0GFNU4l4qXYAMxaSw83i6yv5DBVbST7E92vS6Gq_4pgI26l1
+              0JhybZuTEVPRUCG6pTKAXQpLxmjJ5oG9M91RP17nsuQeE7Ng
+              0Ap4BBn5hocojkfthwgbX4lqBMecpBAnky5jn6slmzS_rL-L
+              w-_8hUldaTPD9MHlHPrvcsRV5uw8wK5MB6QyfS6wF4b0Kj2T
+              vYceNlE",
+      "e":   "AQAB",
+      "x5t": "lYZC2n9TBpOaUsBclEIacQTKToA"
+    }
+  ]
+}        ]]></artwork>
+      </figure>
+    </section>
+
+    <section title="IANA Considerations" anchor="iana">
+      <t>This document registers a well-known URI <xref target='RFC5785'/> for protocols that use POSH.  The completed template follows.</t>
+      <t>
+        <list style='empty'>
+          <t>
+            <list style='hanging'>
+              <t hangText='URI suffix:'>posh.</t>
+              <t hangText='Change controller:'>IETF</t>
+              <t hangText='Specification document:'>[[ this document ]]</t>
+              <t hangText='Related information:'>Because the "posh." string is merely a prefix, protocols that use POSH need to register particular URIs that are prefixed with the "posh." string.</t>
+            </list>
+          </t>
+        </list>
+      </t>
+      <t>Note that the registered URI is "posh." (with a trailing dot).  This is merely a prefix to be placed at the front of well-known URIs <xref target='RFC5785'/> registered by protocols that use POSH, which themselves are responsible for the relevant registrations with the IANA.  The URIs registered by such protocols SHOULD match the URI template <xref target="RFC6570"/> path "/.well-known/posh.{servicedesc}.json"; that is, begin with "posh." and end with ".json" (indicating a media type of application/json <xref target='RFC4627'/> or application/jwk-set+json <xref target='JOSE-JWK'/>).</t>
+      <t>For POSH-using protocols that rely on DNS SRV records <xref target='RFC2782'/>, the "{servicedesc}" part of the well-known URI SHOULD be "{service}.{proto}", where the "{service}" is the DNS SRV "Service" prepended by the underscore character "_" and the "{proto}" is the DNS SRV "Proto" also prepended by the underscore character "_".  As an example, the well-known URI for XMPP server-to-server connections would be "posh._xmpp-server._tcp.json" since XMPP <xref target='RFC6120'/> registers a service name of "xmpp-server" and uses TCP as the underlying transport protocol.</t>  
+      <t>For other POSH-using protocols, the "{servicedesc}" part of the well-known URI can be any unique string or identifier for the protocol, which might be a service name registered with the IANA in accordance with <xref target='RFC6335'/> or which might be an unregistered name.  As an example, the well-known URI for the mythical "Foo" service could be "posh.foo.json".</t>
+      <t>Note: As explained in <xref target='RFC5785'/>, the IANA registration policy <xref target='RFC5226'/> for well-known URIs is Specification Required.</t>  
+    </section>
+
+    <section title="Security Considerations" anchor="security">
+      <t>This document supplements but does not supersede the security considerations provided in specifications for application protocols that decide to use POSH (e.g., <xref target="RFC6120"/> and <xref target="RFC6125"/> for XMPP).  Specifically, the security of requests and responses sent via HTTPS depends on checking the identity of the HTTP server in accordance with <xref target="RFC2818"/>.  Additionally, the security of POSH can benefit from other HTTP hardening protocols, such as HSTS <xref target="RFC6797"/> and key pinning <xref target="KEYPIN"/>, especially if the TLS client shares some information with a common HTTPS implementation (e.g., platform-default web browser).</t>
+      <t>Note well that POSH is used by a TLS client to obtain the public key of a TLS server to which it might connect for a particular application protocol such as IMAP or XMPP.  POSH does not enable a hosted domain to transfer private keys to a hosting service via HTTPS.  POSH also does not enable a TLS server to engage in certificate enrollment with a certification authority via HTTPS, as is done in Enrollment over Secure Transport <xref target='EST'/>.</t>
+      <t>A web server at the source domain might redirect an HTTPS request to another URL.  The location provided in the redirect response MUST specify an HTTPS URL.  Source domains SHOULD use only temporary redirect mechanisms, such as HTTP status codes 302 (Found) and 307 (Temporary Redirect).  Clients MAY treat any redirect as temporary, ignoring the specific semantics for 301 (Moved Permanently) and 308 (Permanent Redirect) <xref target='HTTP-STATUS-308'/>.  To protect against circular references, clients MUST NOT follow an infinite number of redirects.  It is RECOMMENDED that clients follow no more than 10 redirects, although applications or implementations can require that fewer redirects be followed.</t>
+    </section>
+
+  </middle>
+
+  <back>
+
+    <references title="Normative References">
+
+      <reference anchor="JOSE-JWK">
+        <front>
+          <title>JSON Web Key (JWK)</title>
+          <author initials="M" surname="Jones" fullname="Michael Jones">
+            <organization>Microsoft</organization>
+            <address>
+              <email>mbj@microsoft.com</email>
+            </address>
+          </author>
+          <date day="15" month="September" year="2013"/>
+        </front>
+        <seriesInfo name="Internet-Draft" value="draft-ietf-jose-json-web-key-16"/>
+        <format type="TXT" target="http://tools.ietf.org/html/draft-ietf-jose-json-web-key-16.txt"/>
+      </reference>
+
+      <reference anchor="RFC2119">
+        <front>
+          <title abbrev="RFC Key Words">Key words for use in RFCs to Indicate Requirement Levels</title>
+          <author initials="S." surname="Bradner" fullname="Scott Bradner">
+            <organization>Harvard University</organization>
+            <address>
+              <postal>
+                <street>1350 Mass.  Ave.</street>
+                <street>Cambridge</street>
+                <street>MA 02138</street>
+              </postal>
+              <phone>- +1 617 495 3864</phone>
+              <email>-</email>
+            </address>
+          </author>
+          <date month="March" year="1997"/>
+          <area>General</area>
+          <keyword>keyword</keyword>
+          <abstract>
+            <t>In many standards track documents several words are used to signify the requirements in the specification.  These words are often capitalized.  This document defines these words as they should be interpreted in IETF documents.  Authors who follow these guidelines should incorporate this phrase near the beginning of their document: 
+              <list><t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED",  "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.</t></list>
+            </t>
+            <t>Note that the force of these words is modified by the requirement level of the document in which they are used.</t>
+          </abstract>
+        </front>
+        <seriesInfo name="BCP" value="14"/>
+        <seriesInfo name="RFC" value="2119"/>
+      </reference>
+
+      <reference anchor="RFC2616">
+        <front>
+          <title abbrev="HTTP/1.1">Hypertext Transfer Protocol -- HTTP/1.1</title>
+          <author initials="R." surname="Fielding" fullname="Roy T. Fielding">
+            <organization abbrev="UC Irvine">Department of Information and Computer Science</organization>
+            <address>
+              <postal>
+                <street>University of California, Irvine</street>
+                <city>Irvine</city>
+                <region>CA</region>
+                <code>92697-3425</code>
+              </postal>
+              <facsimile>+1(949)824-1715</facsimile>
+              <email>fielding@ics.uci.edu</email>
+            </address>
+          </author>
+          <author initials="J." surname="Gettys" fullname="James Gettys">
+            <organization abbrev="Compaq/W3C">World Wide Web Consortium</organization>
+            <address>
+              <postal>
+                <street>MIT Laboratory for Computer Science, NE43-356</street>
+                <street>545 Technology Square</street>
+                <city>Cambridge</city>
+                <region>MA</region>
+                <code>02139</code>
+              </postal>
+              <facsimile>+1(617)258-8682</facsimile>
+              <email>jg@w3.org</email>
+            </address>
+          </author>
+          <author initials="J." surname="Mogul" fullname="Jeffrey C. Mogul">
+            <organization abbrev="Compaq">Compaq Computer Corporation</organization>
+            <address>
+              <postal>
+                <street>Western Research Laboratory</street>
+                <street>250 University Avenue</street>
+                <city>Palo Alto</city>
+                <region>CA</region>
+                <code>94305</code>
+              </postal>
+              <email>mogul@wrl.dec.com</email>
+            </address>
+          </author>
+          <author initials="H." surname="Frystyk" fullname="Henrik Frystyk Nielsen">
+            <organization abbrev="W3C/MIT">World Wide Web Consortium</organization>
+            <address>
+              <postal>
+                <street>MIT Laboratory for Computer Science, NE43-356</street>
+                <street>545 Technology Square</street>
+                <city>Cambridge</city>
+                <region>MA</region>
+                <code>02139</code>
+              </postal>
+              <facsimile>+1(617)258-8682</facsimile>
+              <email>frystyk@w3.org</email>
+            </address>
+          </author>
+          <author initials="L." surname="Masinter" fullname="Larry Masinter">
+            <organization abbrev="Xerox">Xerox Corporation</organization>
+            <address>
+              <postal>
+                <street>MIT Laboratory for Computer Science, NE43-356</street>
+                <street>3333 Coyote Hill Road</street>
+                <city>Palo Alto</city>
+                <region>CA</region>
+                <code>94034</code>
+              </postal>
+              <email>masinter@parc.xerox.com</email>
+            </address>
+          </author>
+          <author initials="P." surname="Leach" fullname="Paul J. Leach">
+            <organization abbrev="Microsoft">Microsoft Corporation</organization>
+            <address>
+              <postal>
+                <street>1 Microsoft Way</street>
+                <city>Redmond</city>
+                <region>WA</region>
+                <code>98052</code>
+              </postal>
+              <email>paulle@microsoft.com</email>
+            </address>
+          </author>
+          <author initials="T." surname="Berners-Lee" fullname="Tim Berners-Lee">
+            <organization abbrev="W3C/MIT">World Wide Web Consortium</organization>
+            <address>
+              <postal>
+                <street>MIT Laboratory for Computer Science, NE43-356</street>
+                <street>545 Technology Square</street>
+                <city>Cambridge</city>
+                <region>MA</region>
+                <code>02139</code>
+              </postal>
+              <facsimile>+1(617)258-8682</facsimile>
+              <email>timbl@w3.org</email>
+            </address>
+          </author>
+          <date year="1999" month="June"/>
+          <abstract>
+            <t>
+   The Hypertext Transfer Protocol (HTTP) is an application-level
+   protocol for distributed, collaborative, hypermedia information
+   systems.  It is a generic, stateless, protocol which can be used for
+   many tasks beyond its use for hypertext, such as name servers and
+   distributed object management systems, through extension of its
+   request methods, error codes and headers .  A feature of HTTP is
+   the typing and negotiation of data representation, allowing systems
+   to be built independently of the data being transferred.
+</t>
+            <t>
+   HTTP has been in use by the World-Wide Web global information
+   initiative since 1990.  This specification defines the protocol
+   referred to as "HTTP/1.1", and is an update to RFC 2068 .
+</t>
+          </abstract>
+        </front>
+        <seriesInfo name="RFC" value="2616"/>
+        <format type="TXT" octets="422317" target="http://www.rfc-editor.org/rfc/rfc2616.txt"/>
+        <format type="PS" octets="5529857" target="http://www.rfc-editor.org/rfc/rfc2616.ps"/>
+        <format type="PDF" octets="550558" target="http://www.rfc-editor.org/rfc/rfc2616.pdf"/>
+        <format type="HTML" octets="636125" target="http://xml.resource.org/public/rfc/html/rfc2616.html"/>
+        <format type="XML" octets="493420" target="http://xml.resource.org/public/rfc/xml/rfc2616.xml"/>
+      </reference>
+
+      <reference anchor="RFC2818">
+        <front>
+          <title>HTTP Over TLS</title>
+          <author initials="E." surname="Rescorla" fullname="E. Rescorla">
+            <organization/>
+          </author>
+          <date year="2000" month="May"/>
+          <abstract>
+            <t>This memo describes how to use Transport Layer Security (TLS) to secure Hypertext Transfer Protocol (HTTP) connections over the Internet.  This memo provides information for the Internet community.</t>
+          </abstract>
+        </front>
+        <seriesInfo name="RFC" value="2818"/>
+        <format type="TXT" octets="15170" target="http://www.rfc-editor.org/rfc/rfc2818.txt"/>
+      </reference>
+
+<reference anchor='RFC4627'>
+<front>
+<title>The application/json Media Type for JavaScript Object Notation (JSON)</title>
+<author initials='D.' surname='Crockford' fullname='D. Crockford'>
+<organization /></author>
+<date year='2006' month='July' />
+<abstract>
+<t>JavaScript Object Notation (JSON) is a lightweight, text-based, language-independent data interchange format.  It was derived from the ECMAScript Programming Language Standard.  JSON defines a small set of formatting rules for the portable representation of structured data.  This memo provides information for the Internet community.</t></abstract></front>
+<seriesInfo name='RFC' value='4627' />
+<format type='TXT' octets='16319' target='http://www.rfc-editor.org/rfc/rfc4627.txt' />
+</reference>
+
+<reference anchor='RFC5246'>
+<front>
+<title>The Transport Layer Security (TLS) Protocol Version 1.2</title>
+<author initials='T.' surname='Dierks' fullname='T. Dierks'>
+<organization /></author>
+<author initials='E.' surname='Rescorla' fullname='E. Rescorla'>
+<organization /></author>
+<date year='2008' month='August' />
+<abstract>
+<t>This document specifies Version 1.2 of the Transport Layer Security (TLS) protocol.  The TLS protocol provides communications security over the Internet.  The protocol allows client/server applications to communicate in a way that is designed to prevent eavesdropping, tampering, or message forgery. [STANDARDS-TRACK]</t></abstract></front>
+<seriesInfo name='RFC' value='5246' />
+<format type='TXT' octets='222395' target='http://www.rfc-editor.org/rfc/rfc5246.txt' />
+</reference>
+
+      <reference anchor="RFC5280">
+        <front>
+          <title>Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile</title>
+          <author initials="D." surname="Cooper" fullname="D. Cooper">
+            <organization/>
+          </author>
+          <author initials="S." surname="Santesson" fullname="S. Santesson">
+            <organization/>
+          </author>
+          <author initials="S." surname="Farrell" fullname="S. Farrell">
+            <organization/>
+          </author>
+          <author initials="S." surname="Boeyen" fullname="S. Boeyen">
+            <organization/>
+          </author>
+          <author initials="R." surname="Housley" fullname="R. Housley">
+            <organization/>
+          </author>
+          <author initials="W." surname="Polk" fullname="W. Polk">
+            <organization/>
+          </author>
+          <date year="2008" month="May"/>
+          <abstract>
+            <t>This memo profiles the X.509 v3 certificate and X.509 v2 certificate revocation list (CRL) for use in the Internet.  An overview of this approach and model is provided as an introduction.  The X.509 v3 certificate format is described in detail, with additional information regarding the format and semantics of Internet name forms.  Standard certificate extensions are described and two Internet-specific extensions are defined.  A set of required certificate extensions is specified.  The X.509 v2 CRL format is described in detail along with standard and Internet-specific extensions.  An algorithm for X.509 certification path validation is described.  An ASN.1 module and examples are provided in the appendices. [STANDARDS TRACK]</t>
+          </abstract>
+        </front>
+        <seriesInfo name="RFC" value="5280"/>
+        <format type="TXT" octets="352580" target="ftp://ftp.isi.edu/in-notes/rfc5280.txt"/>
+      </reference>
+
+      <reference anchor="RFC5785">
+        <front>
+          <title>Defining Well-Known Uniform Resource Identifiers (URIs)</title>
+          <author initials="M." surname="Nottingham" fullname="M. Nottingham">
+            <organization/>
+          </author>
+          <author initials="E." surname="Hammer-Lahav" fullname="E. Hammer-Lahav">
+            <organization/>
+          </author>
+          <date year="2010" month="April"/>
+          <abstract>
+            <t>This memo defines a path prefix for "well-known locations", "/.well-known/", in selected Uniform Resource Identifier (URI) schemes. [STANDARDS-TRACK]</t>
+          </abstract>
+        </front>
+        <seriesInfo name="RFC" value="5785"/>
+        <format type="TXT" octets="13779" target="http://www.rfc-editor.org/rfc/rfc5785.txt"/>
+      </reference>
+
+      <reference anchor="RFC6125">
+        <front>
+          <title>Representation and Verification of Domain-Based Application Service Identity within Internet Public Key Infrastructure Using X.509 (PKIX) Certificates in the Context of Transport Layer Security (TLS)</title>
+          <author initials="P." surname="Saint-Andre" fullname="Peter Saint-Andre">
+            <organization>Cisco</organization>
+            <address>
+              <email>psaintan@cisco.com</email>
+            </address>
+          </author>
+          <author initials="J." surname="Hodges" fullname="Jeff Hodges">
+            <organization>PayPal</organization>
+            <address>
+              <email>jeff.hodges@paypal.com</email>
+            </address>
+          </author>
+          <date month="March" year="2011"/>
+        </front>
+        <seriesInfo name="RFC" value="6125"/>
+        <format type="TXT" target="http://tools.ietf.org/rfc/rfc6125.txt"/>
+      </reference>
+
+    </references>
+
+    <references title="Informative References">
+<reference anchor='EST'>
+<front>
+<title>Enrollment over Secure Transport</title>
+<author initials='M' surname='Pritikin' fullname='Max Pritikin'>
+    <organization />
+</author>
+<author initials='P' surname='Yee' fullname='Peter Yee'>
+    <organization />
+</author>
+<author initials='D' surname='Harkins' fullname='Dan Harkins'>
+    <organization />
+</author>
+<date month='August' day='13' year='2013' />
+<abstract><t>This document profiles certificate enrollment for clients using Certificate Management over CMS (CMC) messages over a secure transport.  This profile, called Enrollment over Secure Transport (EST), describes a simple yet functional certificate management protocol targeting Public Key Infrastructure (PKI) clients that need to acquire client certificates and associated Certification Authority (CA) certificate(s).  It also supports client-generated public/ private key pairs as well as key pairs generated by the CA.</t></abstract>
+</front>
+<seriesInfo name='Internet-Draft' value='draft-ietf-pkix-est-09' />
+<format type='TXT'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-pkix-est-09.txt' />
+</reference>
+
+<reference anchor='HTTP-STATUS-308'>
+<front>
+<title>The Hypertext Transfer Protocol (HTTP) Status Code 308 (Permanent Redirect)</title>
+<author initials='J' surname='Reschke' fullname='Julian Reschke'>
+    <organization />
+</author>
+<date month='March' day='26' year='2012' />
+<abstract><t>This document specifies the additional HyperText Transfer Protocol (HTTP) Status Code 308 (Permanent Redirect).</t></abstract>
+</front>
+<seriesInfo name='Internet-Draft' value='draft-reschke-http-status-308-07' />
+<format type='TXT'
+        target='http://www.ietf.org/internet-drafts/draft-reschke-http-status-308-07.txt' />
+</reference>
+
+      <reference anchor="KEYPIN">
+<front>
+<title>Public Key Pinning Extension for HTTP</title>
+<author initials='C' surname='Evans' fullname='Chris Evans'>
+    <organization />
+</author>
+<author initials='C' surname='Palmer' fullname='Chris Palmer'>
+    <organization />
+</author>
+<author initials='R' surname='Sleevi' fullname='Ryan Sleevi'>
+    <organization />
+</author>
+<date month='July' day='11' year='2013' />
+<abstract><t>This memo describes an extension to the HTTP protocol allowing web host operators to instruct user agents (UAs) to remember ("pin") the hosts' cryptographic identities for a given period of time.  During that time, UAs will require that the host present a certificate chain including at least one Subject Public Key Info structure whose fingerprint matches one of the pinned fingerprints for that host.  By effectively reducing the number of authorities who can authenticate the domain during the lifetime of the pin, pinning may reduce the incidence of man-in-the-middle attacks due to compromised Certification Authorities.</t></abstract>
+</front>
+<seriesInfo name='Internet-Draft' value='draft-ietf-websec-key-pinning-08' />
+<format type='TXT'
+        target='http://www.ietf.org/internet-drafts/draft-ietf-websec-key-pinning-08.txt' />
+</reference>
+
+			<reference anchor="XMPP-DNA">
+				<front>
+					<title>Domain Name Associations (DNA) in the Extensible Messaging and Presence Protocol (XMPP)</title>
+					<author initials="P" surname="Saint-Andre" fullname="Peter Saint-Andre">
+						<organization/>
+					</author>
+					<author initials="M" surname="Miller" fullname="Matthew Miller">
+						<organization/>
+					</author>
+					<date month="October" day="20" year="2013"/>
+					<abstract>
+						<t>This document improves the security of the Extensible Messaging and Presence Protocol (XMPP) in two ways.  First, it specifies how "prooftypes" can establish a strong association between a domain name and an XML stream.  Second, it describes how to securely delegate a source domain to a derived domain, which is especially important in virtual hosting environments.</t>
+					</abstract>
+				</front>
+				<seriesInfo name="Internet-Draft" value="draft-ietf-xmpp-dna-04"/>
+				<format type="TXT" target="http://www.ietf.org/internet-drafts/draft-ietf-xmpp-dna-04.txt"/>
+			</reference>
+<reference anchor='RFC2782'>
+<front>
+<title abbrev='DNS SRV RR'>A DNS RR for specifying the location of services (DNS SRV)</title>
+<author initials='A.' surname='Gulbrandsen' fullname='Arnt Gulbrandsen'>
+<organization>Troll Tech</organization>
+<address>
+<postal>
+<street>Waldemar Thranes gate 98B</street>
+<city>Oslo</city>
+<region />
+<code>N-0175</code>
+<country>NO</country></postal>
+<phone>+47 22 806390</phone>
+<facsimile>+47 22 806380</facsimile>
+<email>arnt@troll.no</email></address></author>
+<author initials='P.' surname='Vixie' fullname='Paul Vixie'>
+<organization>Internet Software Consortium</organization>
+<address>
+<postal>
+<street>950 Charter Street</street>
+<city>Redwood City</city>
+<region>CA</region>
+<code>94063</code>
+<country>US</country></postal>
+<phone>+1 650 779 7001</phone></address></author>
+<author initials='L.' surname='Esibov' fullname='Levon Esibov'>
+<organization>Microsoft Corporation</organization>
+<address>
+<postal>
+<street>One Microsoft Way</street>
+<city>Redmond</city>
+<region>WA</region>
+<code>98052</code>
+<country>US</country></postal>
+<email>levone@microsoft.com</email></address></author>
+<date year='2000' month='February' />
+<abstract>
+<t>This document describes a DNS RR which specifies the location of the
+   server(s) for a specific protocol and domain.</t></abstract></front>
+<seriesInfo name='RFC' value='2782' />
+<format type='TXT' octets='24013' target='http://www.rfc-editor.org/rfc/rfc2782.txt' />
+</reference>
+
+      <reference anchor="RFC4033">
+        <front>
+          <title>DNS Security Introduction and Requirements</title>
+          <author initials="R." surname="Arends" fullname="Roy Arends">
+            <organization>Telematica Instituut</organization>
+            <address>
+              <email>roy.arends@telin.nl</email>
+            </address>
+          </author>
+          <author initials="R." surname="Austein" fullname="Rob Austein">
+            <organization>Internet Systems Consortium</organization>
+            <address>
+              <email>sra@isc.org</email>
+            </address>
+          </author>
+          <author initials="M." surname="Larson" fullname="Matt Larson">
+            <organization>VeriSign, Inc.</organization>
+            <address>
+              <email>mlarson@verisign.com</email>
+            </address>
+          </author>
+          <author initials="D." surname="Massey" fullname="Dan Massey">
+            <organization>Colorado State University</organization>
+            <address>
+              <email>massey@cs.colostate.edu</email>
+            </address>
+          </author>
+          <author initials="S." surname="Rose" fullname="Scott Rose">
+            <organization>National Institute for Standards and Technology</organization>
+            <address>
+              <email>scott.rose@nist.gov</email>
+            </address>
+          </author>
+          <date month="May" year="2005"/>
+        </front>
+        <seriesInfo name="RFC" value="4033"/>
+        <format type="TXT" target="http://tools.ietf.org/rfc/rfc4033.txt"/>
+      </reference>
+
+<reference anchor='RFC5226'>
+<front>
+<title>Guidelines for Writing an IANA Considerations Section in RFCs</title>
+<author initials='T.' surname='Narten' fullname='T. Narten'>
+<organization /></author>
+<author initials='H.' surname='Alvestrand' fullname='H. Alvestrand'>
+<organization /></author>
+<date year='2008' month='May' />
+<abstract>
+<t>Many protocols make use of identifiers consisting of constants and other well-known values.  Even after a protocol has been defined and deployment has begun, new values may need to be assigned (e.g., for a new option type in DHCP, or a new encryption or authentication transform for IPsec).  To ensure that such quantities have consistent values and interpretations across all implementations, their assignment must be administered by a central authority.  For IETF protocols, that role is provided by the Internet Assigned Numbers Authority (IANA).&lt;/t>&lt;t> In order for IANA to manage a given namespace prudently, it needs guidelines describing the conditions under which new values can be assigned or when modifications to existing values can be made.  If IANA is expected to play a role in the management of a namespace, IANA must be given clear and concise instructions describing that role.  This document discusses issues that should be considered in formulating a policy for assigning values to a namespace and provides guidelines for authors on the specific text that must be included in documents that place demands on IANA.&lt;/t>&lt;t> This document obsoletes RFC 2434.  This document specifies an Internet Best Current Practices for the Internet Community, and requests discussion and suggestions for improvements.</t></abstract></front>
+<seriesInfo name='BCP' value='26' />
+<seriesInfo name='RFC' value='5226' />
+<format type='TXT' octets='66160' target='http://www.rfc-editor.org/rfc/rfc5226.txt' />
+</reference>
+
+      <reference anchor="RFC6120">
+        <front>
+          <title>Extensible Messaging and Presence Protocol (XMPP): Core</title>
+          <author initials="P." surname="Saint-Andre" fullname="Peter Saint-Andre">
+            <organization>Cisco</organization>
+            <address>
+              <email>psaintan@cisco.com</email>
+            </address>
+          </author>
+          <date month="March" year="2011"/>
+        </front>
+        <seriesInfo name="RFC" value="6120"/>
+        <format type="TXT" target="http://tools.ietf.org/rfc/rfc6120.txt"/>
+      </reference>
+
+<reference anchor='RFC6335'>
+<front>
+<title>Internet Assigned Numbers Authority (IANA) Procedures for the Management of the Service Name and Transport Protocol Port Number Registry</title>
+<author initials='M.' surname='Cotton' fullname='M. Cotton'>
+<organization /></author>
+<author initials='L.' surname='Eggert' fullname='L. Eggert'>
+<organization /></author>
+<author initials='J.' surname='Touch' fullname='J. Touch'>
+<organization /></author>
+<author initials='M.' surname='Westerlund' fullname='M. Westerlund'>
+<organization /></author>
+<author initials='S.' surname='Cheshire' fullname='S. Cheshire'>
+<organization /></author>
+<date year='2011' month='August' />
+<abstract>
+<t>This document defines the procedures that the Internet Assigned Numbers Authority (IANA) uses when handling assignment and other requests related to the Service Name and Transport Protocol Port Number registry.  It also discusses the rationale and principles behind these procedures and how they facilitate the long-term sustainability of the registry.&lt;/t>&lt;t> This document updates IANA's procedures by obsoleting the previous UDP and TCP port assignment procedures defined in Sections 8 and 9.1 of the IANA Allocation Guidelines, and it updates the IANA service name and port assignment procedures for UDP-Lite, the Datagram Congestion Control Protocol (DCCP), and the Stream Control Transmission Protocol (SCTP).  It also updates the DNS SRV specification to clarify what a service name is and how it is registered.  This memo documents an Internet Best Current Practice.</t></abstract></front>
+<seriesInfo name='BCP' value='165' />
+<seriesInfo name='RFC' value='6335' />
+<format type='TXT' octets='79088' target='http://www.rfc-editor.org/rfc/rfc6335.txt' />
+</reference>
+
+<reference anchor='RFC6555'>
+<front>
+<title>Happy Eyeballs: Success with Dual-Stack Hosts</title>
+<author initials='D.' surname='Wing' fullname='D. Wing'>
+<organization /></author>
+<author initials='A.' surname='Yourtchenko' fullname='A. Yourtchenko'>
+<organization /></author>
+<date year='2012' month='April' />
+<abstract>
+<t>When a server's IPv4 path and protocol are working, but the server's IPv6 path and protocol are not working, a dual-stack client application experiences significant connection delay compared to an IPv4-only client.  This is undesirable because it causes the dual- stack client to have a worse user experience.  This document specifies requirements for algorithms that reduce this user-visible delay and provides an algorithm. [STANDARDS-TRACK]</t></abstract></front>
+<seriesInfo name='RFC' value='6555' />
+<format type='TXT' octets='34048' target='http://www.rfc-editor.org/rfc/rfc6555.txt' />
+</reference>
+
+<reference anchor='RFC6570'>
+
+<front>
+<title>URI Template</title>
+<author initials='J.' surname='Gregorio' fullname='J. Gregorio'>
+<organization /></author>
+<author initials='R.' surname='Fielding' fullname='R. Fielding'>
+<organization /></author>
+<author initials='M.' surname='Hadley' fullname='M. Hadley'>
+<organization /></author>
+<author initials='M.' surname='Nottingham' fullname='M. Nottingham'>
+<organization /></author>
+<author initials='D.' surname='Orchard' fullname='D. Orchard'>
+<organization /></author>
+<date year='2012' month='March' />
+<abstract>
+<t>A URI Template is a compact sequence of characters for describing a range of Uniform Resource Identifiers through variable expansion.  This specification defines the URI Template syntax and the process for expanding a URI Template into a URI reference, along with guidelines for the use of URI Templates on the Internet. [STANDARDS-TRACK]</t></abstract></front>
+
+<seriesInfo name='RFC' value='6570' />
+<format type='TXT' octets='79813' target='http://www.rfc-editor.org/rfc/rfc6570.txt' />
+</reference>
+      <reference anchor='RFC6698'>
+        <front>
+          <title>The DNS-Based Authentication of Named Entities (DANE) Transport Layer Security (TLS) Protocol: TLSA</title>
+          <author initials='P.' surname='Hoffman' fullname='P. Hoffman'>
+            <organization />
+          </author>
+          <author initials='J.' surname='Schlyter' fullname='J. Schlyter'>
+            <organization />
+          </author>
+          <date year='2012' month='August' />
+          <abstract>
+            <t>Encrypted communication on the Internet often uses Transport Layer Security (TLS), which depends on third parties to certify the keys used.  This document improves on that situation by enabling the administrators of domain names to specify the keys used in that domain's TLS servers.  This requires matching improvements in TLS client software, but no change in TLS server software. [STANDARDS-TRACK]</t>
+          </abstract>
+        </front>
+        <seriesInfo name='RFC' value='6698' />
+        <format type='TXT' octets='84034' target='http://www.rfc-editor.org/rfc/rfc6698.txt' />
+      </reference>
+
+      <reference anchor='RFC6797'>
+        <front>
+          <title>HTTPS Strict Transport Security (HSTS)</title>
+          <author initials='J.' surname='Hodges' fullname='Jeff Hodges'>
+            <organization />
+          </author>
+          <author initials='C.' surname='Jackson' fullname='Collin Jackson'>
+            <organization />
+          </author>
+          <author initials='A.' surname='Barth' fullname='Adam Jackson'>
+            <organization />
+          </author>
+          <date year='2012' month='November' />
+          <abstract>
+            <t>This specification defines a mechanism enabling web sites to declare themselves accessible only via secure connections and/or for users to be able to direct their user agent(s) to interact with given sites only over secure connections.  This overall policy is referred to as HTTP Strict Transport Security (HSTS).  The policy is declared by web sites via the Strict-Transport-Security HTTP response header field and/or by other means, such as user agent configuration, for example.</t>
+          </abstract>
+        </front>
+        <seriesInfo name='RFC' value='6797' />
+        <format type='TXT' target='http://www.rfc-editor.org/rfc/rfc6797.txt' />
+      </reference>
+
+    </references>
+
+    <section title="Acknowledgements" anchor="acks">
+      <t>Many thanks to Philipp Hancke, Joe Hildebrand, and Tobias Markmann for their implementation feedback.  Thanks also to Dave Cridland, Chris Newton, Max Pritikin, and Joe Salowey for their input on the specification.</t>
+    </section>
+
+  </back>
+</rfc>
